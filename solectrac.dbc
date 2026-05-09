@@ -1,0 +1,190 @@
+VERSION "solectrac-re-0.1"
+
+NS_ :
+	NS_DESC_
+	CM_
+	BA_DEF_
+	BA_
+	VAL_
+	CAT_DEF_
+	CAT_
+	FILTER
+	BA_DEF_DEF_
+	EV_DATA_
+	ENVVAR_DATA_
+	SGTYPE_
+	SGTYPE_VAL_
+	BA_DEF_SGTYPE_
+	BA_SGTYPE_
+	SIG_TYPE_REF_
+	VAL_TABLE_
+	SIG_GROUP_
+	SIG_VALTYPE_
+	SIGTYPE_VALTYPE_
+	BO_TX_BU_
+	BA_DEF_REL_
+	BA_REL_
+	BA_DEF_DEF_REL_
+	BU_SG_REL_
+	BU_EV_REL_
+	BU_BO_REL_
+	SG_MUL_VAL_
+
+BS_:
+
+BU_: BMS Charger MotorECU VehicleController
+
+BO_ 2565931216 VC_Status: 8 VehicleController
+ SG_ VC_State : 7|8@0+ (1,0) [0|255] "" BMS,Charger,MotorECU
+
+BO_ 2565931251 BMS_PackStatus: 8 BMS
+ SG_ Pack_Voltage_Proxy_B2 : 15|8@0+ (1,0) [0|255] "" VehicleController,Charger,MotorECU
+ SG_ Pack_Current : 23|16@0+ (0.1,-3200) [-3200|3353.5] "A" VehicleController,Charger,MotorECU
+
+BO_ 2565931763 BMS_CellSummary: 8 BMS
+ SG_ Cell_Max_mV : 7|16@0+ (1,0) [0|65535] "mV" VehicleController
+ SG_ Cell_Min_mV : 23|16@0+ (1,0) [0|65535] "mV" VehicleController
+ SG_ Cell_Max_Index : 39|8@0+ (1,0) [0|255] "" VehicleController
+ SG_ Cell_Min_Index : 47|8@0+ (1,0) [0|255] "" VehicleController
+ SG_ Cell_Flags : 63|8@0+ (1,0) [0|255] "" VehicleController
+
+BO_ 2565936115 BMS_CellVoltages_0: 8 BMS
+ SG_ Cell_00_V : 7|16@0+ (0.001,0) [0|65.535] "V" VehicleController
+ SG_ Cell_01_V : 23|16@0+ (0.001,0) [0|65.535] "V" VehicleController
+ SG_ Cell_02_V : 39|16@0+ (0.001,0) [0|65.535] "V" VehicleController
+ SG_ Cell_03_V : 55|16@0+ (0.001,0) [0|65.535] "V" VehicleController
+
+BO_ 2565936371 BMS_CellVoltages_1: 8 BMS
+ SG_ Cell_04_V : 7|16@0+ (0.001,0) [0|65.535] "V" VehicleController
+ SG_ Cell_05_V : 23|16@0+ (0.001,0) [0|65.535] "V" VehicleController
+ SG_ Cell_06_V : 39|16@0+ (0.001,0) [0|65.535] "V" VehicleController
+ SG_ Cell_07_V : 55|16@0+ (0.001,0) [0|65.535] "V" VehicleController
+
+BO_ 2565936627 BMS_CellVoltages_2: 8 BMS
+ SG_ Cell_08_V : 7|16@0+ (0.001,0) [0|65.535] "V" VehicleController
+ SG_ Cell_09_V : 23|16@0+ (0.001,0) [0|65.535] "V" VehicleController
+ SG_ Cell_10_V : 39|16@0+ (0.001,0) [0|65.535] "V" VehicleController
+ SG_ Cell_11_V : 55|16@0+ (0.001,0) [0|65.535] "V" VehicleController
+
+BO_ 2565936883 BMS_CellVoltages_3: 8 BMS
+ SG_ Cell_12_V : 7|16@0+ (0.001,0) [0|65.535] "V" VehicleController
+ SG_ Cell_13_V : 23|16@0+ (0.001,0) [0|65.535] "V" VehicleController
+ SG_ Cell_14_V : 39|16@0+ (0.001,0) [0|65.535] "V" VehicleController
+ SG_ Cell_15_V : 55|16@0+ (0.001,0) [0|65.535] "V" VehicleController
+
+BO_ 2565937139 BMS_CellVoltages_4: 8 BMS
+ SG_ Cell_16_V : 7|16@0+ (0.001,0) [0|65.535] "V" VehicleController
+ SG_ Cell_17_V : 23|16@0+ (0.001,0) [0|65.535] "V" VehicleController
+ SG_ Cell_18_V : 39|16@0+ (0.001,0) [0|65.535] "V" VehicleController
+ SG_ Cell_19_V : 55|16@0+ (0.001,0) [0|65.535] "V" VehicleController
+
+BO_ 2565953011 BMS_ModuleTemps_0: 8 BMS
+ SG_ Temp_00_C : 7|8@0+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Temp_01_C : 15|8@0+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Temp_02_C : 23|8@0+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Temp_03_C : 31|8@0+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Temp_04_C : 39|8@0+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Temp_05_C : 47|8@0+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Temp_06_C : 55|8@0+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Temp_07_C : 63|8@0+ (1,-40) [-40|215] "degC" VehicleController
+
+BO_ 2565953267 BMS_ModuleTemps_1: 8 BMS
+ SG_ Temp_08_C : 7|8@0+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Temp_09_C : 15|8@0+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Temp_10_C : 23|8@0+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Temp_11_C : 31|8@0+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Temp_12_C : 39|8@0+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Temp_13_C : 47|8@0+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Temp_14_C : 55|8@0+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Temp_15_C : 63|8@0+ (1,-40) [-40|215] "degC" VehicleController
+
+BO_ 2565953523 BMS_ModuleTemps_2: 8 BMS
+ SG_ Temp_16_C : 7|8@0+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Temp_17_C : 15|8@0+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Temp_18_C : 23|8@0+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Temp_19_C : 31|8@0+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Temp_20_C : 39|8@0+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Temp_21_C : 47|8@0+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Temp_22_C : 55|8@0+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Temp_23_C : 63|8@0+ (1,-40) [-40|215] "degC" VehicleController
+
+BO_ 2565953779 BMS_ModuleTemps_3: 8 BMS
+ SG_ Temp_24_C : 7|8@0+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Temp_25_C : 15|8@0+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Temp_26_C : 23|8@0+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Temp_27_C : 31|8@0+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Temp_28_C : 39|8@0+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Temp_29_C : 47|8@0+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Temp_30_C : 55|8@0+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Temp_31_C : 63|8@0+ (1,-40) [-40|215] "degC" VehicleController
+
+BO_ 2565954035 BMS_ModuleTemps_4: 8 BMS
+ SG_ Temp_32_C : 7|8@0+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Temp_33_C : 15|8@0+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Temp_34_C : 23|8@0+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Temp_35_C : 31|8@0+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Temp_36_C : 39|8@0+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Temp_37_C : 47|8@0+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Temp_38_C : 55|8@0+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Temp_39_C : 63|8@0+ (1,-40) [-40|215] "degC" VehicleController
+
+BO_ 2566869221 Charger_Telemetry: 8 Charger
+ SG_ Charger_Status : 0|8@1+ (1,0) [0|255] "" BMS,VehicleController
+ SG_ Charger_Voltage_Est : 8|16@1+ (0.3333333,0) [0|21845] "V" BMS,VehicleController
+ SG_ Charger_Current : 24|16@1+ (0.1,0) [0|6553.5] "A" BMS,VehicleController
+
+BO_ 2566857162 Motor_Telemetry: 8 MotorECU
+ SG_ Throttle_Raw : 0|8@1+ (1,0) [0|255] "" VehicleController
+ SG_ Motor_RPM_Magnitude : 16|16@1+ (1,-3200) [-3200|62335] "rpm" VehicleController
+ SG_ Controller_Temp_C : 40|8@1+ (1,-40) [-40|215] "degC" VehicleController
+ SG_ Pedal_Direction : 56|8@1+ (1,0) [0|255] "" VehicleController
+
+
+CM_ "Solectrac electric tractor CAN database (J1939). Reverse-engineered from observed CAN traffic; not vendor documentation. Do NOT use for safety-relevant decisions. Signals tagged TENTATIVE in their comments are not yet cross-validated against a vendor spec.";
+
+CM_ BU_ BMS "Battery management system. J1939 source address 0xF3.";
+CM_ BU_ Charger "External charger. J1939 source address 0xE5. Suppresses many BMS frames while not active.";
+CM_ BU_ MotorECU "Motor controller / drive ECU. J1939 source address 0xCA. FF21 frame is suppressed entirely while charging (traction contactors open).";
+CM_ BU_ VehicleController "Vehicle controller. J1939 source address 0xD0. Broadcasts a minimal F100 heartbeat with a state byte.";
+
+CM_ BO_ 2565931216 "PGN F100 from VehicleController (0xD0). Minimal heartbeat; only byte 0 is decoded so far.";
+CM_ SG_ 2565931216 VC_State "Vehicle-controller state byte. 0x00=init, 0x0C=ready. Other values observed but not yet identified.";
+
+CM_ BO_ 2565931251 "PGN F100 from BMS (0xF3). Pack-level status. Bytes 3-4 (0-based 2-3) carry signed pack current; other bytes not yet fully decoded.";
+CM_ SG_ 2565931251 Pack_Voltage_Proxy_B2 "Byte 2 (0-based 1). Tracks loosely with pack voltage in some captures; relationship not confirmed. TENTATIVE.";
+CM_ SG_ 2565931251 Pack_Current "Signed pack current. On the wire it is a biased uint16 with raw 0x7D00 = 0 A and 0.1 A/bit (positive = discharge, negative = charge); the DBC expresses this with sign=signed and offset=-3200. Cross-validated against the dashboard reading from 1-58 A across the 0x7D->0x7E and 0x7F->0x80 high-byte rollovers.";
+
+CM_ BO_ 2565931763 "PGN F102 from BMS. Cell min/max summary across the whole pack.";
+CM_ SG_ 2565931763 Cell_Max_mV "Highest single-cell voltage in the pack, mV.";
+CM_ SG_ 2565931763 Cell_Min_mV "Lowest single-cell voltage in the pack, mV.";
+CM_ SG_ 2565931763 Cell_Max_Index "Index of the cell reporting Cell_Max_mV. Numbering matches BMS_CellVoltages_*. TENTATIVE.";
+CM_ SG_ 2565931763 Cell_Min_Index "Index of the cell reporting Cell_Min_mV. TENTATIVE.";
+CM_ SG_ 2565931763 Cell_Flags "Byte 7. Spread/flags field, semantics not yet decoded. TENTATIVE.";
+
+CM_ BO_ 2565936115 "PGN F113 from BMS. Cell voltages 0..3.";
+CM_ BO_ 2565936371 "PGN F114 from BMS. Cell voltages 4..7.";
+CM_ BO_ 2565936627 "PGN F115 from BMS. Cell voltages 8..11.";
+CM_ BO_ 2565936883 "PGN F116 from BMS. Cell voltages 12..15.";
+CM_ BO_ 2565937139 "PGN F117 from BMS. Cell voltages 16..19. PGNs F118..F13C are reserved by the BMS for larger packs but unused on this 20-cell tractor.";
+
+CM_ BO_ 2565953011 "PGN F155 from BMS. Module temperatures 0..7. J1939-style +40 C raw offset already removed by the scaling.";
+CM_ BO_ 2565953267 "PGN F156 from BMS. Module temperatures 8..15.";
+CM_ BO_ 2565953523 "PGN F157 from BMS. Module temperatures 16..23.";
+CM_ BO_ 2565953779 "PGN F158 from BMS. Module temperatures 24..31. The actual number of populated channels on this tractor is not yet confirmed; unused channels broadcast as 0 and should be filtered out (0 raw = -40 C).";
+CM_ BO_ 2565954035 "PGN F159 from BMS. Module temperatures 32..39. PGNs F15A..F15E are reserved for larger packs.";
+
+CM_ BO_ 2566869221 "PGN FF50 from external Charger (0xE5). Charger output telemetry.";
+CM_ SG_ 2566869221 Charger_Status "Charger status byte. 0x02 = active. Other values not yet identified.";
+CM_ SG_ 2566869221 Charger_Voltage_Est "Charger output voltage. TENTATIVE: scale of 1/3 V/bit is a guess that matches mid-charge captures within a few volts; confirm against a full-SOC capture before trusting. To recover the unscaled raw value, multiply the decoded value by 3.";
+CM_ SG_ 2566869221 Charger_Current "Charger output current. 0.1 A/bit, little-endian uint16.";
+
+CM_ BO_ 2566857162 "PGN FF21 from MotorECU (0xCA). Motor / drive telemetry. Suppressed entirely while charging.";
+CM_ SG_ 2566857162 Throttle_Raw "Throttle pedal position, raw. Observed range roughly 0..0x34 (0..52). Mapping to a percentage is not yet confirmed.";
+CM_ SG_ 2566857162 Motor_RPM_Magnitude "Motor RPM magnitude (always >= 0). On the wire it is a biased little-endian uint16: raw 0x0C80 = 0 rpm; the DBC expresses this with offset=-3200. Sign of motion comes from Pedal_Direction, not from this field. Verified against a 0..2500 rpm acceleration trace.";
+CM_ SG_ 2566857162 Controller_Temp_C "Motor controller temperature. J1939 +40 C offset; raw 0 means 'not present in this frame' and should be filtered.";
+CM_ SG_ 2566857162 Pedal_Direction "Foot-pedal selector. 0x10 = idle / neither pedal, 0x14 = forward pedal pressed, 0x18 = reverse pedal pressed. Verified by correlating driving-trace transitions with operator-reported maneuvers.";
+
+
+VAL_ 2565931216 VC_State 0 "init" 12 "ready" ;
+VAL_ 2566869221 Charger_Status 2 "active" ;
+VAL_ 2566857162 Pedal_Direction 16 "idle" 20 "forward" 24 "reverse" ;
