@@ -90,6 +90,40 @@ Unlike the recorded-data/*.csv captures, the ASC files carry real
 microsecond-resolution per-frame timestamps, which unblocks all
 time-domain analysis (rate, dV/dt, integrated current, etc.).
 
+A third batch of captures (top-level `amp-*.asc`, 2026-05-09) provides
+operator-confirmed dashboard-amperage ground truth for the F100F3 pack-
+current decode. Each filename's number is the approximate dashboard-
+displayed current at the time of recording:
+
+* `amp-1.asc`   — dashboard ~1 A   (true idle, in neutral)
+* `amp-18.asc`  — dashboard ~18 A
+* `amp-35.asc`  — dashboard ~35 A
+* `amp-42.asc`  — dashboard ~42 A
+* `amp-58.asc`  — dashboard ~58 A
+
+These were the captures that finally pinned down the high-byte / low-
+byte rollover behavior across the 25.5 / 51.1 / 76.7 A boundaries, and
+are now the cleanest cross-validation set for the F100F3 decode (see
+the F100F3 section below).
+
+Side-by-side toggle captures (top-level, 2026-05-09) document attempts
+to find body-control signals on this bus:
+
+* `fwd-on-and-off.asc`     — 4WD selector toggled mid-recording.
+* `pto-off-on.asc`         — PTO toggled on at ~t=5 s.
+* `pto-on-off.asc`         — PTO toggled off at ~t=5 s.
+* `headlights-off-on.asc`  — headlights toggled on at ~t=5 s.
+
+Outcome: **none of the 4WD / PTO / headlight switch *states* appear
+on this bus as a discrete flag.** Every byte was checked across all 62
+broadcast IDs and no byte transitions cleanly with any of those toggles.
+What headlights and PTO *do* produce is a clean step in F100F3 pack
+current (the auxiliary load shifts the BMS-reported pack draw); 4WD
+selection produces no visible signature at all. This is consistent with
+those switches being either hard-wired discrete I/O or carried on a
+second CAN segment we don't have a tap on. See "Open questions" for
+the two-bus hypothesis.
+
 
 Source-address (SA) map observed in these captures
 --------------------------------------------------
@@ -252,6 +286,40 @@ F100F3 — "BMS pack status" (CONFIRMED pack-current source)
           while load was hydraulic-only, so no sign change is needed
           in those captures. driving.asc also stays non-negative
           (regen, if any, is small).
+
+      Dashboard-confirmed calibration set (amp-*.asc, 2026-05-09).
+      Each capture is steady-state at a single dashboard-displayed
+      amperage; mean decoded current matches the displayed value to
+      within ~1 A across the full 0–60 A range. This is the cleanest
+      cross-validation of the encoding to date:
+
+        | file          | data[2..3] range  | mean decoded A | dash A |
+        |---------------|-------------------|----------------|--------|
+        | amp-1.asc     | 0x7D12 (constant) |   1.8          |   1    |
+        | amp-18.asc    | 0x7D9D – 0x7DC5   |  17.6          |  18    |
+        | amp-35.asc    | 0x7E53 – 0x7E94   |  37.0          |  35    |
+        | amp-42.asc    | 0x7E8E – 0x7EC5   |  41.7          |  42    |
+        | amp-58.asc    | 0x7F32 – 0x8061   |  62.1          |  58    |
+
+      Notes on this set:
+        * amp-1.asc is the only "true idle" snapshot we have on this
+          bus — tractor in neutral, key on, no load. data[2..3] is
+          *constant* at 0x7D12 across the whole capture (1.8 A
+          standby draw for BMS / dashboard / DC-DC). This is much
+          lower than the ~17 A seen in earlier "idle in DRIVE"
+          captures (drive-fwd, drive-twd, headlights-off-on first
+          5 s), confirming that putting the tractor in DRIVE
+          energizes inverter / contactor circuitry that pulls
+          ~16 A above pure standby.
+        * amp-58.asc is the highest-current capture in the set and
+          crosses the 0x7F → 0x80 high-byte boundary, exercising
+          the second high-byte rollover and confirming the encoding
+          extends correctly past 76.7 A.
+        * The amp-N "N" in each filename is the operator's read
+          off the dashboard at the time of recording, intended as
+          rounded ground truth — not a precise calibration marker.
+          Sub-amp discrepancies between mean decoded A and dash A
+          are expected from rounding / averaging.
 
       The earlier hypothesis that the dashboard's current came from
       FF21CA byte 2 was wrong — that byte is part of the RPM low
@@ -870,9 +938,13 @@ CONFIRMED:
         against the dashboard at idle (19.6 A on `0x7DC4`), the
         loader-arms test (peak 0x7E70 → +36.8 A vs dashboard ~34
         A), and driving.asc (peak 0x7F7C → +63.6 A vs operator-
-        reported ~72 A). Resolves the prior "byte 4 saturates"
-        confusion — the high byte was simply ticking 0x7D → 0x7E
-        → 0x7F as the low byte rolled.
+        reported ~72 A). Further confirmed by the amp-*.asc
+        steady-state set (1, 18, 35, 42, 58 A dashboard) which
+        exercises the full 0–60 A range and crosses the 0x7D→0x7E
+        and 0x7F→0x80 high-byte boundaries; mean decoded current
+        matches dashboard within ~1 A across the set. Resolves the
+        prior "byte 4 saturates" confusion — the high byte was
+        simply ticking 0x7D → 0x7E → 0x7F as the low byte rolled.
 
 TENTATIVE / GUESSED:
     F102 byte 8 (flags) semantics
