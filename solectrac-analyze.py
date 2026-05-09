@@ -504,7 +504,7 @@ def write_decoders(out_dir: Path):
 
 
 def write_ids(id_counts: dict, out_dir: Path):
-    """Emit the per-unique-ID J1939 decode table as ids.csv and stdout."""
+    """Emit the per-unique-ID J1939 decode table to ids.csv."""
     path = out_dir / "ids.csv"
     decoded = []
     for (can_id, is_ext), n in id_counts.items():
@@ -521,15 +521,6 @@ def write_ids(id_counts: dict, out_dir: Path):
                         d["pf"], d["ps"], d["sa"], d["pgn"], d["pdu"],
                         d["ps_role"], d["name"]])
     print(f"wrote {path} ({len(decoded)} unique IDs)")
-
-    print()
-    print(f"{'ID':<10} {'count':>6} {'P':>1} {'DP':>2} "
-          f"{'PF':>2} {'PS':>2} {'SA':>2} {'PGN':>6} {'PDU':<4} {'name'}")
-    for d, n in decoded:
-        print(f"{d['id']:<10} {n:>6} "
-              f"{d['priority']!s:>1} {d['dp']!s:>2} "
-              f"{d['pf']:>2} {d['ps']:>2} {d['sa']:>2} "
-              f"{d['pgn']:>6} {d['pdu']:<4} {d['name']}")
 
 
 def values_for(rows: list, scenario: str, signal: str):
