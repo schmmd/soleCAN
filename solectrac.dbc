@@ -38,7 +38,7 @@ BO_ 2565931216 VC_Status: 8 VehicleController
  SG_ VC_State : 7|8@0+ (1,0) [0|255] "" BMS,Charger,MotorECU
 
 BO_ 2565931251 BMS_PackStatus: 8 BMS
- SG_ Pack_Voltage_Proxy_B2 : 15|8@0+ (1,0) [0|255] "" VehicleController,Charger,MotorECU
+ SG_ Pack_Voltage : 15|8@0+ (0.1,76.8) [76.8|102.3] "V" VehicleController,Charger,MotorECU
  SG_ Pack_Current : 23|16@0+ (0.1,-3200) [-3200|3353.5] "A" VehicleController,Charger,MotorECU
 
 BO_ 2565931763 BMS_CellSummary: 8 BMS
@@ -133,7 +133,7 @@ BO_ 2566869221 Charger_Telemetry: 8 Charger
  SG_ Charger_Voltage_Est : 8|16@1+ (0.3333333,0) [0|21845] "V" BMS,VehicleController
  SG_ Charger_Current : 24|16@1+ (0.1,0) [0|6553.5] "A" BMS,VehicleController
 
-BO_ 2566857162 Motor_Telemetry: 8 MotorECU
+BO_ 2365530570 Motor_Telemetry: 8 MotorECU
  SG_ Throttle_Raw : 0|8@1+ (1,0) [0|255] "" VehicleController
  SG_ Motor_RPM_Magnitude : 16|16@1+ (1,-3200) [-3200|62335] "rpm" VehicleController
  SG_ Controller_Temp_C : 40|8@1+ (1,-40) [-40|215] "degC" VehicleController
@@ -151,7 +151,7 @@ CM_ BO_ 2565931216 "PGN F100 from VehicleController (0xD0). Minimal heartbeat; o
 CM_ SG_ 2565931216 VC_State "Vehicle-controller state byte. 0x00=init, 0x0C=ready. Other values observed but not yet identified.";
 
 CM_ BO_ 2565931251 "PGN F100 from BMS (0xF3). Pack-level status. Bytes 3-4 (0-based 2-3) carry signed pack current; other bytes not yet fully decoded.";
-CM_ SG_ 2565931251 Pack_Voltage_Proxy_B2 "Byte 2 (0-based 1). Tracks loosely with pack voltage in some captures; relationship not confirmed. TENTATIVE.";
+CM_ SG_ 2565931251 Pack_Voltage "Pack voltage at the BMS terminals, 0.1 V/bit with a +76.8 V offset. Confirmed by linear regression against 20 * mean cell mV across 24 captures spanning b2 = 53..65 (82.0..83.3 V); residuals < 0.55 V. Resolution is coarse (0.1 V/bit means 8 mV per cell at 20s), but matches measured pack voltage well. Saturates below 76.8 V; NMC chemistry on this tractor never operates that low.";
 CM_ SG_ 2565931251 Pack_Current "Signed pack current. On the wire it is a biased uint16 with raw 0x7D00 = 0 A and 0.1 A/bit (positive = discharge, negative = charge); the DBC expresses this with sign=signed and offset=-3200. Cross-validated against the dashboard reading from 1-58 A across the 0x7D->0x7E and 0x7F->0x80 high-byte rollovers.";
 
 CM_ BO_ 2565931763 "PGN F102 from BMS. Cell min/max summary across the whole pack.";
@@ -175,16 +175,16 @@ CM_ BO_ 2565954035 "PGN F159 from BMS. Module temperatures 32..39. PGNs F15A..F1
 
 CM_ BO_ 2566869221 "PGN FF50 from external Charger (0xE5). Charger output telemetry.";
 CM_ SG_ 2566869221 Charger_Status "Charger status byte. 0x02 = active. Other values not yet identified.";
-CM_ SG_ 2566869221 Charger_Voltage_Est "Charger output voltage. TENTATIVE: scale of 1/3 V/bit is a guess that matches mid-charge captures within a few volts; confirm against a full-SOC capture before trusting. To recover the unscaled raw value, multiply the decoded value by 3.";
+CM_ SG_ 2566869221 Charger_Voltage_Est "Charger output voltage. TENTATIVE: scale of 1/3 V/bit is a guess that matches mid-charge captures within a few volts. The two ignition-with/without-charger captures contain FF50 frames but do NOT show an active charging session (data[3] LSB always 0; data[1] sweeps independently of pack voltage), so they did not anchor the scaling. A capture during an actual charge cycle - charger plugged in and drawing real current at a partial SOC - is needed to confirm. To recover the unscaled raw value, multiply the decoded value by 3.";
 CM_ SG_ 2566869221 Charger_Current "Charger output current. 0.1 A/bit, little-endian uint16.";
 
-CM_ BO_ 2566857162 "PGN FF21 from MotorECU (0xCA). Motor / drive telemetry. Suppressed entirely while charging.";
-CM_ SG_ 2566857162 Throttle_Raw "Throttle pedal position, raw. Observed range roughly 0..0x34 (0..52). Mapping to a percentage is not yet confirmed.";
-CM_ SG_ 2566857162 Motor_RPM_Magnitude "Motor RPM magnitude (always >= 0). On the wire it is a biased little-endian uint16: raw 0x0C80 = 0 rpm; the DBC expresses this with offset=-3200. Sign of motion comes from Pedal_Direction, not from this field. Verified against a 0..2500 rpm acceleration trace.";
-CM_ SG_ 2566857162 Controller_Temp_C "Motor controller temperature. J1939 +40 C offset; raw 0 means 'not present in this frame' and should be filtered.";
-CM_ SG_ 2566857162 Pedal_Direction "Foot-pedal selector. 0x10 = idle / neither pedal, 0x14 = forward pedal pressed, 0x18 = reverse pedal pressed. Verified by correlating driving-trace transitions with operator-reported maneuvers.";
+CM_ BO_ 2365530570 "PGN FF21 from MotorECU (0xCA). Motor / drive telemetry. Frame priority is 3 (not 6), so the on-the-wire 29-bit ID is 0x0CFF21CA. Suppressed entirely while charging (traction contactors open).";
+CM_ SG_ 2365530570 Throttle_Raw "Throttle pedal position, raw. Observed range roughly 0..0x34 (0..52). Mapping to a percentage is not yet confirmed.";
+CM_ SG_ 2365530570 Motor_RPM_Magnitude "Motor RPM magnitude (always >= 0). On the wire it is a biased little-endian uint16: raw 0x0C80 = 0 rpm; the DBC expresses this with offset=-3200. Sign of motion comes from Pedal_Direction, not from this field. Verified against a 0..2500 rpm acceleration trace.";
+CM_ SG_ 2365530570 Controller_Temp_C "Motor controller temperature. J1939 +40 C offset; raw 0 means 'not present in this frame' and should be filtered.";
+CM_ SG_ 2365530570 Pedal_Direction "Foot-pedal selector. 0x10 = idle / neither pedal, 0x14 = forward pedal pressed, 0x18 = reverse pedal pressed. Verified by correlating driving-trace transitions with operator-reported maneuvers.";
 
 
 VAL_ 2565931216 VC_State 0 "init" 12 "ready" ;
 VAL_ 2566869221 Charger_Status 2 "active" ;
-VAL_ 2566857162 Pedal_Direction 16 "idle" 20 "forward" 24 "reverse" ;
+VAL_ 2365530570 Pedal_Direction 16 "idle" 20 "forward" 24 "reverse" ;
