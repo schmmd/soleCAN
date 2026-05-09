@@ -12,13 +12,20 @@ Tractor / pack context
 ----------------------
 
 * Tractor: Solectrac electric tractor (~70 V class).
-* Pack chemistry inferred from cell voltages: NMC (not LFP).
-    - Resting cells in the ~3.65 V range at ~40% reported SOC matches a
-      partial-discharge NMC OCV curve, not LFP's flat plateau.
-* Pack topology: 20 series cells (s = 20). Module-temperature frames carry
-  enough channels for several thermistors per module; 8 channels per frame
-  across F155..F15E means the BMS reserves space for up to 80 channels even
-  though far fewer are actually populated on this pack.
+* Pack chemistry: NMC (vendor screenshot labels it "NiCoMn"), confirming
+  what the OCV-curve shape already suggested.
+* Pack topology: **20 series cells** (s = 20), now CONFIRMED both from
+  per-cell PGN coverage and from the vendor BMS GUI ("Cells in series: 20",
+  "Online cell count: 20"). Module-temperature frames reserve up to 80
+  channels across F155..F15E but the pack has **7 temperature probes**
+  ("Temp. probe count: 7" / "Online temp. count: 7" in the GUI) — anything
+  beyond the first 7 channels in `temps.csv` is padding/noise.
+* Pack capacity / ratings (from the GUI, not derivable from CAN alone):
+    - Rated capacity: 300 Ah
+    - Rated total voltage: 72.0 V nominal
+    - Rated discharge current: 300 A
+    - Rated DC charge: 78 A
+    - Rated AC charge: 39 A
 * SOC at time of capture: ~40% (operator-reported).
 * Ambient: ~55 °F (~13 °C); tractor was outdoors.
 * The PTO/drive inverter and motor controller do **not** appear on the bus
@@ -93,15 +100,47 @@ F155..F15E — "BMS module temps 8N..8N+7"
 
 F102F3 — "BMS cell min/max summary"
     Carries pack-wide cell statistics. We use:
-      * a max-cell mV (BE u16)
-      * a min-cell mV (BE u16)
-      * spread = max - min (mV)
-      * a byte that appears to encode the index of the lowest cell
-      * status/flag bits in another byte
+      * bytes 1..2 (BE u16) = max-cell mV
+      * bytes 3..4 (BE u16) = min-cell mV
+      * byte 5            = max-cell **number, 1-based** (CONFIRMED)
+      * byte 6            = min-cell **number, 1-based** (CONFIRMED)
+      * byte 8            = status/flag bits
+      * spread = max - min (mV) — derived
       * a coarse pack-voltage estimate (sum of 20 × cell average), kept
         as a sanity check
-    CONFIRMED for max/min/spread; index/flag byte assignments are
-    TENTATIVE — they are stable but their *labels* are guessed.
+    CONFIRMED for max/min/spread.
+
+    Indexing convention (resolved by row-order correlation between F102
+    frames and surrounding F113..F117 cell-voltage frames in
+    recorded-data/charging.csv):
+
+      * byte5/byte6 are **1-based** cell numbers as the BMS GUI displays
+        them (e.g. "Max cell #19").
+      * To map to the parser's 0-based `cell_index` in cells.csv,
+        subtract 1: BMS cell N = decoder cell_index N-1.
+      * Cross-check: in the smallest-spread frames (3 mV) of
+        recorded-data/charging.csv, F102 reports byte5=16, byte6=1,
+        max=3649 mV, min=3646 mV. The contemporaneous per-cell snapshot
+        shows decoder cell_index 15 at 3649 mV (= BMS cell #16 ✓) and
+        decoder cell_index 0 as the lowest at 3645 mV (= BMS cell #1 ✓).
+      * The vendor screenshot's "Max cell #19 / Min cell #2" therefore
+        corresponds to decoder cell_index 18 and cell_index 1.
+
+    Minor caveat: F102's reported min_mv is occasionally 1 mV higher
+    than the actual lowest voltage seen in the per-cell PGN snapshot
+    around it (e.g. 3646 vs 3645). Two plausible explanations: brief
+    timing skew between the F102 summary computation and the per-cell
+    sweep, or light filtering inside the BMS. The *index* still
+    correctly points at the right cell, just with a slightly stale mV.
+
+    Tie-breaking observation: when several cells are tied at the max,
+    the BMS appears to report the lowest-index winner. Across 124
+    smallest-spread frames where decoder cell_index {15, 17, 18} were
+    all tied at 3649 mV, F102 byte5 was always 16 (= cell #16, i.e.
+    decoder index 15, the lowest of the tied set).
+
+    Smallest spread observed across all captures: **3 mV** (124 frames,
+    all in recorded-data/charging.csv).
 
 F100F3 — "BMS pack status (incl. |I|)"
     * Bytes 2..3: a 16-bit field that scales like a pack-voltage proxy.
@@ -159,6 +198,107 @@ F100D0 — "VC heartbeat"
     Other bytes change but haven't been decoded.
 
 
+Vendor BMS GUI screenshot — provenance and ground-truth values
+--------------------------------------------------------------
+
+A screenshot of the vendor BMS GUI (an "Intelligent Battery Management
+System" tool, opened in Excel as "300Ah Battery - Excel") has been used as
+out-of-band ground truth. Key observations:
+
+* Footer marking: **"Classification | ESCORTS-INTERNAL"**. The document
+  originated inside Escorts (now Escorts Kubota Ltd, Faridabad, India),
+  not Solectrac. The BMS is therefore a third-party module that Escorts
+  also uses on their own electric tractor program — likely the same OEM
+  pack-and-BMS bundle is supplied to both. If a vendor protocol PDF can
+  be located via that route, it would resolve most of the remaining
+  TENTATIVE assumptions.
+* GUI tabs visible: System overview, Real time info, Parameter
+  Calibration, Force control, Firmware upgrading, History data.
+* Firmware version: 2.1.8 (3401e6a).
+* Snapshot timestamp: 2022/3/23 14:19:06 UTC+08, uptime 2m52s. Time
+  zone and styling indicate a Chinese OEM authored the GUI; the GUI also
+  exposes a "DTU" (cellular modem) panel showing GSM/GPRS state, which is
+  consistent with that OEM family but irrelevant to the CAN decode.
+* Snapshot state — useful as fixed reference points:
+    - Running mode: "Calibrating"
+    - Wake-up signal: "KL15" (automotive ignition-line nomenclature)
+    - SOC: 0.0 %  (Initial SOC: 50.0 %; SOH: 100.0 %)
+    - Pack voltage: 69.2 V; pack current: 0.0 A
+    - Avg cell volt: 3.458 V; avg temp: 28 °C
+    - Max cell: #19 at 3.462 V; Min cell: #2 at 3.452 V; spread 0.010 V
+    - All 7 temp probes at 28 °C
+    - Charger: Not Connected / Not Charging / 0.0 V / 0.0 A
+    - Active alarm: "LowSoc", level 2, count 1
+* Cross-check: avg cell 3.458 V × 20 cells = 69.16 V matches displayed
+  pack voltage 69.2 V — confirms the parser's `pack_v_estimate = 20 ×
+  mean cell mV` formula.
+
+Implications for decoding work the screenshot does *not* close out:
+
+* Running-mode vocabulary includes at least "Calibrating" plus the
+  parser's current "init" (0x00) and "ready" (0x0C). "Charging",
+  "Discharging", "Fault", "Sleep" are likely. The full enumeration of
+  F100D0 byte 0 (and probably an analogous BMS-side mode byte in
+  F106F3) cannot be filled in from a single snapshot.
+* SOC and SOH are not yet decoded from any captured PGN. Candidate
+  homes: F104, F106, F107, F108. With SOC=0% and SOH=100% in the
+  screenshot, the values are not specific enough to grep for; richer
+  states are needed to pin them down.
+* Alarms are reported with severity ("lvl 2"), implying a multi-level
+  alarm word — likely in F108. Not yet decoded.
+* Wake-up signal source ("KL15") implies an ignition-status bit
+  somewhere in the BMS broadcasts. Not yet identified.
+
+Decoder errata exposed by the screenshot:
+
+* The **"Cells in parallel: 20"** field on the GUI almost certainly
+  refers to parallel groups internal to the pack (20S20P × ~15 Ah cells
+  ≈ 300 Ah), not anything visible on CAN. Don't confuse with series
+  count.
+* The 300 A rated discharge limit is **inconsistent** with the parser's
+  current "F100 byte 4 at 0.1 A/bit" if byte 4 is uint8 — that scaling
+  caps at 25.5 A. Either:
+    - the LSB is actually closer to ~1.25 A/bit (full scale 318 A), or
+    - pack current is a 16-bit field elsewhere in F100, or
+    - byte 4 is something other than pack current.
+  This contradicts the existing CONFIRMED note on F100 byte 4. The
+  empirical match against charger current during charging.csv (~tens
+  of A range) doesn't rule out a larger LSB, since charging never
+  approaches 300 A. Re-evaluate with a driving capture that pulls real
+  load. Status of F100 byte 4 should probably be downgraded from
+  CONFIRMED to TENTATIVE pending that check.
+
+
+Source-CSV timestamp column is unusable
+---------------------------------------
+
+The "Time Stamp" column in recorded-data/*.csv is essentially a single
+constant value across an entire capture (e.g. `62336000` is shared by
+nearly all 70,920 rows of recorded-data/charging.csv, with only sporadic
+increments to `62338000`). After parsing, this propagates into the
+output CSVs:
+
+    cells.csv         — 8960 rows, 1 unique timestamp
+    cell_summary.csv  — 4470 rows, 1 unique timestamp
+
+Consequences:
+
+* Any timestamp-based join between cells / temps / cell_summary / etc.
+  is meaningless.
+* Time-derivative quantities (dV/dt, dT/dt, frame rate, integrated Ah)
+  cannot be computed from these captures.
+* The only reliable synchronization between F102 and the surrounding
+  F113..F117 cell-voltage stream is **row order within a single source
+  CSV**. The F102 ↔ cell-snapshot correlation that established 1-based
+  indexing was done that way.
+
+Whatever logger produced these CSVs is either not configured to emit
+real per-frame timestamps, or is emitting them in a unit / field the
+parser is not consuming. Worth investigating before recording further
+captures, since fixing this at the source is the cheapest way to
+unlock all time-domain analysis.
+
+
 Confirmed quantitative findings
 -------------------------------
 
@@ -208,6 +348,22 @@ Open questions / future work
   validate the pack-voltage scaling.
 * Confirm whether dashboard is the bus gateway, or whether a dedicated
   gateway ECU sits between the two segments. Either is plausible.
+* Identify the BMS vendor via the Escorts trail. The GUI's
+  "ESCORTS-INTERNAL" classification narrows the candidate OEM list
+  considerably; locating a protocol PDF would close out most TENTATIVE
+  items at once.
+* Re-record with real per-frame timestamps. The current source CSVs'
+  "Time Stamp" column is effectively constant, blocking all
+  time-derivative analysis (see "Source-CSV timestamp column is
+  unusable" section). Find the toggle in whichever logger produced
+  these files, or switch loggers, before the next capture session.
+* Re-validate F100 byte 4 current scaling against a capture that
+  actually pulls high traction current. The 0.1 A/bit assumption is
+  inconsistent with the 300 A rated discharge limit if byte 4 is uint8.
+* Hunt SOC / SOH / alarms in F104 / F106 / F107 / F108. The vendor
+  GUI snapshot gave us a vocabulary (LowSoc lvl 2, Calibrating,
+  KL15, etc.) but not enough states to disambiguate byte positions
+  from a single snapshot.
 
 
 Confidence summary
@@ -216,18 +372,34 @@ Confidence summary
 CONFIRMED:
     cell-voltage scaling (BE u16 mV)
     module-temp scaling (u8 + 40 °C)
-    pack-current magnitude (F100 byte 4 @ 0.1 A/bit)
+    pack topology: 20S, 7 temp probes (vendor GUI)
+    pack chemistry: NMC (vendor GUI: "NiCoMn")
     charger output V (FF50 LE u16 @ 1/3 V/bit)
     charger output A (FF50 LE u16 @ 0.1 A/bit)
     vehicle-controller heartbeat init/ready states (F100D0 byte 0)
+    F102 byte5 = max-cell number, 1-based
+    F102 byte6 = min-cell number, 1-based
+    pack-V estimate formula (20 × mean cell mV) cross-validates against
+        the GUI's displayed pack voltage
 
 TENTATIVE / GUESSED:
-    F102 spread-related index/flag byte assignments
+    F102 byte 8 (flags) semantics
     F100 voltage scaling (bytes 2..3)
+    F100 byte 4 current scaling — matched charger current during
+        charging.csv at 0.1 A/bit, but inconsistent with the 300 A
+        rated discharge limit if byte 4 is uint8. Re-check with a
+        capture that draws real traction load; likely either a
+        larger LSB or a 16-bit field instead.
     FF50 status-byte semantics beyond 0/nonzero
-    All of F106 / F107 / F108
+    All of F104 / F106 / F107 / F108
 
 UNKNOWN:
     pack-current sign
+    SOC / SOH host PGN
+    alarm word location (screenshot showed "LowSoc lvl 2")
+    KL15 / wake-up status bit location
+    full enumeration of running-mode codes (at least Calibrating, plus
+        init/ready already known on F100D0)
     SA 0x12 / 0xCA roles beyond the surface descriptions above
     everything on the (un-tapped) drivetrain bus
+    why the source CSV "Time Stamp" column is effectively constant
