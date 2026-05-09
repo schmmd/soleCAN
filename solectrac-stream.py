@@ -78,6 +78,7 @@ TEMP_OFFSET_C = 40
 def c_to_f(c: float) -> float:
     return c * 9 / 5 + 32
 PACK_CURRENT_LSB_A = 0.1
+PACK_CURRENT_BIAS_RAW = 0x7D00  # F100F3 bytes 2-3 BE, biased so 0x7D00 = 0 A
 CHARGER_V_LSB_V = 1.0 / 3.0
 CHARGER_I_LSB_A = 0.1
 RPM_BIAS = 0x0C80
@@ -207,7 +208,10 @@ def decode(msg: "can.Message", state: State, now: float) -> None:
         elif pgn == PGN_F100:
             if all(b == 0 for b in data):
                 return
-            state.pack_i_a.update(data[3] * PACK_CURRENT_LSB_A, now)
+            raw_i = be16(data[2], data[3])
+            state.pack_i_a.update(
+                (raw_i - PACK_CURRENT_BIAS_RAW) * PACK_CURRENT_LSB_A, now
+            )
             state.decoded += 1
 
         elif pgn == PGN_F102:
@@ -305,8 +309,10 @@ def evaluate_alerts(state: State, mains_v: float, breaker_a: float,
     chgr_active = (state.chgr_status.value is not None
                    and state.chgr_status.value != 0
                    and not state.chgr_status.is_stale(now))
-    if chgr_active and state.pack_v_est.value and state.pack_i_a.value:
-        dc_w = state.pack_v_est.value * state.pack_i_a.value
+    if (chgr_active and state.pack_v_est.value
+            and state.pack_i_a.value is not None
+            and state.pack_i_a.value < 0):
+        dc_w = state.pack_v_est.value * -state.pack_i_a.value
         ac_w = dc_w / max(efficiency, 0.01)
         ac_a = ac_w / max(mains_v, 1.0)
         if ac_a > 0.8 * breaker_a:
@@ -366,21 +372,23 @@ def render_pack(state: State, mains_v: float, efficiency: float,
     if pi is None:
         i_text = Text("---", style="dim")
     else:
-        # We can't read sign from F100 byte 4 alone; infer from charger state.
-        if chgr_active:
-            i_text = Text(f"+{pi:.1f} A (charging)", style="green")
-        elif state.vc_state_raw.value == 0x0C:
-            i_text = Text(f"-{pi:.1f} A (drawing)", style="red")
+        # F100F3 bytes 2-3 BE biased; sign comes from the field itself
+        # (positive = drawing from pack, negative = charging into pack).
+        if pi > 0.05:
+            i_text = Text(f"+{pi:.1f} A (drawing)", style="red")
+        elif pi < -0.05:
+            i_text = Text(f"{pi:.1f} A (charging)", style="green")
         else:
             i_text = Text(f"{pi:.1f} A")
     t.add_row("current", i_text)
 
     if state.pack_v_est.value is not None and pi is not None:
-        signed_i = pi if chgr_active else (-pi if state.vc_state_raw.value == 0x0C else pi)
-        dc_w = state.pack_v_est.value * signed_i
+        # Pack convention: positive current = discharging the pack.
+        # Power into the pack (charging) is negative; power out is positive.
+        dc_w = state.pack_v_est.value * pi
         t.add_row("power", Text(f"{dc_w:+.0f} W"))
-        if chgr_active:
-            ac_w = dc_w / max(efficiency, 0.01)
+        if chgr_active and pi < 0:
+            ac_w = -dc_w / max(efficiency, 0.01)
             ac_a = ac_w / max(mains_v, 1.0)
             t.add_row("AC est",
                       Text(f"~{ac_w:.0f} W  ({ac_a:.1f} A @ {mains_v:.0f} V, "

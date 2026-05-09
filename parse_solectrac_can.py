@@ -98,7 +98,8 @@ TEMP_OFFSET_C = 40
 def c_to_f(c):
     """Celsius -> Fahrenheit, preserving None."""
     return None if c is None else round(c * 9 / 5 + 32, 1)
-PACK_CURRENT_LSB_A = 0.1                  # tentative scaling for F100 byte 4
+PACK_CURRENT_LSB_A = 0.1                  # F100F3 bytes 3-4 BE, 0.1 A/bit
+PACK_CURRENT_BIAS_RAW = 0x7D00            # raw value at 0 A (positive = discharge)
 CHARGER_V_LSB_V = 1.0 / 3.0               # tentative; revisit with full-SOC data
 CHARGER_I_LSB_A = 0.1
 RPM_BIAS = 0x0C80                         # FF21CA bytes 2-3 LE zero-RPM offset
@@ -273,12 +274,13 @@ def decode_file(path: Path, scenario: str, sinks: dict, counts: dict,
                     if all(b == 0 for b in data):
                         sc["skipped_zero"] += 1
                         continue
-                    raw = data[3]                       # byte 4 (0-indexed: 3)
+                    raw = be16(data[2], data[3])  # bytes 3-4 BE, biased u16
+                    amps = (raw - PACK_CURRENT_BIAS_RAW) * PACK_CURRENT_LSB_A
                     sinks["pack_current"].append(
                         (scenario, ts,
-                         f"{data[1]:02X}{data[2]:02X}",  # voltage raw bytes 2-3
-                         raw,
-                         round(raw * PACK_CURRENT_LSB_A, 1))
+                         data[1],                        # voltage proxy byte 2
+                         f"{raw:04X}",                   # raw current bytes 3-4
+                         round(amps, 1))
                     )
                     sc["f100"] += 1
 
@@ -361,7 +363,7 @@ OUTPUT_SCHEMAS = {
                      "byte5", "byte6_min_idx", "flags",
                      "pack_v_estimate"],
     "pack_current": ["file", "timestamp",
-                     "voltage_raw_b2b3", "byte4_raw", "current_a_estimate"],
+                     "voltage_proxy_b2", "current_raw_b3b4", "current_a"],
     "charger":      ["file", "timestamp", "status",
                      "v_raw", "voltage_v_estimate",
                      "i_raw", "current_a"],
@@ -453,8 +455,8 @@ def summarize(counts: dict, sinks: dict):
                   f"(20 cells * mean cell mV)")
         if pc:
             amps = [r[4] for r in pc]
-            print(f"    |I| (F100): {min(amps):.1f}..{max(amps):.1f} A "
-                  f"(0.1 A/bit, tentative)")
+            print(f"    I (F100)  : {min(amps):+.1f}..{max(amps):+.1f} A "
+                  f"(0.1 A/bit, +draw / -charge)")
         if ch:
             v_est = [r[4] for r in ch]
             i = [r[6] for r in ch]
