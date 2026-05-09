@@ -16,7 +16,7 @@ to filter / pivot.
 
 Outputs (written next to the inputs):
     cells.csv          per-cell voltage samples
-    temps.csv          per-channel module temperatures (degC, +40 offset removed)
+    temps.csv          per-channel module temperatures (degC and degF, +40 offset removed)
     cell_summary.csv   max/min cell mV from PGN F102 (and inferred pack voltage)
     pack_current.csv   pack current magnitude inferred from F100 byte 4
     charger.csv        external charger telemetry (PGN FF50, source 0xE5)
@@ -41,11 +41,17 @@ Decoder assumptions (verify against the BMS spec before trusting numerically):
     a tentative 1/3 V/bit estimate.
   * PGN 0xFF21 from 0xCA: motor controller / drive ECU telemetry.
         byte 0     = throttle pedal position (raw, ~0..0x34)
-        bytes 2-3  = motor RPM, little-endian uint16, biased by 0x0C80
+        bytes 2-3  = motor RPM magnitude, little-endian uint16, biased by 0x0C80
                      (rpm = ((b3<<8)|b2) - 0x0C80; verified against a
-                     0->2500 RPM acceleration trace).
+                     0->2500 RPM acceleration trace). Always positive; sign of
+                     motion comes from byte 7.
         byte 5     = controller temperature with the J1939 +40 C offset.
-        byte 7     = 0x14 when drive enabled, 0x00 otherwise.
+        byte 7     = directional pedal state (foot-pedal selector):
+                       0x10 = idle / neither pedal
+                       0x14 = forward pedal pressed
+                       0x18 = reverse pedal pressed
+                     Verified by correlating driving.asc transitions with the
+                     operator's reported back-out-then-forward maneuver.
     Frame is suppressed entirely while charging (contactors open for traction).
 """
 
@@ -87,6 +93,11 @@ PGN_FF50 = 0xFF50   # charger telemetry (V, A)
 PGN_FF21 = 0xFF21   # motor telemetry (RPM, throttle, drive-state, ctrl temp)
 
 TEMP_OFFSET_C = 40
+
+
+def c_to_f(c):
+    """Celsius -> Fahrenheit, preserving None."""
+    return None if c is None else round(c * 9 / 5 + 32, 1)
 PACK_CURRENT_LSB_A = 0.1                  # tentative scaling for F100 byte 4
 CHARGER_V_LSB_V = 1.0 / 3.0               # tentative; revisit with full-SOC data
 CHARGER_I_LSB_A = 0.1
@@ -252,8 +263,9 @@ def decode_file(path: Path, scenario: str, sinks: dict, counts: dict,
                     for slot, b in enumerate(data):
                         if b == 0:
                             continue
+                        temp_c = b - TEMP_OFFSET_C
                         sinks["temps"].append(
-                            (scenario, ts, base + slot, b - TEMP_OFFSET_C)
+                            (scenario, ts, base + slot, temp_c, c_to_f(temp_c))
                         )
                     sc["temps"] += 1
 
@@ -302,9 +314,11 @@ def decode_file(path: Path, scenario: str, sinks: dict, counts: dict,
                 drive_enabled = 1 if data[7] == 0x14 else 0
                 # byte 5 is +40 C-offset; 0 means "not present" in this frame.
                 ctrl_temp_c = (data[5] - TEMP_OFFSET_C) if data[5] else None
+                ctrl_temp_f = c_to_f(ctrl_temp_c)
                 sinks["motor"].append((
                     scenario, ts, rpm, throttle_raw, drive_enabled,
                     "" if ctrl_temp_c is None else ctrl_temp_c,
+                    "" if ctrl_temp_f is None else ctrl_temp_f,
                 ))
                 sc["motor"] += 1
 
@@ -333,7 +347,7 @@ def decode_file(path: Path, scenario: str, sinks: dict, counts: dict,
 
 OUTPUT_SCHEMAS = {
     "cells":        ["file", "timestamp", "cell_index", "voltage_v"],
-    "temps":        ["file", "timestamp", "temp_index", "temp_c"],
+    "temps":        ["file", "timestamp", "temp_index", "temp_c", "temp_f"],
     "cell_summary": ["file", "timestamp",
                      "max_mv", "min_mv", "spread_mv",
                      "byte5", "byte6_min_idx", "flags",
@@ -345,7 +359,8 @@ OUTPUT_SCHEMAS = {
                      "i_raw", "current_a"],
     "vc_status":    ["file", "timestamp", "state_raw", "state_name"],
     "motor":        ["file", "timestamp", "rpm",
-                     "throttle_raw", "drive_enabled", "controller_temp_c"],
+                     "throttle_raw", "drive_enabled",
+                     "controller_temp_c", "controller_temp_f"],
 }
 
 # ids.csv has its own writer because the column set is naturally different.
@@ -440,7 +455,8 @@ def summarize(counts: dict, sinks: dict):
             print(f"    chgr I    : {min(i):.1f}..{max(i):.1f} A")
         if ts:
             ts_c = [r[3] for r in ts]
-            print(f"    temps     : {min(ts_c)}..{max(ts_c)} C")
+            print(f"    temps     : {min(ts_c)}..{max(ts_c)} C  "
+                  f"({c_to_f(min(ts_c))}..{c_to_f(max(ts_c))} F)")
         mt = [r for r in sinks["motor"] if r[0] == scenario]
         if mt:
             rpms = [r[2] for r in mt]

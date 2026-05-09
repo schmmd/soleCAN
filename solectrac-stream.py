@@ -73,6 +73,10 @@ PGN_FF50 = 0xFF50
 PGN_FF21 = 0xFF21
 
 TEMP_OFFSET_C = 40
+
+
+def c_to_f(c: float) -> float:
+    return c * 9 / 5 + 32
 PACK_CURRENT_LSB_A = 0.1
 CHARGER_V_LSB_V = 1.0 / 3.0
 CHARGER_I_LSB_A = 0.1
@@ -275,13 +279,17 @@ def evaluate_alerts(state: State, mains_v: float, breaker_a: float,
         if t.value is None:
             continue
         if t.value > 55:
-            alerts.append(("CRIT", f"T{i} = {t.value} °C > 55"))
+            alerts.append(("CRIT",
+                           f"T{i} = {t.value} °C ({c_to_f(t.value):.0f} °F)"
+                           f" > 55 °C"))
 
     temp_vals = [t.value for t in state.temps if t.value is not None]
     if len(temp_vals) >= 2:
         delta = max(temp_vals) - min(temp_vals)
         if delta > 10:
-            alerts.append(("WARN", f"temp delta {delta} °C > 10"))
+            alerts.append(("WARN",
+                           f"temp delta {delta} °C ({delta * 9 / 5:.0f} °F)"
+                           f" > 10 °C"))
 
     # AC-supply budget (only meaningful while actively charging).
     chgr_active = (state.chgr_status.value is not None
@@ -455,13 +463,19 @@ def render_temps(state: State, now: float) -> Panel:
             cells_row.append(Text("---", style="dim"))
         else:
             style = "yellow dim" if ch.is_stale(now) else None
-            cells_row.append(Text(f"{int(ch.value)}°C", style=style))
+            cells_row.append(Text(
+                f"{int(ch.value)}°C ({int(c_to_f(ch.value))}°F)",
+                style=style))
     t.add_row(*cells_row)
 
     vals = [c.value for c in state.temps if c.value is not None]
     if vals:
-        sub = Text(f"  Δ {max(vals) - min(vals)} °C    "
-                   f"range {min(vals)}–{max(vals)} °C", style="dim")
+        lo, hi = min(vals), max(vals)
+        delta = hi - lo
+        sub = Text(f"  Δ {delta} °C ({delta * 9 / 5:.0f} °F)    "
+                   f"range {lo}–{hi} °C "
+                   f"({c_to_f(lo):.0f}–{c_to_f(hi):.0f} °F)",
+                   style="dim")
     else:
         sub = Text("")
     return Panel(Group(t, sub), title="Temperatures", border_style="blue")
@@ -505,8 +519,16 @@ def render_motor(state: State, now: float) -> Panel:
         de_text = Text("disabled", style="dim")
     t.add_row("drive", de_text)
 
-    t.add_row("ctrl temp",
-              fmt(state.motor_temp_c, "{:.0f}", "°C", now))
+    mt = state.motor_temp_c.value
+    if mt is None:
+        mt_text = Text("---", style="dim")
+    else:
+        text = f"{mt:.0f} °C ({c_to_f(mt):.0f} °F)"
+        if state.motor_temp_c.is_stale(now):
+            mt_text = Text(text, style="yellow dim")
+        else:
+            mt_text = Text(text)
+    t.add_row("ctrl temp", mt_text)
 
     return Panel(t, title="Motor controller", border_style="magenta")
 
