@@ -378,7 +378,7 @@ def render_pack(state: State, mains_v: float, efficiency: float,
     if state.pack_v_est.value is not None and pi is not None:
         signed_i = pi if chgr_active else (-pi if state.vc_state_raw.value == 0x0C else pi)
         dc_w = state.pack_v_est.value * signed_i
-        t.add_row("P DC", Text(f"{dc_w:+.0f} W"))
+        t.add_row("power", Text(f"{dc_w:+.0f} W"))
         if chgr_active:
             ac_w = dc_w / max(efficiency, 0.01)
             ac_a = ac_w / max(mains_v, 1.0)
