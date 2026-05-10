@@ -119,14 +119,12 @@ to the pack, taken from ~90 % SOC on a 120 V outlet:
                                        voltage and current scales (see
                                        the FF50E5 section).
 
-A 100%-SOC idle capture with the charger plug inserted but BMS-
-inhibited:
+A 100%-SOC idle capture with the charger plug inserted but no real
+charging happening (BMS done topping off):
 
-* `soc-100-idle.asc`                — charger present, no actual
-                                       charging (FF50 status = 0x03
-                                       with V settled, I ≈ 0). Useful
-                                       for distinguishing "plugged in,
-                                       BMS done" from "delivering".
+* `soc-100-idle.asc`                — charger present, current near
+                                       zero. Useful as the "plugged in,
+                                       BMS done" reference point.
 
 Fault-bitmap captures (`asc/bms-error-codes/`, 2026-05-09) gave us a
 matched-mode pair that nailed down F108 as the BMS active-fault bitmap:
@@ -558,8 +556,12 @@ PGN decode notes (motor controller, SA = 0xCA)
 ----------------------------------------------
 
 FF21CA — "Motor telemetry (RPM, throttle, drive state, ctrl temp)"
-    Broadcast at ~85 Hz from SA 0xCA. Across the asc/*.asc captures
-    (all in neutral) the structure resolves as:
+    Broadcast at ~85 Hz from SA 0xCA. The full 29-bit ID is
+    0x0CFF21CA (priority 3), not 0x18FF21CA (priority 6) as one
+    might assume from the "default" J1939 broadcast priority — this
+    frame ships at a higher priority than the BMS broadcasts, which
+    makes sense for a real-time inverter feed. Across the asc/*.asc
+    captures (all in neutral) the structure resolves as:
 
       byte 1 (data[0]): 0x00..0x34            — THROTTLE PEDAL POSITION
                                                  (raw). 0 = released, ~52

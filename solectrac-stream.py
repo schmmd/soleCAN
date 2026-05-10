@@ -111,7 +111,10 @@ def c_to_f(c: float) -> float:
     return c * 9 / 5 + 32
 PACK_CURRENT_LSB_A = 0.1
 PACK_CURRENT_BIAS_RAW = 0x7D00  # F100F3 bytes 2-3 BE, biased so 0x7D00 = 0 A
-CHARGER_V_LSB_V = 1.0 / 3.0
+PACK_VOLTAGE_LSB_V = 0.1        # F100F3 byte 1 and FF50E5 bytes 1-2 LE
+PACK_VOLTAGE_OFFSET_V = 76.8    # V = raw * 0.1 + 76.8
+CHARGER_V_LSB_V = PACK_VOLTAGE_LSB_V       # charger uses identical encoding
+CHARGER_V_OFFSET_V = PACK_VOLTAGE_OFFSET_V
 CHARGER_I_LSB_A = 0.1
 RPM_BIAS = 0x0C80
 
@@ -358,7 +361,7 @@ def decode(msg: "can.Message", state: State, now: float) -> None:
         state.chgr_status.update(data[0], now)
         v_raw = le16(data[1], data[2])
         i_raw = le16(data[3], data[4])
-        state.chgr_v.update(v_raw * CHARGER_V_LSB_V, now)
+        state.chgr_v.update(v_raw * CHARGER_V_LSB_V + CHARGER_V_OFFSET_V, now)
         state.chgr_i.update(i_raw * CHARGER_I_LSB_A, now)
         state.decoded += 1
 

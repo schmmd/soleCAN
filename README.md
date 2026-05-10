@@ -78,14 +78,14 @@ Signal names use a `domain.name` (or `domain.NN.name`) convention:
 | `pack.byte6_min_idx`          | F102 byte 6 (raw; appears to encode min-cell index). |
 | `pack.flags`                  | F102 byte 8 (raw flag/status field).                 |
 | `pack.v_estimate`             | 20 × mean(min, max) / 1000, V.                       |
-| `pack.voltage_proxy_b2`       | F100 byte 2 (raw).                                   |
+| `pack.voltage_v`              | F100 byte 2 pack voltage, V (b * 0.1 + 76.8).        |
 | `pack.current_raw`            | F100 bytes 3-4 BE (raw biased u16).                  |
 | `pack.current_a`              | F100 signed pack current, A (+draw / -charge).       |
-| `charger.status`              | FF50 byte 1.                                         |
+| `charger.status`              | FF50 byte 1 (0=idle, 1/2=transient, 3=active).       |
 | `charger.v_raw`               | FF50 bytes 2-3 LE (raw).                             |
-| `charger.voltage_v`           | FF50 voltage estimate, V (1/3 V/bit, tentative).     |
+| `charger.voltage_v`           | FF50 voltage, V (raw * 0.1 + 76.8; only when status=3).|
 | `charger.i_raw`               | FF50 bytes 4-5 LE (raw).                             |
-| `charger.current_a`           | FF50 current, A.                                     |
+| `charger.current_a`           | FF50 current, A (only meaningful when status=3).     |
 | `vc.state`                    | F100D0 byte 0 (raw heartbeat state).                 |
 | `motor.rpm_signed`            | FF21CA RPM with directional sign.                    |
 | `motor.rpm_magnitude`         | FF21CA RPM unsigned.                                 |

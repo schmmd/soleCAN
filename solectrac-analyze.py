@@ -41,12 +41,12 @@ Signal names use a `domain.name` (or `domain.NN.name`) convention:
     pack.byte6_min_idx
     pack.flags
     pack.v_estimate            20 * mean(min, max) / 1000
-    pack.voltage_proxy_b2      F100 byte 2 (raw)
+    pack.voltage_v             F100 byte 2: pack voltage, b * 0.1 + 76.8 V
     pack.current_raw           F100 bytes 3-4 (raw biased u16)
     pack.current_a             F100 signed pack current, A
     charger.status             FF50 byte 1
     charger.v_raw              FF50 bytes 2-3 LE (raw)
-    charger.voltage_v          FF50 voltage estimate (1/3 V/bit, tentative)
+    charger.voltage_v          FF50 charger output voltage, raw * 0.1 + 76.8 V
     charger.i_raw              FF50 bytes 4-5 LE (raw)
     charger.current_a          FF50 current, A
     vc.state                   F100D0 byte 0 (raw heartbeat state)
@@ -66,6 +66,12 @@ Decoder assumptions (verify against the BMS spec before trusting numerically):
         temp_index = (PGN - 0xF155) * 8 + slot
   * PGN 0xF102: bytes 1-2 BE = max cell mV, bytes 3-4 BE = min cell mV,
                 bytes 5-6 = max/min cell index, byte 8 = spread/flags.
+  * PGN 0xF100 byte 2 (data[1]) = pack voltage at the BMS terminals,
+        encoded as 0.1 V/bit with a +76.8 V offset (V = b * 0.1 + 76.8).
+        Confirmed by linear regression of byte 1 against 20 * mean cell mV
+        across 24 captures spanning byte values 53..66 (82.0..83.4 V),
+        residuals < 0.55 V, and cross-checked against the FF50 charger
+        frame which uses an identical encoding.
   * PGN 0xF100 bytes 3-4 BE = signed pack current at 0.1 A/bit, biased so that
         raw 0x7D00 = 0 A (positive = drawing from pack, negative = charging).
         Cross-validated by the amp-*.asc dashboard-anchored set (1, 18, 35, 42,
@@ -74,10 +80,16 @@ Decoder assumptions (verify against the BMS spec before trusting numerically):
         0x7F->0x80 high-byte rollovers.
   * PGN 0xFF50 from 0xE5: byte 1 = status (0x00=idle, 0x01/0x02=handshake
                           [transient], 0x03=active charging),
-                          bytes 2-3 LE = charger output voltage (raw),
-                          bytes 4-5 LE = charger output current in 0.1 A/bit.
-    Voltage scale is uncertain pending a full-SOC capture; both raw and a
-    tentative 1/3 V/bit estimate are emitted.
+                          bytes 2-3 LE = charger output voltage at the pack
+                          terminals, encoded identically to F100 byte 2:
+                          raw * 0.1 + 76.8 V.
+                          bytes 4-5 LE = charger output current in 0.1 A/bit
+                          (no offset).
+    Voltage and current scales were anchored against asc/charging-120V-90ish-
+    to-100.asc (2863 active-charging frames; regression vs F100F3 gave R^2
+    = 0.986 for V and R^2 = 0.999 for I). V/I bytes only carry meaningful
+    values while status == 0x03; other states leave them at handshake / idle
+    values.
   * PGN 0xFF21 from 0xCA: motor controller / drive ECU telemetry.
         byte 0     = throttle pedal position (raw, ~0..0x34)
         bytes 2-3  = motor RPM magnitude, little-endian uint16, biased by 0x0C80
@@ -134,7 +146,10 @@ TEMP_OFFSET_C = 40
 
 PACK_CURRENT_LSB_A = 0.1                  # F100F3 bytes 3-4 BE, 0.1 A/bit
 PACK_CURRENT_BIAS_RAW = 0x7D00            # raw value at 0 A (positive = discharge)
-CHARGER_V_LSB_V = 1.0 / 3.0               # tentative; revisit with full-SOC data
+PACK_VOLTAGE_LSB_V = 0.1                  # F100F3 byte 2 and FF50E5 bytes 2-3 LE
+PACK_VOLTAGE_OFFSET_V = 76.8              # same encoding shared by BMS and charger
+CHARGER_V_LSB_V = PACK_VOLTAGE_LSB_V      # charger reports the same encoding
+CHARGER_V_OFFSET_V = PACK_VOLTAGE_OFFSET_V
 CHARGER_I_LSB_A = 0.1
 RPM_BIAS = 0x0C80                         # FF21CA bytes 2-3 LE zero-RPM offset
 
@@ -320,7 +335,8 @@ def decode_file(path: Path, scenario: str, rows: list, frames: list,
                         continue
                     raw = be16(data[2], data[3])  # bytes 3-4 BE, biased u16
                     amps = (raw - PACK_CURRENT_BIAS_RAW) * PACK_CURRENT_LSB_A
-                    emissions.append(("pack.voltage_proxy_b2", data[1], ""))
+                    volts = data[1] * PACK_VOLTAGE_LSB_V + PACK_VOLTAGE_OFFSET_V
+                    emissions.append(("pack.voltage_v", round(volts, 2), "v"))
                     emissions.append(("pack.current_raw", raw, ""))
                     emissions.append(("pack.current_a", round(amps, 1), "a"))
                     sc["f100"] += 1
@@ -382,7 +398,8 @@ def decode_file(path: Path, scenario: str, rows: list, frames: list,
                 emissions.append(("charger.v_raw", v_raw, ""))
                 emissions.append(
                     ("charger.voltage_v",
-                     round(v_raw * CHARGER_V_LSB_V, 2), "v"))
+                     round(v_raw * CHARGER_V_LSB_V + CHARGER_V_OFFSET_V, 2),
+                     "v"))
                 emissions.append(("charger.i_raw", i_raw, ""))
                 emissions.append(
                     ("charger.current_a",
@@ -441,8 +458,9 @@ DECODERS = [
      "", "unknown", ""),
     ("pack.v_estimate", "F102", "F3", "0-3", "20 * (max+min)/2 / 1000",
      "v", "verified", "assumes 20-cell pack"),
-    ("pack.voltage_proxy_b2", "F100", "F3", "1", "u8 (raw)",
-     "", "tentative", "proxy; semantics unconfirmed"),
+    ("pack.voltage_v", "F100", "F3", "1", "u8 * 0.1 + 76.8",
+     "v", "verified",
+     "anchored by 24-capture regression vs 20*mean(cell mV); confirmed by FF50"),
     ("pack.current_raw", "F100", "F3", "2-3", "BE u16 (biased)",
      "", "verified", "subtract 0x7D00 for signed amps"),
     ("pack.current_a", "F100", "F3", "2-3", "(BE u16 - 0x7D00) * 0.1",
@@ -453,8 +471,10 @@ DECODERS = [
      "0x00=idle, 0x01/0x02=handshake (transient), 0x03=active"),
     ("charger.v_raw", "FF50", "E5", "1-2", "LE u16",
      "", "verified", ""),
-    ("charger.voltage_v", "FF50", "E5", "1-2", "LE u16 * (1/3)",
-     "v", "tentative", "scale needs full-SOC verification"),
+    ("charger.voltage_v", "FF50", "E5", "1-2", "LE u16 * 0.1 + 76.8",
+     "v", "verified",
+     "same encoding as F100 byte 1; meaningful only while status==0x03 "
+     "(R^2=0.986 vs F100F3 across 2863 active-charging frames)"),
     ("charger.i_raw", "FF50", "E5", "3-4", "LE u16",
      "", "verified", ""),
     ("charger.current_a", "FF50", "E5", "3-4", "LE u16 * 0.1",
@@ -560,7 +580,7 @@ def summarize(counts: dict, rows: list):
         chgr_i = values_for(rows, scenario, "charger.current_a")
         if chgr_v:
             print(f"    chgr V    : {min(chgr_v):.1f}..{max(chgr_v):.1f} V "
-                  f"(1/3 V/bit, tentative)")
+                  f"(0.1 V/bit + 76.8 V; meaningful only while status=0x03)")
             print(f"    chgr I    : {min(chgr_i):.1f}..{max(chgr_i):.1f} A")
         # Per-channel module temps share the temp.NN.c naming.
         temps_c = [r[4] for r in rows
