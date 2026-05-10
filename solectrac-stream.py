@@ -76,9 +76,11 @@ except ImportError:
 # --- protocol constants (mirrored from solectrac-analyze.py) --------------
 
 SRC_BMS = 0xF3
+SRC_BMS_CHGR_IF = 0xF4   # BMS in its charger-interface role; SA only sends 0x000600
 SRC_CHARGER = 0xE5
 SRC_VEHICLE = 0xD0
 SRC_MOTOR = 0xCA
+SRC_DASH = 0x12          # dashboard / instrument-cluster heartbeat; only sends FF21
 
 PGN_CELL_FIRST, PGN_CELL_LAST = 0xF113, 0xF13C
 PGN_TEMP_FIRST, PGN_TEMP_LAST = 0xF155, 0xF15E
@@ -91,6 +93,7 @@ PGN_F108 = 0xF108
 PGN_FF50 = 0xFF50
 PGN_FF21 = 0xFF21
 PGN_FECA = 0xFECA   # SAE J1939-73 DM1 (Active Diagnostic Trouble Codes)
+PGN_PROP_0600 = 0x0600   # PDU1, src 0xF4 -> dest 0xE5: BMS charger setpoint
 
 # DM1 lamp/flash 2-bit field decode tables (per J1939-73).
 DM1_LAMP_NAMES = ("malfunction", "red_stop", "amber_warning", "protect")
@@ -430,6 +433,19 @@ class State:
     dm1_fmi: Channel = field(default_factory=Channel)
     dm1_cm: Channel = field(default_factory=Channel)
     dm1_oc: Channel = field(default_factory=Channel)
+    # 1806E5F4: BMS-to-charger command. The BMS-side address 0xF4
+    # publishes voltage and current setpoints (and an enable flag) to
+    # the charger at 0xE5. Idle frames clear voltage/current to None
+    # while keeping enable visible, so the panel mirrors charger state
+    # rather than freezing on the last active setpoint.
+    chgr_cmd_v_v: Channel = field(default_factory=Channel)
+    chgr_cmd_i_a: Channel = field(default_factory=Channel)
+    chgr_cmd_enable: Channel = field(default_factory=Channel)
+    # 0x18FF2112: dashboard / instrument-cluster heartbeat at 10 Hz.
+    # byte 0 = alive flag (0 during ~700 ms boot, 1 thereafter); other
+    # bytes always zero. Useful as a liveness check: if this Channel
+    # goes stale the dashboard ECU has likely dropped off the bus.
+    dash_alive: Channel = field(default_factory=Channel)
     # per-cell / per-temp arrays (indexed 0-based; display is 1-based)
     cells: List[Channel] = field(
         default_factory=lambda: [Channel() for _ in range(NUM_CELLS)]
@@ -628,6 +644,13 @@ def decode(msg: "can.Message", state: State, now: float) -> None:
             state.motor_temp_c.update(data[5] - TEMP_OFFSET_C, now)
         state.decoded += 1
 
+    elif src == SRC_DASH and pgn == PGN_FF21:
+        # Dashboard heartbeat from SA 0x12 (same PGN as motor telemetry,
+        # different sender). Byte 0 is a 0=booting / 1=alive flag broadcast
+        # at 10 Hz; bytes 1..7 are always zero.
+        state.dash_alive.update(data[0], now)
+        state.decoded += 1
+
     elif src == SRC_MOTOR and pgn == PGN_FECA:
         # SAE J1939-73 DM1: Active Diagnostic Trouble Codes from the
         # motor ECU. Single-frame layout (no multi-frame BAM observed):
@@ -686,6 +709,28 @@ def decode(msg: "can.Message", state: State, now: float) -> None:
         else:
             state.chgr_v.clear()
             state.chgr_i.clear()
+        state.decoded += 1
+
+    elif src == SRC_BMS_CHGR_IF and pgn == PGN_PROP_0600:
+        # BMS->Charger command. Bytes 0-1 BE = V setpoint (0.1 V/bit, no
+        # offset, always 84.6 V during active requests), bytes 2-3 BE =
+        # I setpoint (0.1 A/bit), byte 4 = enable (0 = active, 1 = idle),
+        # bytes 5-7 padding 0xFF. Idle frame is 00 00 00 00 01 FF FF FF;
+        # when seen, clear V/I so the panel doesn't freeze on the last
+        # active setpoint.
+        v_set_raw = be16(data[0], data[1])
+        i_set_raw = be16(data[2], data[3])
+        enable = data[4]
+        idle_pattern = (v_set_raw == 0 and i_set_raw == 0
+                        and enable in (0, 1)
+                        and all(b == 0xFF for b in data[5:]))
+        state.chgr_cmd_enable.update(enable, now)
+        if idle_pattern:
+            state.chgr_cmd_v_v.clear()
+            state.chgr_cmd_i_a.clear()
+        else:
+            state.chgr_cmd_v_v.update(round(v_set_raw * 0.1, 1), now)
+            state.chgr_cmd_i_a.update(round(i_set_raw * 0.1, 1), now)
         state.decoded += 1
 
 
@@ -950,6 +995,26 @@ def render_charger(state: State, now: float) -> Panel:
     if state.chgr_v.value is not None and state.chgr_i.value is not None:
         t.add_row("power",
                   Text(f"{state.chgr_v.value * state.chgr_i.value:.0f} W"))
+
+    # BMS->Charger setpoints from 1806E5F4. Show V/I requested by the
+    # BMS alongside what the charger reports delivering, and surface the
+    # enable flag (0=active request, 1=idle).
+    en = state.chgr_cmd_enable.value
+    if (state.chgr_cmd_v_v.value is not None
+            or state.chgr_cmd_i_a.value is not None
+            or en is not None):
+        t.add_row("", "")
+        if en is None:
+            en_text = Text("---", style="dim")
+        elif int(en) == 0:
+            en_text = Text("active", style="green")
+        elif int(en) == 1:
+            en_text = Text("idle")
+        else:
+            en_text = Text(f"0x{int(en):02X}", style="magenta")
+        t.add_row("BMS request", en_text)
+        t.add_row("  V setpoint", fmt(state.chgr_cmd_v_v, "{:.1f}", "V", now))
+        t.add_row("  I setpoint", fmt(state.chgr_cmd_i_a, "{:.1f}", "A", now))
 
     # Time-to-full estimate, shown only while actively charging. Based
     # on the slope of recent BMS SOC samples; CV taper near full will

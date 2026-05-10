@@ -84,6 +84,7 @@ Signal names use a `domain.name` (or `domain.NN.name`) convention:
     motor.throttle_raw         FF21CA byte 0
     motor.controller_temp_c    FF21CA byte 4 (only emitted when nonzero)
     motor.motor_temp_c         FF21CA byte 5 (only emitted when nonzero)
+    dash.alive                 FF2112 byte 0 (0=booting, 1=alive; 10 Hz heartbeat from SA 0x12)
     pack.soc_raw               F100F3 byte 4 (raw)
     pack.soc_pct               F100F3 byte 4 -> percent (b4 * 0.385 + 3.8)
     dm1.lamp.byte0/1           FECA bytes 0/1 raw (lamp & flash status, when nonzero)
@@ -200,6 +201,16 @@ Decoder assumptions (verify against the BMS spec before trusting numerically):
                        0x14 = forward pedal pressed
                        0x18 = reverse pedal pressed
     Frame is suppressed entirely while charging (contactors open for traction).
+  * PGN 0xFF21 from 0x12: dashboard / instrument-cluster heartbeat.
+        Same PGN as the motor telemetry above, but a different sender (SA
+        0x12 vs 0xCA), so the on-the-wire ID 0x18FF2112 is distinct from
+        0x18FF21CA. SA 0x12 broadcasts only this PGN, at 10 Hz.
+        byte 0     = alive flag: 0x00 during the first ~700 ms after key-on
+                     (boot), 0x01 thereafter.
+        bytes 1..7 = always 0x00 padding.
+        SA 0x12 isn't in any standard J1939 SA table; the "dashboard" label
+        is by elimination (the boot-then-alive pattern coincides exactly
+        with the key-on transitions in the two ignition-* captures).
 """
 
 import argparse
@@ -220,6 +231,7 @@ SRC_BMS_CHGR_IF = 0xF4   # BMS in its charger-interface role; only sender of
 SRC_CHARGER = 0xE5
 SRC_VEHICLE = 0xD0   # vehicle controller; broadcasts a minimal F100 heartbeat
 SRC_MOTOR = 0xCA     # motor controller / drive ECU; FF21 telemetry, DM1 source
+SRC_DASH = 0x12      # dashboard / instrument-cluster heartbeat; only sends FF21
 
 # Decoded names for the byte-1 state field of 18F100D0 (used only by stdout
 # diagnostics; the numeric byte is what lands in signals.csv).
@@ -698,6 +710,22 @@ def decode_file(path: Path, scenario: str, rows: list, frames: list,
                          data[5] - TEMP_OFFSET_C, "c"))
                 sc["motor"] += 1
 
+            elif src == SRC_DASH and pgn == PGN_FF21:
+                # Dashboard / instrument-cluster heartbeat from SA 0x12.
+                # 0x18FF2112 is the *only* PGN this SA broadcasts (verified
+                # across 30 captures, 6634 frames). Cadence is 10 Hz
+                # (median 97 ms period). Only byte 0 carries information:
+                #   0x00 = booting (first ~7 frames after key-on, ~700 ms)
+                #   0x01 = ready / alive (steady value thereafter)
+                # Bytes 1..7 are always 0x00 padding. The 0x00 -> 0x01
+                # transition was captured only in the two ignition-* asc
+                # files; every other capture started with the dash already
+                # alive. SA 0x12 is non-standard so the "dashboard" label
+                # is by elimination, not from a vendor table.
+                emissions.append(("dash.alive", data[0], ""))
+                sc.setdefault("dash", 0)
+                sc["dash"] += 1
+
             elif src == SRC_MOTOR and pgn == PGN_FECA:
                 # DM1 (Active Diagnostic Trouble Codes) per SAE J1939-73.
                 #   data[0] = lamp status: 4 lamps x 2 bits each
@@ -808,9 +836,10 @@ def decode_file(path: Path, scenario: str, rows: list, frames: list,
                 v_set_raw = be16(data[0], data[1])
                 i_set_raw = be16(data[2], data[3])
                 enable = data[4]
-                if (v_set_raw == 0 and i_set_raw == 0
-                        and enable in (0, 1) and all(b == 0xFF
-                                                     for b in data[5:])):
+                idle_pattern = (v_set_raw == 0 and i_set_raw == 0
+                                and enable in (0, 1)
+                                and all(b == 0xFF for b in data[5:]))
+                if idle_pattern:
                     if enable == 1:
                         # Idle / no-request frame -- emit just the
                         # enable flag so analyses can find idle periods,
@@ -823,18 +852,18 @@ def decode_file(path: Path, scenario: str, rows: list, frames: list,
                         # all-zero with enable=0 hasn't been observed;
                         # treat as malformed and skip.
                         sc["skipped_zero"] += 1
-                    continue
-                emissions.append(
-                    ("chgr_cmd.voltage_v",
-                     round(v_set_raw * 0.1, 1), "v"))
-                emissions.append(
-                    ("chgr_cmd.current_a",
-                     round(i_set_raw * 0.1, 1), "a"))
-                emissions.append(("chgr_cmd.enable", enable, ""))
-                emissions.append(("chgr_cmd.v_raw", v_set_raw, ""))
-                emissions.append(("chgr_cmd.i_raw", i_set_raw, ""))
-                sc.setdefault("chgr_cmd", 0)
-                sc["chgr_cmd"] += 1
+                else:
+                    emissions.append(
+                        ("chgr_cmd.voltage_v",
+                         round(v_set_raw * 0.1, 1), "v"))
+                    emissions.append(
+                        ("chgr_cmd.current_a",
+                         round(i_set_raw * 0.1, 1), "a"))
+                    emissions.append(("chgr_cmd.enable", enable, ""))
+                    emissions.append(("chgr_cmd.v_raw", v_set_raw, ""))
+                    emissions.append(("chgr_cmd.i_raw", i_set_raw, ""))
+                    sc.setdefault("chgr_cmd", 0)
+                    sc["chgr_cmd"] += 1
 
             if emissions:
                 frame_index = len(frames)
@@ -1024,6 +1053,11 @@ DECODERS = [
     ("motor.motor_temp_c", "FF21", "CA", "5", "u8 - 40",
      "c", "tentative",
      "motor temp; cooler/steadier than byte 4; 0 = not present and suppressed"),
+    ("dash.alive", "FF21", "12", "0", "u8 (raw)",
+     "", "verified",
+     "dashboard / instrument-cluster heartbeat at 10 Hz; 0x00 during the "
+     "first ~700 ms after key-on (boot), 0x01 thereafter; bytes 1..7 are "
+     "always 0x00 padding; SA 0x12 sends only this PGN"),
     ("dm1.lamp.byte0", "FECA", "CA", "0", "u8 (raw, when nonzero)",
      "", "verified",
      "SAE J1939-73 DM1 lamp-status byte; per-lamp decode below; "
