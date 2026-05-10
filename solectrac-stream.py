@@ -83,8 +83,26 @@ PGN_CELL_FIRST, PGN_CELL_LAST = 0xF113, 0xF13C
 PGN_TEMP_FIRST, PGN_TEMP_LAST = 0xF155, 0xF15E
 PGN_F100 = 0xF100
 PGN_F102 = 0xF102
+PGN_F108 = 0xF108
 PGN_FF50 = 0xFF50
 PGN_FF21 = 0xFF21
+
+# F108 byte 7 carries a bitmap of dashboard-displayed BMS warning codes,
+# packed in numeric order from the vendor BMS error-code table (operator
+# manual). Each entry is (bit, code, description). Decoded from
+# asc/bms-error-codes/bms-124-140-142-143-144-146.asc vs idle-no-bms.asc:
+# byte 7 = 0xBB in the fault capture (= bits 0,1,3,4,5,7) maps exactly to
+# the operator-confirmed codes {124, 140, 142, 143, 144, 146}. Bit 2 maps
+# to code 141, which is reserved (not in the manual) and is omitted here.
+BMS_FAULT_CODES_BYTE7: List[Tuple[int, int, str]] = [
+    (0, 124, "Clock fault"),
+    (1, 140, "System fault level"),
+    (3, 142, "BMS fault need maintenance"),
+    (4, 143, "Battery fault need maintenance"),
+    (5, 144, "Battery system fault needs maintenance"),
+    (6, 145, "Full charge/discharge cycle needed"),
+    (7, 146, "Maintenance mode status"),
+]
 
 TEMP_OFFSET_C = 40
 
@@ -214,6 +232,10 @@ class State:
     min_cell_n: Channel = field(default_factory=Channel)  # 1-based per BMS
     # Voltage-derived SOC (from min cell mV via NMC OCV table).
     soc_pct: Channel = field(default_factory=Channel)
+    # F108 fault bitmap bytes (byte 7 = decoded warning codes; byte 5 =
+    # tentative master "any fault present" flag).
+    fault_byte5: Channel = field(default_factory=Channel)
+    fault_byte7: Channel = field(default_factory=Channel)
     # per-cell / per-temp arrays (indexed 0-based; display is 1-based)
     cells: List[Channel] = field(
         default_factory=lambda: [Channel() for _ in range(NUM_CELLS)]
@@ -280,6 +302,13 @@ def decode(msg: "can.Message", state: State, now: float) -> None:
             )
             state.decoded += 1
 
+        elif pgn == PGN_F108:
+            # All zeros in healthy idle. Byte 7 = dashboard-displayed
+            # warning code bitmap; byte 5 = tentative master fault flag.
+            state.fault_byte5.update(data[5], now)
+            state.fault_byte7.update(data[7], now)
+            state.decoded += 1
+
         elif pgn == PGN_F102:
             if all(b == 0 for b in data):
                 return
@@ -332,6 +361,25 @@ def decode(msg: "can.Message", state: State, now: float) -> None:
         state.chgr_v.update(v_raw * CHARGER_V_LSB_V, now)
         state.chgr_i.update(i_raw * CHARGER_I_LSB_A, now)
         state.decoded += 1
+
+
+# --- BMS faults -------------------------------------------------------------
+
+def active_bms_faults(state: State) -> List[Tuple[int, str]]:
+    """Return [(code_number, description), ...] for currently set bits in
+    F108 byte 7 (the dashboard-visible BMS warning code bitmap).
+
+    Byte 5's semantics aren't decoded yet, so it isn't surfaced here as a
+    code; render_faults shows its raw value separately for visibility.
+    """
+    b7 = state.fault_byte7.value
+    if b7 is None:
+        return []
+    out: List[Tuple[int, str]] = []
+    for bit, code, desc in BMS_FAULT_CODES_BYTE7:
+        if (int(b7) >> bit) & 1:
+            out.append((code, desc))
+    return out
 
 
 # --- alerts -----------------------------------------------------------------
@@ -394,6 +442,12 @@ def evaluate_alerts(state: State, mains_v: float, breaker_a: float,
             and state.vc_state_raw.value == 0x0C
             and state.pack_i_a.is_stale(now)):
         alerts.append(("CRIT", "no F100 frame from BMS in > 2 s"))
+
+    # Active BMS warning codes (F108 byte 7).
+    faults = active_bms_faults(state)
+    if faults:
+        codes = ", ".join(str(c) for c, _ in faults)
+        alerts.append(("WARN", f"BMS reports active fault codes: {codes}"))
 
     return alerts
 
@@ -673,6 +727,51 @@ def render_vc(state: State, now: float) -> Panel:
     return Panel(t, title="Vehicle controller", border_style="magenta")
 
 
+def render_faults(state: State, now: float) -> Panel:
+    """Display the active BMS warning codes from F108 byte 7, plus the raw
+    byte5/byte7 values for visibility (byte 5 isn't fully decoded yet).
+    """
+    b5 = state.fault_byte5.value
+    b7 = state.fault_byte7.value
+    stale = (state.fault_byte7.ts is None
+             or state.fault_byte7.is_stale(now))
+
+    if b7 is None:
+        body = Text("(no F108 frame seen yet)", style="dim")
+        return Panel(body, title="BMS faults", border_style="blue")
+
+    faults = active_bms_faults(state)
+
+    t = Table.grid(padding=(0, 2))
+    t.add_column(justify="right")
+    t.add_column(justify="left")
+
+    if not faults:
+        t.add_row(Text("status", style="dim"),
+                  Text("no active codes", style="green"))
+    else:
+        for code, desc in faults:
+            t.add_row(Text(f"{code}", style="bold red"), Text(desc))
+
+    raw_style = "yellow dim" if stale else "dim"
+    raw = Text(
+        f"raw  byte5=0x{int(b5 or 0):02X}  byte7=0x{int(b7):02X}"
+        + ("  (stale)" if stale else ""),
+        style=raw_style,
+    )
+
+    if faults:
+        border = "red"
+    elif b5:
+        # byte 5 is a tentative master flag — flag yellow if it's set even
+        # without a decoded byte-7 code.
+        border = "yellow"
+    else:
+        border = "green"
+
+    return Panel(Group(t, raw), title="BMS faults", border_style=border)
+
+
 def render_alerts(alerts: List[Tuple[str, str]]) -> Panel:
     if not alerts:
         return Panel(Text("(none)", style="green"),
@@ -695,6 +794,7 @@ def build_layout(state: State, args, now: float) -> Layout:
         Layout(name="cells", size=NUM_CELLS + 4),
         Layout(name="row3", size=5),
         Layout(name="row4", size=8),
+        Layout(name="faults", size=11),
         Layout(name="alerts", size=8),
     )
     layout["header"].update(render_header(state, now))
@@ -708,6 +808,7 @@ def build_layout(state: State, args, now: float) -> Layout:
         Layout(render_motor(state, now)),
         Layout(render_vc(state, now)),
     )
+    layout["faults"].update(render_faults(state, now))
     alerts = evaluate_alerts(state, args.mains_v, args.breaker_a,
                              args.efficiency, now)
     layout["alerts"].update(render_alerts(alerts))
