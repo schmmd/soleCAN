@@ -101,7 +101,9 @@ Signal names use a `domain.name` (or `domain.NN.name`) convention:
     motor.rpm_signed           FF21CA RPM with directional sign
     motor.rpm_magnitude        FF21CA RPM unsigned
     motor.direction            +1 forward / 0 idle / -1 reverse
-    motor.throttle_raw         FF21CA byte 0
+    motor.throttle_raw         FF21CA byte 0 (0..0x69 across the corpus; behaves like a
+                               J1939 0..100% percent field with idle resting offset ~3
+                               and controller dead-low ~14)
     motor.controller_temp_c    FF21CA byte 4 (only emitted when nonzero)
     motor.motor_temp_c         FF21CA byte 5 (only emitted when nonzero)
     dash.alive                 FF2112 byte 0 (0=booting, 1=alive; 10 Hz heartbeat from SA 0x12)
@@ -228,7 +230,17 @@ Decoder assumptions (verify against the BMS spec before trusting numerically):
         data; trust the lamp/state decode but treat any future SPN as
         TENTATIVE until cross-checked against vendor documentation.
   * PGN 0xFF21 from 0xCA: motor controller / drive ECU telemetry.
-        byte 0     = throttle pedal position (raw, ~0..0x34, max 0x69 observed)
+        byte 0     = throttle pedal position. Across all 45,086 frames in the
+                     30-capture corpus, byte 0 ranges 0..0x69 (0..105) and
+                     behaves like a J1939-style 0..100% percent field. Idle
+                     resting offset ~3 (sensor noise floor with foot off
+                     pedal); below ~14 the motor controller's internal
+                     dead-low keeps RPM near 0 (matches the Kelly
+                     TPS_dead_low concept from the hydraulic pump doc). The
+                     previously documented "max 0x34" was a sample-size
+                     artifact; the rare excursions up to 105 are mechanical
+                     pedal overshoot and saturation rather than a separate
+                     scale.
         byte 1     = always 0x00 across 45,086 frames in 30 captures
                      (reserved padding)
         bytes 2-3  = motor RPM magnitude, little-endian uint16, biased by 0x0C80
@@ -1207,7 +1219,9 @@ DECODERS = [
     ("motor.direction", "FF21", "CA", "7", "0x14->+1, 0x18->-1, else 0",
      "", "verified", "directional pedal selector"),
     ("motor.throttle_raw", "FF21", "CA", "0", "u8 (raw)",
-     "", "verified", "~0..0x34"),
+     "", "verified",
+     "0..0x69 (0..105) across 45,086 frames; behaves like J1939 0..100% "
+     "percent field with idle offset ~3 and controller dead-low ~14"),
     ("motor.controller_temp_c", "FF21", "CA", "4", "u8 - 40",
      "c", "tentative",
      "main controller temp; consistently warmer than byte 5 and ramps up "
