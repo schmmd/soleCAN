@@ -1024,7 +1024,7 @@ _BMS_FLAGS: List[Tuple[str, str, str]] = [
     ("bms_operating",      "OPER",   "bold green"),
     ("bms_standby",        "STBY",   "bold cyan"),
     ("bms_charging",       "CHG",    "bold green"),
-    ("bms_drive_mode",     "DRIVE",  "bold yellow"),
+    ("bms_drive_mode",     "DRIVE",  "bold green"),
     ("bms_charger_present", "chgr",  "green"),
 ]
 
