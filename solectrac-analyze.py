@@ -60,7 +60,16 @@ Signal names use a `domain.name` (or `domain.NN.name`) convention:
     bms.limit.mode             F107 byte 4: 0=charging, 1=driving
     bms.limit.byte5            F107 byte 5: slowly varying counter (raw)
     bms.fault.byteN            F108 bytes 0..7 raw (only emitted when frame is non-zero;
-                               corresponds to DBC FaultByteN_Raw signals)
+                               corresponds to DBC FaultByteN_Raw signals).
+                               Across 36,952 F108 frames (30 captures): bytes 1,3,4,6 are
+                               always 0x00 (reserved padding); byte 0 is only ever 0x00 or
+                               0x10 (bit 4); byte 2 is only ever 0x00 or 0x04 (bit 2); byte 5
+                               is only ever 0x00 or 0x01 (bit 0); byte 7 holds the dashboard
+                               warning code bitmap. Byte 0 bit 4 and byte 2 bit 2 are paired
+                               (set together in all but 3 transient frames) and track "code
+                               140 active without code 124"; byte 5 bit 0 tracks "code 124
+                               active". They appear to mirror state already conveyed by byte
+                               7 rather than encode any new codes.
     bms.fault.code_NNN         F108 byte 7: 1 when bit set; NNN per vendor table
                                (124, 140, 142, 143, 144, 145, 146; corresponds to
                                DBC Fault_<NNN>_<ShortName> bit signals)
@@ -135,9 +144,28 @@ Decoder assumptions (verify against the BMS spec before trusting numerically):
         manual). bit 0=140, bit 1=124, bit 3=142, bit 4=143, bit 5=144,
         bit 7=146 (bits 2 and 6 didn't appear in either calibration
         capture; codes 141 and 145 from the manual are speculatively
-        assigned). Bytes 0..6 carry additional fault info (bit-to-code
-        mapping not yet established) and are surfaced as raw bytes for
-        visibility.
+        assigned).
+        Bytes 0..6 are surveyed across all 30 captures (36,952 F108
+        frames). Bytes 1, 3, 4, 6 are always 0x00 (reserved padding).
+        Bytes 0, 2, 5 each take only two values:
+            byte 0: 0x00 or 0x10 (bit 4)
+            byte 2: 0x00 or 0x04 (bit 2)
+            byte 5: 0x00 or 0x01 (bit 0)
+        Only six (byte0, byte2, byte5, byte7) tuples appear across the
+        corpus:
+            (00,00,00,00) idle/quiet
+            (10,04,00,01) byte 7 has code 140 only
+            (10,04,00,B9) byte 7 has codes {140,142,143,144,146}
+            (00,00,01,BB) byte 7 has codes {124,140,142,143,144,146}
+            (10,00,00,01) and (00,00,00,B8) appear < 5 times each
+                (transient).
+        Byte 0 bit 4 and byte 2 bit 2 are paired (set or clear together
+        in 36,949 / 36,952 frames; the 3-frame mismatch is transient) and
+        are set exactly when byte 7 has code 140 active *and* code 124
+        clear. Byte 5 bit 0 is set exactly when byte 7 has code 124
+        active. These appear to mirror state already conveyed by byte 7
+        rather than encode any new codes; they are still surfaced as
+        raw bms.fault.byteN values for forward compatibility.
   * PGN 0xFF50 from 0xE5: byte 0 = status (0x00=idle, 0x01/0x02=handshake
                           [transient], 0x03=active charging),
                           bytes 1-2 LE = charger output voltage at the pack
@@ -668,10 +696,18 @@ def decode_file(path: Path, scenario: str, rows: list, frames: list,
                 elif pgn == PGN_F108:
                     # All zeros = healthy idle baseline. Byte 7 is the
                     # dashboard-displayed BMS warning code bitmap (decoded
-                    # against the vendor table). Bytes 0..6 carry
-                    # additional fault info; bit-to-code mapping isn't
-                    # established yet, so they're surfaced as raw values
-                    # for visibility.
+                    # against the vendor table).
+                    # Across the 30-capture corpus (36,952 F108 frames):
+                    #   bytes 1, 3, 4, 6 are always 0x00 (reserved padding)
+                    #   byte 0   is 0x00 or 0x10  (bit 4 only)
+                    #   byte 2   is 0x00 or 0x04  (bit 2 only)
+                    #   byte 5   is 0x00 or 0x01  (bit 0 only)
+                    # Byte 0 bit 4 + byte 2 bit 2 are paired and track
+                    # "code 140 active without code 124"; byte 5 bit 0
+                    # tracks "code 124 active". They mirror state already
+                    # conveyed by byte 7 rather than carrying new codes.
+                    # Bytes 0..6 are still emitted raw (when nonzero) for
+                    # forward compatibility / parity with the DBC.
                     if all(b == 0 for b in data):
                         sc["skipped_zero"] += 1
                         continue
@@ -1011,8 +1047,12 @@ DECODERS = [
      "0x00 in charging); semantics unknown"),
     ("bms.fault.byteN", "F108", "F3", "0..7", "u8 (raw, when nonzero)",
      "", "verified",
-     "byte 7 = dashboard warning code bitmap; bytes 0..6 carry additional "
-     "fault info, bit-to-code mapping not yet established"),
+     "byte 7 = dashboard warning code bitmap (see bms.fault.code_NNN); "
+     "bytes 1,3,4,6 always 0x00 across 36,952 frames (reserved padding); "
+     "byte 0 in {0x00,0x10}, byte 2 in {0x00,0x04}, byte 5 in {0x00,0x01}; "
+     "byte 0 bit 4 + byte 2 bit 2 paired and set when byte 7 has code 140 "
+     "but not 124; byte 5 bit 0 set when byte 7 has code 124; appear to "
+     "mirror byte-7 state rather than encode new codes"),
     ("bms.fault.code_NNN", "F108", "F3", "7", "(byte7 >> bit) & 1",
      "", "verified",
      "NNN per vendor BMS error-code table; bit 0=140, bit 1=124, bit 3=142, "

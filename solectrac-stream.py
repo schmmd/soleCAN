@@ -428,14 +428,18 @@ class State:
     # full session.
     soc_history: Deque[Tuple[float, float]] = field(default_factory=deque)
     # F108 fault bitmap bytes. Byte 7 is decoded (BMS warning code
-    # bitmap from the operator manual). Bytes 0 and 2 are known to
-    # carry additional fault info (seen nonzero in
-    # asc/bms-error-codes/bms-fullcharge-102-109-140.asc, where the
-    # dashboard cycled BMS codes 102, 109, 140; codes 102 and 109
-    # are part of the same vendor BMS error-code table that already
-    # supplied byte 7's mapping). The bit-to-code mapping for
-    # bytes 0..6 is not yet established. All 8 bytes are tracked
-    # so undecoded fault info is at least visible.
+    # bitmap from the operator manual). Bytes 0..6 surveyed across
+    # all 30 captures (36,952 F108 frames):
+    #   bytes 1, 3, 4, 6: always 0x00 (reserved padding)
+    #   byte 0: 0x00 or 0x10 (bit 4 only)
+    #   byte 2: 0x00 or 0x04 (bit 2 only)
+    #   byte 5: 0x00 or 0x01 (bit 0 only)
+    # Byte 0 bit 4 + byte 2 bit 2 are paired (set together in all
+    # but 3 transient frames) and track "code 140 active without
+    # code 124"; byte 5 bit 0 tracks "code 124 active". They mirror
+    # state already encoded in byte 7 rather than carrying new
+    # codes. All 8 bytes are still tracked so any future deviation
+    # (e.g. from a fault constellation not yet seen) is visible.
     fault_bytes: List[Channel] = field(
         default_factory=lambda: [Channel() for _ in range(8)]
     )
