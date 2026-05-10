@@ -1346,15 +1346,10 @@ def main() -> int:
                    help="assumed AC->DC charger efficiency (default 0.85)")
     p.add_argument("--refresh-hz", type=float, default=5.0,
                    help="TUI refresh rate (default 5)")
-    p.add_argument("--replay-rate", type=float, default=0.0,
-                   help="seconds to sleep between replayed frames "
-                        "(0 = as fast as possible)")
-    p.add_argument("--realtime", action="store_true",
-                   help="for --replay, pace frames using their original "
-                        "timestamps so playback runs at recorded speed")
-    p.add_argument("--replay-speed", type=float, default=1.0,
-                   help="multiplier for --realtime replay "
-                        "(2.0 = 2x faster, 0.5 = half speed)")
+    p.add_argument("--timescale", type=float, default=1.0,
+                   help="for --replay, multiplier on realtime playback "
+                        "(1.0 = recorded speed, 2.0 = 2x faster, "
+                        "0.5 = half speed)")
     p.add_argument("--no-tui", action="store_true",
                    help="headless mode (just log, no display)")
     args = p.parse_args()
@@ -1384,18 +1379,18 @@ def main() -> int:
             else:
                 first_msg_ts: Optional[float] = None
                 replay_start: Optional[float] = None
-                speed = args.replay_speed if args.replay_speed > 0 else 1.0
+                timescale = args.timescale if args.timescale > 0 else 1.0
                 for msg in source:
                     if stop_evt.is_set():
                         break
                     if raw_logger is not None:
                         raw_logger(msg)
-                    if args.realtime and getattr(msg, "timestamp", None):
+                    if getattr(msg, "timestamp", None):
                         if first_msg_ts is None:
                             first_msg_ts = msg.timestamp
                             replay_start = time.monotonic()
                         else:
-                            elapsed_log = (msg.timestamp - first_msg_ts) / speed
+                            elapsed_log = (msg.timestamp - first_msg_ts) / timescale
                             target = replay_start + elapsed_log
                             delay = target - time.monotonic()
                             if delay > 0:
@@ -1407,8 +1402,6 @@ def main() -> int:
                                         break
                                     time.sleep(min(0.1, remaining))
                     decode(msg, state, time.monotonic())
-                    if args.replay_rate > 0:
-                        time.sleep(args.replay_rate)
                 # signal that replay finished
                 stop_evt.set()
         except Exception as e:
