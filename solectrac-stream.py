@@ -294,12 +294,18 @@ NMC_OCV_TABLE: List[Tuple[int, float]] = [
 # exceeds this. At rest the estimate is the most trustworthy.
 SOC_REST_CURRENT_A = 2.0
 
-# Time-to-full estimator: keep a sliding window of (ts, soc%) samples
-# this long, and require at least this much spread before publishing a
-# slope-based ETA. Linear extrapolation under-estimates the CV taper
-# near 100% SOC, so the readout is labelled as an estimate.
-SOC_ETA_WINDOW_S = 300.0   # 5 min sliding window
-SOC_ETA_MIN_SPAN_S = 30.0  # need at least this much data first
+# Time-to-full estimator: retain (ts, soc%) samples for SOC_ETA_HISTORY_S,
+# slope over the most recent SOC_ETA_WINDOW_S when SOC is rising in that
+# window, and fall back to the slope across all retained history when
+# the window lands entirely inside a plateau (the BMS publishes SOC in
+# 0.385%/count steps that can hold for >1000 s in CV taper). Until the
+# deque has seen SOC_ETA_STABLE_TRANSITIONS distinct values, the ETA is
+# tagged "(rough)" because a one- or two-transition slope can be off by
+# ~100%. Linear extrapolation is also optimistic near 100% SOC.
+SOC_ETA_HISTORY_S = 7200.0          # retain up to 2 h of SOC samples
+SOC_ETA_WINDOW_S = 1800.0           # preferred slope window (30 min)
+SOC_ETA_MIN_SPAN_S = 30.0           # need at least this much data first
+SOC_ETA_STABLE_TRANSITIONS = 3      # transitions before dropping "(rough)"
 
 
 def soc_from_cell_mv(mv: float) -> float:
@@ -422,10 +428,10 @@ class State:
     # BMS-published SOC (F100F3 byte 4). More authoritative than the
     # voltage-only estimate when present; preferred in render_pack.
     bms_soc_pct: Channel = field(default_factory=Channel)
-    # Sliding window of recent (ts, bms_soc%) samples used to estimate
-    # remaining time to 100% during charging. Pruned to SOC_ETA_WINDOW_S
-    # so the slope tracks the current charge phase rather than the
-    # full session.
+    # Recent (ts, bms_soc%) samples used to estimate time-to-full during
+    # charging. Pruned to SOC_ETA_HISTORY_S; the estimator prefers slope
+    # over the SOC_ETA_WINDOW_S window and falls back to the full
+    # retained history when the window lands inside a SOC plateau.
     soc_history: Deque[Tuple[float, float]] = field(default_factory=deque)
     # F108 fault bitmap bytes. Byte 7 is decoded (BMS warning code
     # bitmap from the operator manual). Bytes 0..6 surveyed across
@@ -578,7 +584,7 @@ def decode(msg: "can.Message", state: State, now: float) -> None:
             state.bms_soc_pct.update(data[4] * 0.385 + 3.8, now)
             # Sliding window of SOC samples for the time-to-full ETA.
             state.soc_history.append((now, state.bms_soc_pct.value))
-            cutoff = now - SOC_ETA_WINDOW_S
+            cutoff = now - SOC_ETA_HISTORY_S
             while (state.soc_history
                    and state.soc_history[0][0] < cutoff):
                 state.soc_history.popleft()
@@ -660,6 +666,14 @@ def decode(msg: "can.Message", state: State, now: float) -> None:
         state.decoded += 1
 
     elif src == SRC_MOTOR and pgn == PGN_FF21:
+        # Layout (across 45,086 frames in 30 captures):
+        #   byte 0 = throttle pedal (raw, ~0..0x69)
+        #   byte 1 = always 0x00 (reserved padding)
+        #   bytes 2-3 = RPM magnitude (LE u16, biased)
+        #   byte 4 = controller temp (J1939 +40 C offset, 0=absent)
+        #   byte 5 = motor temp     (J1939 +40 C offset, 0=absent)
+        #   byte 6 = always 0x00 (reserved padding)
+        #   byte 7 = direction selector (0x10/0x14/0x18)
         # bytes 2-3 little-endian, biased by 0x0C80, give RPM magnitude.
         rpm_mag = ((data[3] << 8) | data[2]) - RPM_BIAS
         # byte 7 = directional pedal selector; only three literal values
@@ -992,29 +1006,57 @@ def render_pack(state: State, mains_v: float, efficiency: float,
     return Panel(t, title="Pack", border_style="green")
 
 
+def count_soc_transitions(state: State) -> int:
+    """Number of times the BMS SOC value changed in the retained history.
+
+    Used to gate the "(rough)" tag on the ETA: with only one or two
+    transitions a single quantization step dominates the slope, so the
+    estimate can be off by ~100%.
+    """
+    n = 0
+    last: Optional[float] = None
+    for _ts, sc in state.soc_history:
+        if last is not None and sc != last:
+            n += 1
+        last = sc
+    return n
+
+
 def estimate_charge_eta_s(state: State) -> Optional[float]:
     """Estimate seconds until BMS SOC reaches 100%.
 
-    Uses a linear fit over the recent SOC sample window. Returns None
-    when there isn't enough data, when SOC isn't rising, or when SOC is
-    already at/above 100%. Note: charging current tapers in the CV
-    phase near full, so linear extrapolation is optimistic in the last
-    ~10% of charge.
+    Prefers the slope across the most recent SOC_ETA_WINDOW_S of samples
+    so the ETA tracks the current charge phase. Falls back to the slope
+    across all retained history when the window lands entirely inside a
+    SOC plateau (BMS publishes SOC in 0.385%/count steps that can hold
+    for >1000 s in CV taper). Returns None when nothing is rising. CV
+    current tapers near full, so linear extrapolation is optimistic in
+    the last ~10% of charge.
     """
     samples = state.soc_history
     if len(samples) < 2:
         return None
-    t0, s0 = samples[0]
     t1, s1 = samples[-1]
-    span = t1 - t0
-    if span < SOC_ETA_MIN_SPAN_S:
-        return None
     if s1 >= 100.0:
         return 0.0
-    rate = (s1 - s0) / span  # %/s
-    if rate <= 0:
-        return None
-    return (100.0 - s1) / rate
+
+    def _slope_eta(t0: float, s0: float) -> Optional[float]:
+        span = t1 - t0
+        if span < SOC_ETA_MIN_SPAN_S:
+            return None
+        rate = (s1 - s0) / span  # %/s
+        if rate <= 0:
+            return None
+        return (100.0 - s1) / rate
+
+    cutoff = t1 - SOC_ETA_WINDOW_S
+    for ts, sc in samples:
+        if ts >= cutoff:
+            eta = _slope_eta(ts, sc)
+            if eta is not None:
+                return eta
+            break
+    return _slope_eta(samples[0][0], samples[0][1])
 
 
 def format_eta(secs: float) -> str:
@@ -1088,6 +1130,10 @@ def render_charger(state: State, now: float) -> Panel:
             if eta is None:
                 t.add_row("ETA to 100%",
                           Text("estimating...", style="dim"))
+            elif count_soc_transitions(state) < SOC_ETA_STABLE_TRANSITIONS:
+                t.add_row("ETA to 100%",
+                          Text(f"{format_eta(eta)} (rough)",
+                               style="yellow"))
             else:
                 t.add_row("ETA to 100%", Text(format_eta(eta)))
 
@@ -1407,7 +1453,7 @@ def build_layout(state: State, args, now: float) -> Layout:
     layout = Layout()
     layout.split_column(
         Layout(name="header", size=3),
-        Layout(name="row1", size=9),
+        Layout(name="row1", size=12),
         Layout(name="cells", size=11),
         Layout(name="row4", size=8),
         Layout(name="faults", size=15),
