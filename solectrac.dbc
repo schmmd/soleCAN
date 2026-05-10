@@ -172,6 +172,21 @@ BO_ 2566869221 Charger_Telemetry: 8 Charger
  SG_ Charger_Voltage : 8|16@1+ (0.1,76.8) [76.8|6630.3] "V" BMS,VehicleController
  SG_ Charger_Current : 24|16@1+ (0.1,0) [0|6553.5] "A" BMS,VehicleController
 
+BO_ 2566834890 DM1: 8 MotorECU
+ SG_ Lamp_Malfunction : 6|2@1+ (1,0) [0|3] "" VehicleController,BMS,Charger
+ SG_ Lamp_RedStop : 4|2@1+ (1,0) [0|3] "" VehicleController,BMS,Charger
+ SG_ Lamp_AmberWarning : 2|2@1+ (1,0) [0|3] "" VehicleController,BMS,Charger
+ SG_ Lamp_Protect : 0|2@1+ (1,0) [0|3] "" VehicleController,BMS,Charger
+ SG_ Flash_Malfunction : 14|2@1+ (1,0) [0|3] "" VehicleController,BMS,Charger
+ SG_ Flash_RedStop : 12|2@1+ (1,0) [0|3] "" VehicleController,BMS,Charger
+ SG_ Flash_AmberWarning : 10|2@1+ (1,0) [0|3] "" VehicleController,BMS,Charger
+ SG_ Flash_Protect : 8|2@1+ (1,0) [0|3] "" VehicleController,BMS,Charger
+ SG_ DTC_SPN_Low16 : 16|16@1+ (1,0) [0|65535] "" VehicleController,BMS,Charger
+ SG_ DTC_FMI : 32|5@1+ (1,0) [0|31] "" VehicleController,BMS,Charger
+ SG_ DTC_SPN_High3 : 37|3@1+ (1,0) [0|7] "" VehicleController,BMS,Charger
+ SG_ DTC_OC : 40|7@1+ (1,0) [0|127] "" VehicleController,BMS,Charger
+ SG_ DTC_CM : 47|1@1+ (1,0) [0|1] "" VehicleController,BMS,Charger
+
 BO_ 2365530570 Motor_Telemetry: 8 MotorECU
  SG_ Throttle_Raw : 0|8@1+ (1,0) [0|255] "" VehicleController
  SG_ Motor_RPM_Magnitude : 16|16@1+ (1,-3200) [-3200|62335] "rpm" VehicleController
@@ -257,6 +272,21 @@ CM_ SG_ 2566869221 Charger_Status "Charger status byte. 0x00 = idle / not chargi
 CM_ SG_ 2566869221 Charger_Voltage "Charger output voltage at the pack terminals. Encoded identically to Pack_Voltage in BMS_PackStatus: 0.1 V/bit with a +76.8 V offset. Anchored against asc/charging-120V-90ish-to-100.asc by linear regression of byte1 vs Pack_Voltage across 2863 active-charging frames: slope 0.1024, intercept 77.04, R^2=0.9856. Tracks Pack_Voltage to within 0.6 V across the whole charge (charger reads slightly lower than the BMS, consistent with cable voltage drop). Byte 2 (high byte of the 16-bit LE field) was 0x00 throughout the 120V capture; the pack will never reach 102.3 V with this 20-cell NMC chemistry, so the high byte may always be 0 in practice. ONLY MEANINGFUL WHEN Charger_Status == 'active' (0x03); other statuses leave the bytes at handshake / idle values that should not be interpreted as voltage.";
 CM_ SG_ 2566869221 Charger_Current "Charger output current magnitude. 0.1 A/bit, no offset, little-endian uint16. Anchored against |Pack_Current| in F100F3 across 2863 active-charging frames: slope 0.0989, intercept -0.07, R^2=0.9985. Tracks |Pack_Current| to within 0.3 A across the whole charge, including the constant-current to constant-voltage taper near full SOC (18.5 A -> 9.9 A -> 2.9 A as the pack approached 100%). Byte 4 (high byte) was 0x00 throughout the 120V capture (max observed current was 18.5 A); a higher-power charger could push the high byte above 0. ONLY MEANINGFUL WHEN Charger_Status == 'active' (0x03); other statuses leave the bytes at handshake / idle values - in particular byte 4 is 0x08 when status is 'idle' (0x00), which would naively decode to 204.8 A.";
 
+CM_ BO_ 2566834890 "PGN FECA (DM1, Active Diagnostic Trouble Codes) from MotorECU (0xCA), per SAE J1939-73. Single-frame layout: bytes 0/1 = lamp/flash status (4 lamps x 2 bits each), bytes 2-5 = first DTC (SPN/FMI/CM/OC), bytes 6-7 = padding 0xFF. The full SPN is 19 bits and is reconstructed as SPN = DTC_SPN_Low16 | (DTC_SPN_High3 << 16); DBC can't express that as a single signal because the bits aren't contiguous. The decoder also assumes SPN Conversion Method = 0 (DTC_CM bit, modern J1939); if a frame ever shows DTC_CM = 1 the bit packing of byte 4 changes and the SPN/FMI fields must be re-decoded. Multi-DTC DM1 messages travel over J1939 transport-protocol BAM (PGN ECFF/EBFF) and aren't represented in this DBC -- none have been observed in our captures so far. Every observed DM1 frame in current captures is the J1939 idle pattern (00 00 00 00 00 00 FF FF), so the lamp/state encoding is validated against the J1939-73 spec rather than against fault data; treat any future SPN as TENTATIVE until cross-checked against vendor docs.";
+CM_ SG_ 2566834890 Lamp_Malfunction "Malfunction Indicator Lamp (MIL) status, byte 0 bits 7-6. 0=off, 1=on, 2=reserved, 3=not available.";
+CM_ SG_ 2566834890 Lamp_RedStop "Red Stop Lamp status, byte 0 bits 5-4. Same enum as Lamp_Malfunction.";
+CM_ SG_ 2566834890 Lamp_AmberWarning "Amber Warning Lamp status, byte 0 bits 3-2. Same enum as Lamp_Malfunction.";
+CM_ SG_ 2566834890 Lamp_Protect "Protect Lamp status, byte 0 bits 1-0. Same enum as Lamp_Malfunction.";
+CM_ SG_ 2566834890 Flash_Malfunction "MIL flash status, byte 1 bits 7-6. 0=no flash, 1=slow (1 Hz), 2=fast (2 Hz), 3=not available.";
+CM_ SG_ 2566834890 Flash_RedStop "Red Stop flash status, byte 1 bits 5-4. Same enum as Flash_Malfunction.";
+CM_ SG_ 2566834890 Flash_AmberWarning "Amber Warning flash status, byte 1 bits 3-2. Same enum as Flash_Malfunction.";
+CM_ SG_ 2566834890 Flash_Protect "Protect Lamp flash status, byte 1 bits 1-0. Same enum as Flash_Malfunction.";
+CM_ SG_ 2566834890 DTC_SPN_Low16 "Lower 16 bits of the 19-bit Suspect Parameter Number, bytes 2-3 little-endian. Combine with DTC_SPN_High3 to reconstruct the full SPN.";
+CM_ SG_ 2566834890 DTC_FMI "Failure Mode Indicator (5 bits), byte 4 bits 0-4. Standard SAE J1939-73 FMI table (0=above-range high, 1=below-range low, 2=erratic, 3=shorted high, 4=shorted low, 5=open circuit, ... 31=condition exists).";
+CM_ SG_ 2566834890 DTC_SPN_High3 "Upper 3 bits of the 19-bit SPN, byte 4 bits 5-7. Combine with DTC_SPN_Low16: SPN = DTC_SPN_Low16 | (DTC_SPN_High3 << 16).";
+CM_ SG_ 2566834890 DTC_OC "Occurrence Count, byte 5 bits 0-6. Number of times this DTC has been activated since the last clear; saturates at 126; raw 127 = not available.";
+CM_ SG_ 2566834890 DTC_CM "SPN Conversion Method bit, byte 5 bit 7. 0 = modern (this DBC's bit-packing); 1 = legacy (bytes 4-5 use a different SPN/FMI layout that this DBC does NOT represent).";
+
 CM_ BO_ 2365530570 "PGN FF21 from MotorECU (0xCA). Motor / drive telemetry. Frame priority is 3 (not 6), so the on-the-wire 29-bit ID is 0x0CFF21CA. Suppressed entirely while charging (traction contactors open).";
 CM_ SG_ 2365530570 Throttle_Raw "Throttle pedal position, raw. Observed range roughly 0..0x34 (0..52). Mapping to a percentage is not yet confirmed.";
 CM_ SG_ 2365530570 Motor_RPM_Magnitude "Motor RPM magnitude (always >= 0). On the wire it is a biased little-endian uint16: raw 0x0C80 = 0 rpm; the DBC expresses this with offset=-3200. Sign of motion comes from Pedal_Direction, not from this field. Verified against a 0..2500 rpm acceleration trace.";
@@ -282,3 +312,13 @@ VAL_ 2565932787 State_Drive_Mode 0 "inactive" 1 "active" ;
 VAL_ 2565932787 State_Charging_Active 0 "inactive" 1 "active" ;
 VAL_ 2565932787 State_Charger_Present 0 "absent" 1 "present" ;
 VAL_ 2565933043 Limit_Mode 0 "charge" 1 "drive" ;
+VAL_ 2566834890 Lamp_Malfunction 0 "off" 1 "on" 2 "reserved" 3 "n/a" ;
+VAL_ 2566834890 Lamp_RedStop 0 "off" 1 "on" 2 "reserved" 3 "n/a" ;
+VAL_ 2566834890 Lamp_AmberWarning 0 "off" 1 "on" 2 "reserved" 3 "n/a" ;
+VAL_ 2566834890 Lamp_Protect 0 "off" 1 "on" 2 "reserved" 3 "n/a" ;
+VAL_ 2566834890 Flash_Malfunction 0 "no_flash" 1 "slow_1Hz" 2 "fast_2Hz" 3 "n/a" ;
+VAL_ 2566834890 Flash_RedStop 0 "no_flash" 1 "slow_1Hz" 2 "fast_2Hz" 3 "n/a" ;
+VAL_ 2566834890 Flash_AmberWarning 0 "no_flash" 1 "slow_1Hz" 2 "fast_2Hz" 3 "n/a" ;
+VAL_ 2566834890 Flash_Protect 0 "no_flash" 1 "slow_1Hz" 2 "fast_2Hz" 3 "n/a" ;
+VAL_ 2566834890 DTC_FMI 0 "above_max" 1 "below_min" 2 "erratic" 3 "shorted_high" 4 "shorted_low" 5 "open_circuit" 6 "shorted_ground" 7 "wrong_response" 8 "abnormal_freq" 9 "abnormal_update" 10 "abnormal_change" 11 "unknown" 12 "bad_device" 13 "out_of_cal" 14 "special" 15 "info_high_least" 16 "info_high_mod" 17 "info_low_least" 18 "info_low_mod" 19 "data_error" 20 "drift_high" 21 "drift_low" 31 "condition_exists" ;
+VAL_ 2566834890 DTC_CM 0 "modern" 1 "legacy" ;

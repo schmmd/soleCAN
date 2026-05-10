@@ -90,6 +90,23 @@ PGN_F107 = 0xF107
 PGN_F108 = 0xF108
 PGN_FF50 = 0xFF50
 PGN_FF21 = 0xFF21
+PGN_FECA = 0xFECA   # SAE J1939-73 DM1 (Active Diagnostic Trouble Codes)
+
+# DM1 lamp/flash 2-bit field decode tables (per J1939-73).
+DM1_LAMP_NAMES = ("malfunction", "red_stop", "amber_warning", "protect")
+DM1_LAMP_STATE = {0: "off", 1: "on", 2: "rsv", 3: "n/a"}
+DM1_FLASH_STATE = {0: "-", 1: "1Hz", 2: "2Hz", 3: "n/a"}
+# Standard J1939-73 Appendix A FMIs (most common; full list is 0..31).
+DM1_FMI_NAMES = {
+    0: "above max", 1: "below min", 2: "erratic",
+    3: "shorted high", 4: "shorted low", 5: "open circuit",
+    6: "shorted ground", 7: "wrong response", 8: "abnormal frequency",
+    9: "abnormal update rate", 10: "abnormal change rate", 11: "unknown",
+    12: "bad device", 13: "out of cal", 14: "special", 15: "info high (least)",
+    16: "info high (mod)", 17: "info low (least)", 18: "info low (mod)",
+    19: "data error", 20: "data drift high", 21: "data drift low",
+    31: "condition exists",
+}
 
 # Vendor BMS error-code table from the CET / Farmtrac 25 G operator
 # manual, p.44 ("Error Codes for Controller and Battery"). Authoritative
@@ -402,6 +419,17 @@ class State:
     fault_bytes: List[Channel] = field(
         default_factory=lambda: [Channel() for _ in range(8)]
     )
+    # DM1 (J1939-73 Active DTCs) from motor ECU 0xCA. We track raw
+    # lamp/flash bytes and the most recent active DTC fields. Cleared
+    # back to None when an idle frame (00 00 00 00 00 00 FF FF) arrives,
+    # so the panel reflects "presently inactive" instead of "last fault
+    # ever observed".
+    dm1_lamp_byte: Channel = field(default_factory=Channel)
+    dm1_flash_byte: Channel = field(default_factory=Channel)
+    dm1_spn: Channel = field(default_factory=Channel)
+    dm1_fmi: Channel = field(default_factory=Channel)
+    dm1_cm: Channel = field(default_factory=Channel)
+    dm1_oc: Channel = field(default_factory=Channel)
     # per-cell / per-temp arrays (indexed 0-based; display is 1-based)
     cells: List[Channel] = field(
         default_factory=lambda: [Channel() for _ in range(NUM_CELLS)]
@@ -598,6 +626,45 @@ def decode(msg: "can.Message", state: State, now: float) -> None:
             state.controller_temp_c.update(data[4] - TEMP_OFFSET_C, now)
         if data[5]:
             state.motor_temp_c.update(data[5] - TEMP_OFFSET_C, now)
+        state.decoded += 1
+
+    elif src == SRC_MOTOR and pgn == PGN_FECA:
+        # SAE J1939-73 DM1: Active Diagnostic Trouble Codes from the
+        # motor ECU. Single-frame layout (no multi-frame BAM observed):
+        #   data[0]   lamp status   (4 lamps x 2 bits)
+        #   data[1]   flash status  (same lamp layout)
+        #   data[2-5] first DTC: SPN (19), FMI (5), CM (1), OC (7)
+        #   data[6-7] padding 0xFF
+        # Idle/healthy convention: 00 00 00 00 00 00 FF FF (every frame
+        # in our captures so far). Clear the channels on idle so the
+        # panel shows "no active fault" rather than the most recent
+        # historical fault.
+        lamp_byte = data[0]
+        flash_byte = data[1]
+        spn = (data[2]
+               | (data[3] << 8)
+               | (((data[4] >> 5) & 0x07) << 16))
+        fmi = data[4] & 0x1F
+        cm = (data[5] >> 7) & 0x01
+        oc = data[5] & 0x7F
+        if lamp_byte == 0 and flash_byte == 0 and spn == 0 and fmi == 0:
+            for ch in (state.dm1_lamp_byte, state.dm1_flash_byte,
+                       state.dm1_spn, state.dm1_fmi,
+                       state.dm1_cm, state.dm1_oc):
+                ch.clear()
+        else:
+            state.dm1_lamp_byte.update(lamp_byte, now)
+            state.dm1_flash_byte.update(flash_byte, now)
+            if spn != 0 or fmi != 0:
+                state.dm1_spn.update(spn, now)
+                state.dm1_fmi.update(fmi, now)
+                state.dm1_cm.update(cm, now)
+                state.dm1_oc.update(oc, now)
+            else:
+                state.dm1_spn.clear()
+                state.dm1_fmi.clear()
+                state.dm1_cm.clear()
+                state.dm1_oc.clear()
         state.decoded += 1
 
     elif src == SRC_CHARGER and pgn == PGN_FF50:
@@ -1062,62 +1129,140 @@ def render_vc(state: State, now: float) -> Panel:
 
 
 def render_faults(state: State, now: float) -> Panel:
-    """Display BMS fault info from F108. Byte 7 has a decoded bit-to-code
-    mapping (vendor BMS error-code table); other bytes are shown as raw
-    values when nonzero so undecoded fault data is at least visible.
+    """Display BMS fault info from F108 plus DM1 (motor-ECU Active
+    DTCs) from PGN FECA. Byte 7 of F108 has a decoded bit-to-code
+    mapping (vendor BMS error-code table); other bytes are shown as
+    raw values when nonzero so undecoded fault data is at least
+    visible. DM1 is summarised in a compact section underneath.
     """
     bytes_seen = any(c.value is not None for c in state.fault_bytes)
-    if not bytes_seen:
-        return Panel(Text("(no F108 frame seen yet)", style="dim"),
-                     title="BMS faults", border_style="blue")
-
-    # Stale if the most recent F108 byte update is older than STALE_S.
-    stamps = [c.ts for c in state.fault_bytes if c.ts is not None]
-    stale = (not stamps) or ((now - max(stamps)) > STALE_S)
-
-    vals = [int(c.value) if c.value is not None else 0
-            for c in state.fault_bytes]
-    nonzero_other = [(i, v) for i, v in enumerate(vals)
-                     if v != 0 and i != 7]
-
-    faults = active_bms_faults(state)
+    faults = active_bms_faults(state) if bytes_seen else []
 
     t = Table.grid(padding=(0, 2))
     t.add_column(justify="right")
     t.add_column(justify="left")
 
-    if faults:
-        for code, desc in faults:
-            t.add_row(Text(f"{code}", style="bold red"), Text(desc))
+    if not bytes_seen:
+        t.add_row(Text("F108", style="dim"),
+                  Text("(no F108 frame seen yet)", style="dim"))
+        nonzero_other = []
+        raw = Text("", style="dim")
     else:
-        t.add_row(Text("byte 7", style="dim"),
-                  Text("no codes from byte-7 group", style="green"))
+        # Stale if the most recent F108 byte update is older than STALE_S.
+        stamps = [c.ts for c in state.fault_bytes if c.ts is not None]
+        stale = (not stamps) or ((now - max(stamps)) > STALE_S)
 
-    if nonzero_other:
-        # Bytes 0..6 (excluding 7) with bit-position breakdown. Useful
-        # while the bit-to-code mapping for these bytes is still open.
-        for i, v in nonzero_other:
-            bits = ", ".join(str(b) for b in range(8) if (v >> b) & 1)
+        vals = [int(c.value) if c.value is not None else 0
+                for c in state.fault_bytes]
+        nonzero_other = [(i, v) for i, v in enumerate(vals)
+                         if v != 0 and i != 7]
+
+        if faults:
+            for code, desc in faults:
+                t.add_row(Text(f"{code}", style="bold red"), Text(desc))
+        else:
+            t.add_row(Text("byte 7", style="dim"),
+                      Text("no codes from byte-7 group", style="green"))
+
+        if nonzero_other:
+            # Bytes 0..6 (excluding 7) with bit-position breakdown. Useful
+            # while the bit-to-code mapping for these bytes is still open.
+            for i, v in nonzero_other:
+                bits = ", ".join(str(b) for b in range(8) if (v >> b) & 1)
+                t.add_row(
+                    Text(f"byte {i}", style="yellow"),
+                    Text(f"0x{v:02X}  bits {{{bits}}}  (undecoded)",
+                         style="yellow"),
+                )
+
+        raw_style = "yellow dim" if stale else "dim"
+        raw_hex = " ".join(f"{v:02X}" for v in vals)
+        raw = Text(
+            f"raw  {raw_hex}" + ("  (stale)" if stale else ""),
+            style=raw_style,
+        )
+
+    # DM1 section: always rendered. When healthy it's a single
+    # "no active DTCs" line; when active, lamp + SPN/FMI rows.
+    dm1 = _render_dm1(state, now)
+
+    dm1_active = (state.dm1_lamp_byte.value or
+                  state.dm1_flash_byte.value or
+                  state.dm1_spn.value or state.dm1_fmi.value)
+    if faults or nonzero_other or dm1_active:
+        border = "red" if (faults or dm1_active) else "yellow"
+    elif bytes_seen:
+        border = "green"
+    else:
+        border = "blue"
+
+    return Panel(Group(t, raw, dm1), title="Faults & DTCs",
+                 border_style=border)
+
+
+def _render_dm1(state: State, now: float):
+    """Compact DM1 (motor-ECU Active DTC) summary, embedded in the
+    Faults & DTCs panel. Shows a single 'no active DTCs' line when
+    healthy, and lamp/SPN/FMI breakdowns when a fault is active."""
+    t = Table.grid(padding=(0, 2))
+    t.add_column(justify="right")
+    t.add_column(justify="left")
+
+    lamp = state.dm1_lamp_byte
+    flash = state.dm1_flash_byte
+    spn = state.dm1_spn
+    fmi = state.dm1_fmi
+    cm = state.dm1_cm
+    oc = state.dm1_oc
+
+    # If we've never seen a DM1 frame, lamp.ts is None and value is None.
+    # If the last seen frame was idle, the decoder cleared all channels so
+    # ts goes back to None. Either way we render a single status line.
+    has_lamp = lamp.value is not None or flash.value is not None
+    has_dtc = spn.value is not None or fmi.value is not None
+
+    if not has_lamp and not has_dtc:
+        # No active fault. Distinguish "never seen" from "actively idle"
+        # using state.frames as a proxy -- after any traffic at all on
+        # the bus, the motor ECU's 1 Hz DM1 broadcast will have arrived.
+        msg = Text("DM1 (motor ECU): no active DTCs",
+                   style="green")
+        t.add_row("", msg)
+        return t
+
+    if has_lamp:
+        lb = int(lamp.value or 0)
+        fb = int(flash.value or 0)
+        for i, name in enumerate(DM1_LAMP_NAMES):
+            shift = 6 - 2 * i
+            s = (lb >> shift) & 0x03
+            f = (fb >> shift) & 0x03
+            if s == 0 and f == 0:
+                continue
+            state_txt = DM1_LAMP_STATE.get(s, "?")
+            flash_txt = DM1_FLASH_STATE.get(f, "?")
+            style = "bold red" if s == 1 else "yellow"
             t.add_row(
-                Text(f"byte {i}", style="yellow"),
-                Text(f"0x{v:02X}  bits {{{bits}}}  (undecoded)",
-                     style="yellow"),
+                Text(f"DM1 {name}", style=style),
+                Text(f"{state_txt}  flash={flash_txt}", style=style),
             )
 
-    raw_style = "yellow dim" if stale else "dim"
-    raw_hex = " ".join(f"{v:02X}" for v in vals)
-    raw = Text(
-        f"raw  {raw_hex}" + ("  (stale)" if stale else ""),
-        style=raw_style,
-    )
+    if has_dtc:
+        spn_v = int(spn.value or 0)
+        fmi_v = int(fmi.value or 0)
+        oc_v = int(oc.value or 0)
+        cm_v = int(cm.value or 0)
+        fmi_name = DM1_FMI_NAMES.get(fmi_v, "?")
+        t.add_row(
+            Text("DM1 DTC", style="bold red"),
+            Text(
+                f"SPN={spn_v}  FMI={fmi_v} ({fmi_name})  "
+                f"OC={oc_v}  CM={cm_v}",
+                style="bold red",
+            ),
+        )
 
-    if faults or nonzero_other:
-        border = "red" if faults else "yellow"
-    else:
-        border = "green"
-
-    return Panel(Group(t, raw), title="BMS faults (F108)",
-                 border_style=border)
+    return t
 
 
 def render_alerts(alerts: List[Tuple[str, str]]) -> Panel:
@@ -1141,7 +1286,7 @@ def build_layout(state: State, args, now: float) -> Layout:
         Layout(name="row1", size=9),
         Layout(name="cells", size=11),
         Layout(name="row4", size=8),
-        Layout(name="faults", size=13),
+        Layout(name="faults", size=15),
         Layout(name="alerts", size=8),
     )
     layout["header"].update(render_header(state, now))

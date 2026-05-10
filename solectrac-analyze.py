@@ -79,6 +79,14 @@ Signal names use a `domain.name` (or `domain.NN.name`) convention:
     motor.motor_temp_c         FF21CA byte 5 (only emitted when nonzero)
     pack.soc_raw               F100F3 byte 4 (raw)
     pack.soc_pct               F100F3 byte 4 -> percent (b4 * 0.385 + 3.8)
+    dm1.lamp.byte0/1           FECA bytes 0/1 raw (lamp & flash status, when nonzero)
+    dm1.lamp.NAME_state        FECA byte 0 per-lamp 2-bit state (NAME in
+                               {malfunction, red_stop, amber_warning, protect})
+    dm1.lamp.NAME_flash        FECA byte 1 per-lamp 2-bit flash status
+    dm1.dtc.spn                FECA SAE J1939-73 SPN (19-bit)
+    dm1.dtc.fmi                FECA J1939-73 FMI (5-bit failure mode)
+    dm1.dtc.cm                 FECA SPN Conversion Method bit
+    dm1.dtc.oc                 FECA Occurrence Count (7-bit)
 
 Decoder assumptions (verify against the BMS spec before trusting numerically):
   * Source 0xF3 is the BMS, 0xE5 is the external charger, 0xF4 is a vehicle
@@ -131,6 +139,23 @@ Decoder assumptions (verify against the BMS spec before trusting numerically):
     = 0.986 for V and R^2 = 0.999 for I). V/I bytes only carry meaningful
     values while status == 0x03; other states leave them at handshake / idle
     values.
+  * PGN 0xFECA from 0xCA: DM1 (Active Diagnostic Trouble Codes), per
+        SAE J1939-73. Single-frame layout (multi-DTC BAM not observed):
+            byte 0     = lamp status, 4 lamps x 2 bits each:
+                           bits 7-6 MIL, 5-4 Red Stop,
+                           3-2 Amber Warning, 1-0 Protect
+            byte 1     = flash status, same lamp layout as byte 0
+            bytes 2-5  = first DTC (4 bytes):
+                           SPN  = b2 | (b3<<8) | ((b4>>5)&7)<<16
+                           FMI  = b4 & 0x1F
+                           CM   = (b5 >> 7) & 1
+                           OC   = b5 & 0x7F
+            bytes 6-7  = padding 0xFF for single-DTC frames
+        All observed frames in our captures are the J1939 idle pattern
+        (00 00 00 00 00 00 FF FF), which the decoder skips. Decoder is
+        validated against the J1939-73 spec rather than against fault
+        data; trust the lamp/state decode but treat any future SPN as
+        TENTATIVE until cross-checked against vendor documentation.
   * PGN 0xFF21 from 0xCA: motor controller / drive ECU telemetry.
         byte 0     = throttle pedal position (raw, ~0..0x34)
         bytes 2-3  = motor RPM magnitude, little-endian uint16, biased by 0x0C80
@@ -187,6 +212,19 @@ PGN_FF50 = 0xFF50   # charger telemetry (V, A)
 
 # Motor controller broadcast.
 PGN_FF21 = 0xFF21   # motor telemetry (RPM, throttle, drive-state, ctrl temp)
+
+# Standard SAE J1939-73 diagnostic message (Active DTCs).
+PGN_FECA = 0xFECA   # DM1 (Active Diagnostic Trouble Codes)
+
+# DM1 lamp-status enum per J1939-73 (2 bits per lamp, same encoding for byte 0
+# "lamp on/off" and byte 1 "flash status"):
+#   0b00 = off / no flash
+#   0b01 = on  / slow flash (1 Hz)
+#   0b10 = reserved / fast flash (2 Hz)
+#   0b11 = not available
+DM1_LAMP_NAMES = ("malfunction", "red_stop", "amber_warning", "protect")
+DM1_LAMP_STATE = {0: "off", 1: "on", 2: "reserved", 3: "n/a"}
+DM1_FLASH_STATE = {0: "no_flash", 1: "slow_1hz", 2: "fast_2hz", 3: "n/a"}
 
 TEMP_OFFSET_C = 40
 
@@ -622,6 +660,65 @@ def decode_file(path: Path, scenario: str, rows: list, frames: list,
                          data[5] - TEMP_OFFSET_C, "c"))
                 sc["motor"] += 1
 
+            elif src == SRC_MOTOR and pgn == PGN_FECA:
+                # DM1 (Active Diagnostic Trouble Codes) per SAE J1939-73.
+                #   data[0] = lamp status: 4 lamps x 2 bits each
+                #             bits 7-6 = MIL (Malfunction Indicator Lamp)
+                #             bits 5-4 = Red Stop
+                #             bits 3-2 = Amber Warning
+                #             bits 1-0 = Protect
+                #   data[1] = flash status, same layout as data[0]
+                #   data[2..5] = first DTC (4 bytes, layout below)
+                #   data[6..7] = padding (0xFF) for single-DTC frame
+                # DTC layout (CM=0, the modern SAE convention):
+                #   data[2]      = SPN bits  0..7
+                #   data[3]      = SPN bits  8..15
+                #   data[4]      = SPN bits 16..18 (high 3 bits) | FMI (low 5)
+                #   data[5]      = CM (bit 7) | OC (low 7 bits)
+                # Multi-DTC DM1 messages use J1939 transport-protocol BAM
+                # (PGN 0xECFF / 0xEBFF). None observed in our captures, so
+                # this decoder handles only single-frame DM1.
+                #
+                # Healthy idle convention: 00 00 00 00 00 00 FF FF (all
+                # lamps off, no DTC, padding 0xFF). Suppressed to keep the
+                # CSV compact; only nonzero / interesting frames emit rows.
+                lamp_byte = data[0]
+                flash_byte = data[1]
+                spn = (data[2]
+                       | (data[3] << 8)
+                       | (((data[4] >> 5) & 0x07) << 16))
+                fmi = data[4] & 0x1F
+                cm = (data[5] >> 7) & 0x01
+                oc = data[5] & 0x7F
+                dtc_active = (spn != 0) or (fmi != 0)
+                if lamp_byte == 0 and flash_byte == 0 and not dtc_active:
+                    sc["skipped_zero"] += 1
+                    continue
+                if lamp_byte:
+                    emissions.append(("dm1.lamp.byte0", lamp_byte, ""))
+                    for i, name in enumerate(DM1_LAMP_NAMES):
+                        # i=0 -> bits 7-6, i=1 -> bits 5-4, etc.
+                        shift = 6 - 2 * i
+                        v = (lamp_byte >> shift) & 0x03
+                        if v:
+                            emissions.append(
+                                (f"dm1.lamp.{name}_state", v, ""))
+                if flash_byte:
+                    emissions.append(("dm1.lamp.byte1", flash_byte, ""))
+                    for i, name in enumerate(DM1_LAMP_NAMES):
+                        shift = 6 - 2 * i
+                        v = (flash_byte >> shift) & 0x03
+                        if v:
+                            emissions.append(
+                                (f"dm1.lamp.{name}_flash", v, ""))
+                if dtc_active:
+                    emissions.append(("dm1.dtc.spn", spn, ""))
+                    emissions.append(("dm1.dtc.fmi", fmi, ""))
+                    emissions.append(("dm1.dtc.cm", cm, ""))
+                    emissions.append(("dm1.dtc.oc", oc, ""))
+                sc.setdefault("dm1", 0)
+                sc["dm1"] += 1
+
             elif src == SRC_CHARGER and pgn == PGN_FF50:
                 if all(b == 0 for b in data):
                     sc["skipped_zero"] += 1
@@ -815,6 +912,38 @@ DECODERS = [
     ("motor.motor_temp_c", "FF21", "CA", "5", "u8 - 40",
      "c", "tentative",
      "motor temp; cooler/steadier than byte 4; 0 = not present and suppressed"),
+    ("dm1.lamp.byte0", "FECA", "CA", "0", "u8 (raw, when nonzero)",
+     "", "verified",
+     "SAE J1939-73 DM1 lamp-status byte; per-lamp decode below; "
+     "every observed frame in current captures = 0x00 (no faults active)"),
+    ("dm1.lamp.byte1", "FECA", "CA", "1", "u8 (raw, when nonzero)",
+     "", "verified",
+     "SAE J1939-73 DM1 lamp-flash-status byte; per-lamp decode below"),
+    ("dm1.lamp.NAME_state", "FECA", "CA", "0 (2 bits)", "(b0 >> shift) & 3",
+     "", "verified",
+     "NAME in {malfunction, red_stop, amber_warning, protect}; "
+     "shift = 6,4,2,0 respectively; values 0=off, 1=on, 2=reserved, 3=n/a; "
+     "emitted only when nonzero"),
+    ("dm1.lamp.NAME_flash", "FECA", "CA", "1 (2 bits)", "(b1 >> shift) & 3",
+     "", "verified",
+     "same NAME / shift mapping as _state; values 0=no_flash, 1=slow_1Hz, "
+     "2=fast_2Hz, 3=n/a"),
+    ("dm1.dtc.spn", "FECA", "CA", "2-4",
+     "b2 | (b3<<8) | ((b4>>5)&7)<<16", "", "verified",
+     "SAE J1939-73 SPN (Suspect Parameter Number, 19 bits); CM=0 layout; "
+     "emitted only when SPN!=0 or FMI!=0 (no active DTCs in any observed capture)"),
+    ("dm1.dtc.fmi", "FECA", "CA", "4 (low 5 bits)", "b4 & 0x1F",
+     "", "verified",
+     "Failure Mode Indicator (5 bits); SAE J1939-73 Appendix A enumerates "
+     "the 32 standard FMIs (0=above-range high, 1=below-range low, etc.)"),
+    ("dm1.dtc.cm", "FECA", "CA", "5 (bit 7)", "(b5 >> 7) & 1",
+     "", "verified",
+     "SPN Conversion Method bit; 0 = modern (this decoder), 1 = legacy "
+     "(re-decode SPN/FMI if observed nonzero)"),
+    ("dm1.dtc.oc", "FECA", "CA", "5 (low 7 bits)", "b5 & 0x7F",
+     "", "verified",
+     "Occurrence Count: number of times this DTC has been activated since "
+     "the last clear (saturates at 126; 127 = not available)"),
 ]
 
 # ids.csv has its own writer because it's per-ID metadata, not timeseries.
