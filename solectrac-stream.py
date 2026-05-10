@@ -246,6 +246,17 @@ CHARGER_V_OFFSET_V = PACK_VOLTAGE_OFFSET_V
 CHARGER_I_LSB_A = 0.1
 RPM_BIAS = 0x0C80
 LIMIT_CURRENT_LSB_A = 0.01     # F107 bytes 0-1 / 2-3 BE, 0.01 A/bit
+# Throttle pedal scaling for FF21CA byte 0. Empirical survey across all
+# 45,086 motor-telemetry frames: byte 0 ranges 0..0x69 (0..105) with an
+# idle resting offset of ~3 (sensor noise floor with foot off pedal) and
+# a controller dead-low around 14 (below this, motor RPM stays near 0;
+# matches the Kelly TPS_dead_low concept from the hydraulic pump doc).
+# The byte behaves like a J1939-style 0..100% throttle position with
+# mild mechanical overshoot (rare excursions to 105). The previous
+# constant of 52 (0x34) was the max seen in earlier captures only; it
+# overstates pct by ~2x at full pedal.
+THROTTLE_DEAD_LOW = 3          # idle resting offset (subtracted from raw)
+THROTTLE_FULL_SCALE = 100      # byte 0 = direct percent; clamp at 100
 # Pack ratings from the vendor BMS GUI (NOTES.txt): 300 Ah at 72.0 V
 # nominal -> 21.6 kWh nominal energy. Used for the "% of pack" display
 # only; not used for any decoding.
@@ -306,6 +317,12 @@ SOC_ETA_HISTORY_S = 7200.0          # retain up to 2 h of SOC samples
 SOC_ETA_WINDOW_S = 1800.0           # preferred slope window (30 min)
 SOC_ETA_MIN_SPAN_S = 30.0           # need at least this much data first
 SOC_ETA_STABLE_TRANSITIONS = 3      # transitions before dropping "(rough)"
+
+# Pack-power sparkline: keep the last POWER_HISTORY_S of (ts, W) samples
+# and bucket them into POWER_SPARK_WIDTH columns at render time. F100F3
+# arrives at ~10 Hz so 60 s gives ~600 samples; bucketing averages them.
+POWER_HISTORY_S = 60.0
+POWER_SPARK_WIDTH = 30
 
 
 def soc_from_cell_mv(mv: float) -> float:
@@ -380,6 +397,9 @@ class State:
     # last_energy_ts tracks the timestamp / power of the previous F100F3
     # frame for the trapezoidal step.
     pack_power_w: Channel = field(default_factory=Channel)
+    # Recent (ts, pack_power_w) samples for the sparkline. Pruned to
+    # POWER_HISTORY_S so the panel always shows the last minute.
+    power_history: Deque[Tuple[float, float]] = field(default_factory=deque)
     energy_wh_drawn: float = 0.0
     energy_wh_charged: float = 0.0
     last_energy_ts: Optional[float] = None
@@ -570,6 +590,11 @@ def decode(msg: "can.Message", state: State, now: float) -> None:
             if volts is not None and amps is not None:
                 power = volts * amps
                 state.pack_power_w.update(power, now)
+                state.power_history.append((now, power))
+                p_cutoff = now - POWER_HISTORY_S
+                while (state.power_history
+                       and state.power_history[0][0] < p_cutoff):
+                    state.power_history.popleft()
                 if (state.last_energy_ts is not None
                         and state.last_energy_p is not None):
                     dt = now - state.last_energy_ts
@@ -913,6 +938,61 @@ def evaluate_alerts(state: State, mains_v: float, breaker_a: float,
 
 # --- TUI rendering ----------------------------------------------------------
 
+# Sparkline glyphs all grow from the bottom; sign is communicated by
+# colour (red = drawing, green = charging) since unicode block elements
+# don't have a clean symmetric set that grows above and below a baseline.
+_SPARK_LEVELS = " ▁▂▃▄▅▆▇█"   # 0 = baseline tick, 8 = max magnitude
+
+
+def power_sparkline(state: State, width: int = POWER_SPARK_WIDTH) -> Text:
+    """Return a coloured unicode sparkline of recent pack power.
+
+    Buckets samples into `width` columns by timestamp. Bar height encodes
+    |power| scaled to the window's peak; colour encodes sign (red =
+    drawing, green = charging). Empty buckets render as a dim tick.
+    """
+    samples = list(state.power_history)
+    if not samples:
+        return Text("─" * width, style="dim")
+
+    t0 = samples[0][0]
+    t1 = samples[-1][0]
+    span = max(t1 - t0, 1e-6)
+    buckets: List[List[float]] = [[] for _ in range(width)]
+    for ts, p in samples:
+        idx = int((ts - t0) / span * width)
+        if idx >= width:
+            idx = width - 1
+        buckets[idx].append(p)
+
+    means = [sum(b) / len(b) if b else None for b in buckets]
+    abs_max = max((abs(m) for m in means if m is not None), default=0.0)
+    if abs_max < 1.0:
+        abs_max = 1.0  # avoid divide-by-zero / amplifying noise
+
+    out = Text()
+    last: Optional[float] = None
+    for m in means:
+        if m is None:
+            # Carry the previous bucket value across short gaps so the
+            # line doesn't look chopped up; render a dim tick when there
+            # is no prior sample either.
+            if last is None:
+                out.append("─", style="dim")
+                continue
+            m = last
+        last = m
+        level = min(8, int(round(abs(m) / abs_max * 8)))
+        ch = _SPARK_LEVELS[level]
+        if level == 0:
+            out.append(ch, style="dim")
+        elif m >= 0:
+            out.append(ch, style="red")
+        else:
+            out.append(ch, style="green")
+    return out
+
+
 def fmt(c: Channel, fmt_spec: str = "{:.2f}", unit: str = "",
         now: Optional[float] = None) -> Text:
     if c.value is None:
@@ -965,6 +1045,45 @@ def render_pack(state: State, mains_v: float, efficiency: float,
             i_text = Text(f"{pi:.1f} A")
     t.add_row("current", i_text)
 
+    # F107 BMS current limit headroom. Pick the relevant limit from the
+    # sign of pack current: discharge limit when drawing, charge limit
+    # when charging. ideas.txt: "you're at 18 A of a 200 A budget".
+    if pi is not None:
+        if pi >= 0 and state.limit_discharge_a.value is not None:
+            limit = state.limit_discharge_a.value
+            kind = "discharge"
+            used = pi
+        elif pi < 0 and state.limit_charge_a.value is not None:
+            limit = state.limit_charge_a.value
+            kind = "charge"
+            used = -pi
+        else:
+            limit = None
+            kind = None
+            used = 0.0
+        if limit is not None and limit > 0:
+            frac = max(0.0, min(1.0, used / limit))
+            bar_w = 14
+            filled = int(round(frac * bar_w))
+            bar = Text("█" * filled + "░" * (bar_w - filled))
+            if frac >= 0.9:
+                style = "bold red"
+            elif frac >= 0.7:
+                style = "yellow"
+            else:
+                style = None
+            tag = " (stale)" if state.limit_discharge_a.is_stale(now) else ""
+            short = "dis" if kind == "discharge" else "chg"
+            t.add_row(
+                "limit",
+                Text.assemble(
+                    bar,
+                    Text(f"  {used:>5.1f}/{limit:.0f}A {short}"
+                         f"  {frac * 100:>3.0f}%{tag}",
+                         style=style),
+                ),
+            )
+
     if pack_v_ch.value is not None and pi is not None:
         # Pack convention: positive current = discharging the pack.
         # Power into the pack (charging) is negative; power out is positive.
@@ -976,6 +1095,18 @@ def render_pack(state: State, mains_v: float, efficiency: float,
             t.add_row("AC est",
                       Text(f"~{ac_w:.0f} W  ({ac_a:.1f} A @ {mains_v:.0f} V, "
                            f"{efficiency * 100:.0f}% eff)"))
+
+    # 60 s sparkline of pack power. Glyphs above the baseline (red) =
+    # drawing, below (green) = charging. Empty until the first F100F3.
+    if state.power_history:
+        spark = power_sparkline(state)
+        t.add_row(
+            "trend",
+            Text.assemble(
+                spark,
+                Text(f"  last {int(POWER_HISTORY_S)}s", style="dim"),
+            ),
+        )
 
     # Session-cumulative energy. Integrated across F100F3 frames since
     # stream start. Net is positive when the session has drawn more
@@ -1031,6 +1162,21 @@ def render_pack(state: State, mains_v: float, efficiency: float,
     if ocv_row is not None:
         t.add_row("SOC (OCV)", ocv_row)
 
+    # Runtime-to-empty estimate. Symmetric with the charger panel's
+    # ETA-to-100%: same soc_history slope, opposite sign. Only shown
+    # when the pack is actually being drawn from -- a parked tractor
+    # with zero load would otherwise show a "(rough)" never-ending ETA.
+    if (state.bms_soc_pct.value is not None
+            and pi is not None and pi > SOC_REST_CURRENT_A):
+        eta = estimate_drain_eta_s(state)
+        if eta is None:
+            t.add_row("ETA to 0%", Text("estimating...", style="dim"))
+        elif count_soc_transitions(state) < SOC_ETA_STABLE_TRANSITIONS:
+            t.add_row("ETA to 0%",
+                      Text(f"{format_eta(eta)} (rough)", style="yellow"))
+        else:
+            t.add_row("ETA to 0%", Text(format_eta(eta)))
+
     return Panel(t, title="Pack", border_style="green")
 
 
@@ -1050,32 +1196,36 @@ def count_soc_transitions(state: State) -> int:
     return n
 
 
-def estimate_charge_eta_s(state: State) -> Optional[float]:
-    """Estimate seconds until BMS SOC reaches 100%.
+def _estimate_soc_eta_s(state: State, target: float,
+                        rising: bool) -> Optional[float]:
+    """Generic SOC slope-extrapolation ETA used by the charge-to-100% and
+    drain-to-0% estimators.
 
-    Prefers the slope across the most recent SOC_ETA_WINDOW_S of samples
-    so the ETA tracks the current charge phase. Falls back to the slope
-    across all retained history when the window lands entirely inside a
-    SOC plateau (BMS publishes SOC in 0.385%/count steps that can hold
-    for >1000 s in CV taper). Returns None when nothing is rising. CV
-    current tapers near full, so linear extrapolation is optimistic in
-    the last ~10% of charge.
+    Prefers the slope across the most recent SOC_ETA_WINDOW_S so the ETA
+    tracks the current phase. Falls back to the full retained history
+    when the window lands entirely inside a SOC plateau (the BMS holds
+    each 0.385%/count step for >1000 s in CV taper). Returns None when
+    SOC isn't moving in the requested direction.
     """
     samples = state.soc_history
     if len(samples) < 2:
         return None
     t1, s1 = samples[-1]
-    if s1 >= 100.0:
+    if rising and s1 >= target:
+        return 0.0
+    if (not rising) and s1 <= target:
         return 0.0
 
     def _slope_eta(t0: float, s0: float) -> Optional[float]:
         span = t1 - t0
         if span < SOC_ETA_MIN_SPAN_S:
             return None
-        rate = (s1 - s0) / span  # %/s
-        if rate <= 0:
+        rate = (s1 - s0) / span  # %/s, signed
+        if rising and rate <= 0:
             return None
-        return (100.0 - s1) / rate
+        if (not rising) and rate >= 0:
+            return None
+        return (target - s1) / rate
 
     cutoff = t1 - SOC_ETA_WINDOW_S
     for ts, sc in samples:
@@ -1085,6 +1235,25 @@ def estimate_charge_eta_s(state: State) -> Optional[float]:
                 return eta
             break
     return _slope_eta(samples[0][0], samples[0][1])
+
+
+def estimate_charge_eta_s(state: State) -> Optional[float]:
+    """Seconds until BMS SOC reaches 100%, or None if not rising.
+
+    Linear extrapolation is optimistic in the last ~10% because charge
+    current tapers in CV.
+    """
+    return _estimate_soc_eta_s(state, target=100.0, rising=True)
+
+
+def estimate_drain_eta_s(state: State) -> Optional[float]:
+    """Seconds until BMS SOC reaches 0%, or None if not falling.
+
+    Linear extrapolation; real packs hit a BMS cutoff above 0% and the
+    cutback regions distort the slope, so this is "remaining at current
+    pace" rather than a hard runtime.
+    """
+    return _estimate_soc_eta_s(state, target=0.0, rising=False)
 
 
 def format_eta(secs: float) -> str:
@@ -1276,8 +1445,12 @@ def render_motor(state: State, now: float) -> Panel:
     if thr is None:
         t.add_row("throttle", Text("---", style="dim"))
     else:
-        # Approximate full-scale 0x34 = 52 raw seen in captures.
-        pct = int(round(thr * 100 / 52))
+        # Byte 0 is treated as a 0..100% percent field; subtract a 3-unit
+        # idle dead-low (resting sensor offset) and clamp at 100%. Range
+        # 0..0x69 (105) seen across the full corpus; the rare overshoot
+        # past 100 saturates rather than exceeding the bar.
+        pct = max(0, min(THROTTLE_FULL_SCALE,
+                         int(round(thr)) - THROTTLE_DEAD_LOW))
         bar_w = 20
         filled = int(round(pct * bar_w / 100))
         bar = Text("█" * filled + "░" * (bar_w - filled))
@@ -1481,7 +1654,7 @@ def build_layout(state: State, args, now: float) -> Layout:
     layout = Layout()
     layout.split_column(
         Layout(name="header", size=3),
-        Layout(name="row1", size=12),
+        Layout(name="row1", size=16),
         Layout(name="cells", size=11),
         Layout(name="row4", size=8),
         Layout(name="faults", size=15),
