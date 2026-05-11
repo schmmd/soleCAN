@@ -255,17 +255,24 @@ CHARGER_V_OFFSET_V = PACK_VOLTAGE_OFFSET_V
 CHARGER_I_LSB_A = 0.1
 RPM_BIAS = 0x0C80
 LIMIT_CURRENT_LSB_A = 0.01     # F107 bytes 0-1 / 2-3 BE, 0.01 A/bit
-# Throttle pedal scaling for FF21CA byte 0. Empirical survey across all
-# 45,086 motor-telemetry frames: byte 0 ranges 0..0x69 (0..105) with an
-# idle resting offset of ~3 (sensor noise floor with foot off pedal) and
-# a controller dead-low around 14 (below this, motor RPM stays near 0;
-# matches the Kelly TPS_dead_low concept from the hydraulic pump doc).
-# The byte behaves like a J1939-style 0..100% throttle position with
-# mild mechanical overshoot (rare excursions to 105). The previous
-# constant of 52 (0x34) was the max seen in earlier captures only; it
-# overstates pct by ~2x at full pedal.
+# Throttle pedal scaling for FF21CA byte 0. Empirically the raw byte
+# behaves like J1939 SPN 91 (Accelerator Pedal Position 1) at 0.4 %/bit
+# (i.e. raw 250 / 0xFA = 100%). Maxima observed in the corpus:
+#   - asc/full-throttle-*.asc (neutral, no load): raw 0x69 = 105 -> 42%
+#   - real-world-on-driving-mowing-off.asc (forward, real load): 0xCC = 204 -> 82%
+#   - real-world-on-driving-mowing-off.asc (reverse, real load): 0x96 = 150 -> 60%
+# The forward/reverse asymmetry on the same pedal hardware suggests a
+# controller-side reverse-speed limiter applied before the byte goes on
+# the wire. Idle offset ~3 (sensor noise with foot off); controller
+# dead-low ~14 (below this, motor RPM stays at 0; matches the Kelly
+# TPS_dead_low concept from the hydraulic pump doc). The previous 0..100%
+# direct-percent model was contradicted by the real-world capture and
+# the 250-bit-full-scale assumption is itself a J1939-convention guess
+# pending a "pedal mashed hard in F under load" capture for ground truth.
+# Percent display is NOT clamped at 100% so a raw value above 250 will
+# render as >100% rather than silently saturating.
 THROTTLE_DEAD_LOW = 3          # idle resting offset (subtracted from raw)
-THROTTLE_FULL_SCALE = 100      # byte 0 = direct percent; clamp at 100
+THROTTLE_PCT_PER_BIT = 0.4     # J1939 SPN 91 convention: raw 250 = 100%
 # Pack ratings from the vendor BMS GUI (NOTES.txt): 300 Ah at 72.0 V
 # nominal -> 21.6 kWh nominal energy. Used for the "% of pack" display
 # only; not used for any decoding.
@@ -1530,17 +1537,17 @@ def render_motor(state: State, now: float) -> Panel:
     if thr is None:
         t.add_row("throttle", Text("---", style="dim"))
     else:
-        # Byte 0 is treated as a 0..100% percent field; subtract a 3-unit
-        # idle dead-low (resting sensor offset) and clamp at 100%. Range
-        # 0..0x69 (105) seen across the full corpus; the rare overshoot
-        # past 100 saturates rather than exceeding the bar.
-        pct = max(0, min(THROTTLE_FULL_SCALE,
-                         int(round(thr)) - THROTTLE_DEAD_LOW))
+        # Byte 0 scaled per J1939 SPN 91 (0.4 %/bit, raw 250 = 100%) with
+        # a 3-unit idle dead-low subtracted (sensor noise with foot off).
+        # No upper clamp: a raw value above 250 renders as >100% rather
+        # than silently saturating (true full-scale is a guess pending
+        # ground truth).
+        pct = max(0.0, (int(round(thr)) - THROTTLE_DEAD_LOW) * THROTTLE_PCT_PER_BIT)
         bar_w = 20
-        filled = int(round(pct * bar_w / 100))
+        filled = max(0, min(bar_w, int(round(pct * bar_w / 100))))
         bar = Text("█" * filled + "░" * (bar_w - filled))
         t.add_row("throttle",
-                  Text.assemble(bar, Text(f"  {pct:>3d}%  (raw {int(thr)})")))
+                  Text.assemble(bar, Text(f"  {pct:>5.1f}%  (raw {int(thr)})")))
 
     di = state.motor_direction.value
     if di is None:

@@ -239,6 +239,55 @@ A subsequent capture extends F108 evidence to bytes outside byte 7:
                                       established. See the F108F3
                                       section.
 
+A real-world field capture (`real-world-on-driving-mowing-off.asc`,
+2026-05-10) is the first capture in the corpus taken under genuine
+traction load rather than neutral pedal tests:
+
+* `real-world-on-driving-mowing-off.asc` — 570 s wall-clock; operator
+                                            drove forward, reversed,
+                                            mowed, and shifted. The bus
+                                            actually went silent
+                                            mid-capture (key-off?) from
+                                            t=134.6 s to t=554.3 s — all
+                                            PGNs (BMS F100F3, FF21CA
+                                            motor, FF2112 dash) stopped
+                                            and resumed together — so
+                                            the useful drive data lives
+                                            in the first ~135 s plus a
+                                            short ~17 A idle tail at the
+                                            end. The sustained-load
+                                            segment t=90..135 s (mean
+                                            77 A, peak 153 A, V sag
+                                            0.6 V, peak 12.6 kW at
+                                            ~2500 RPM) is the highest-
+                                            amperage cross-validation
+                                            point in the corpus, well
+                                            above the amp-*.asc set's
+                                            58 A. Operator stayed in
+                                            **Range 2** for the entire
+                                            session (R1 and R3 never
+                                            engaged); FF21CA byte 0
+                                            (throttle) reached 0xCC =
+                                            204 in forward (vs. 0x96 =
+                                            150 in reverse) — see the
+                                            FF21CA byte 0 section for
+                                            the rescale. FF21CA byte 7
+                                            = 0x10 was observed for the
+                                            first time (Range 2 + N
+                                            lever), completing the
+                                            F/N/R × Range cross-product.
+                                            **No new CAN IDs and no
+                                            byte-level signature
+                                            appeared when the mower was
+                                            engaged**, reinforcing the
+                                            discrete-wiring / hydraulic-
+                                            bus hypothesis for PTO.
+                                            F107 byte 5 also showed a
+                                            new ignition transient
+                                            value 0xA5 (t=0.56..0.96 s),
+                                            extending the existing
+                                            transient list.
+
 Side-by-side toggle captures (top-level, 2026-05-09) document attempts
 to find body-control signals on this bus:
 
@@ -684,13 +733,38 @@ FF21CA — "Motor telemetry (RPM, throttle, drive state, ctrl temp)"
     makes sense for a real-time inverter feed. Across the asc/*.asc
     captures (all in neutral) the structure resolves as:
 
-      byte 1 (data[0]): 0x00..0x34            — THROTTLE PEDAL POSITION
-                                                 (raw). 0 = released, ~52
-                                                 = full pedal. Idle keeps
-                                                 byte ~0; full-throttle
-                                                 captures sit 29..36;
-                                                 accel-decel sweeps 1..45
-                                                 leading the RPM ramp.
+      byte 1 (data[0]): 0x00..0xCC            — THROTTLE PEDAL POSITION
+                                                 (raw). Neutral-only
+                                                 captures showed 0..0x69
+                                                 (max 105), but the real-
+                                                 world capture extended
+                                                 the observed range to
+                                                 0..0xCC (204) in forward
+                                                 and 0..0x96 (150) in
+                                                 reverse on the SAME pedal
+                                                 hardware. The F/R ceiling
+                                                 asymmetry strongly
+                                                 suggests a controller-
+                                                 side reverse-speed
+                                                 limiter applied to the
+                                                 byte before it goes on
+                                                 the wire. The byte is
+                                                 consistent with J1939
+                                                 SPN 91 (Accel Pedal
+                                                 Position 1) at 0.4 %/bit
+                                                 (raw 250 = 100%):
+                                                     0x69 = 42% (neutral)
+                                                     0xCC = 82% (forward)
+                                                     0x96 = 60% (reverse)
+                                                 250 as full-scale is a
+                                                 J1939-convention guess
+                                                 pending a "pedal mashed
+                                                 hard in F under load"
+                                                 ground-truth capture.
+                                                 Idle resting offset ~3
+                                                 (sensor noise); below
+                                                 raw ~14 controller dead-
+                                                 low keeps RPM near 0.
       byte 2 (data[1]): 0x00                  — constant zero in every
                                                  natural capture,
                                                  including the
@@ -801,6 +875,19 @@ FF21CA — "Motor telemetry (RPM, throttle, drive state, ctrl temp)"
                               wrong — they're the FNR LEVER, encoded
                               in the low nibble of byte 7, on top of
                               a Range-2 high nibble.
+        real-world-on-driving-mowing-off.asc — same 0x10/0x14/0x18
+                              triad as driving.asc (Range 2 throughout
+                              the 12-minute session; R1 and R3 never
+                              engaged during the real mow). 0x10
+                              (Range 2 + N lever) appears for 2140
+                              frames — this is the first observation
+                              of the N lever WITH a range engaged
+                              (drive-r-n-f.asc walked N at Range 3 but
+                              not Range 2). Together with the controlled
+                              walks above, the F/N/R × Range
+                              cross-product is now spanned for Range 2
+                              and Range 3; Range 1 still only seen
+                              with F.
         regen.asc / regen2.asc — Range 3 captures stepping between
                               N (0x20) and F (0x24).
         full-throttle-reverse.asc — 0x18 = Range 2 / R.
@@ -1275,6 +1362,17 @@ Still open
   empty even when the dashboard surfaces MC codes. See the
   "Motor-controller error codes — methodology to decode" section
   for the planned capture-pair experiment.
+* Mower / PTO engagement signature. The real-world capture
+  (real-world-on-driving-mowing-off.asc) was the first to exercise a
+  sustained mowing run under traction load — no new CAN IDs appeared
+  and no byte in any tracked PGN changed state cleanly with mower
+  engagement. CONFIRMED-NEGATIVE for this diagnostic bus. Reinforces
+  the discrete-wiring / hydraulic-bus hypothesis: PTO/mower control
+  is most likely either hard-wired or on the untapped second segment.
+* True full-scale of FF21CA byte 0 (throttle). 0xCC = 204 observed in
+  forward under real load, 0xFA = 250 assumed as 100% per J1939 SPN
+  91 convention but not yet ground-truth. A "pedal mashed hard in F
+  with the tractor under load" capture would settle it.
 
 Recently resolved (kept here as cross-references; full details in the
 named sections above)
@@ -1375,8 +1473,16 @@ CONFIRMED:
         with bias 0x0C80. Cross-validated against operator-reported
         ~2500 RPM at full throttle in neutral and a textbook 0→2500→0
         ramp in accellerate-decelerate.asc.
-    FF21CA byte 1 (data[0]) = throttle pedal position, raw, full-scale
-        ~0x34. Sweeps with operator pedal input and leads the RPM ramp.
+    FF21CA byte 1 (data[0]) = throttle pedal position, raw. Observed
+        0..0xCC (204) in forward and 0..0x96 (150) in reverse in the
+        real-world capture (real-world-on-driving-mowing-off.asc) —
+        F/R asymmetry on the same pedal hardware implies a controller-
+        side reverse limiter. Consistent with J1939 SPN 91 at
+        0.4 %/bit (raw 250 = 100%); 250-bit full-scale is a convention
+        guess pending a "F under load with pedal mashed" capture.
+        Prior "full-scale ~0x34" and "0..0x69 cap" were sample-size /
+        neutral-mode artifacts respectively. Sweeps with operator pedal
+        input and leads the RPM ramp.
     FF21CA byte 6 (data[5]) = motor controller temperature, J1939
         +40 °C offset (53 → 13 °C). Near ambient in all captures.
     FF21CA byte 8 (data[7]) = directional pedal selector:
