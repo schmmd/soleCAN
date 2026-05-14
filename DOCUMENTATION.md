@@ -1,10 +1,9 @@
 # Solectrac CAN bus — system documentation
 
-Reverse-engineered protocol and hardware documentation for a Solectrac
-electric tractor (~70 V class). All decode information is derived from
-captured CAN traffic, vendor manual tables, the COBO cluster datasheet,
-the "BMS Update" document, the Solectrac Parts Catalog (e25), and live
-injection tests on the tractor.
+Reverse-engineered protocol and hardware documentation for a Solectrac electric
+tractork. All decode information is derived from captured CAN traffic, vendor
+manual tables, the COBO cluster datasheet, the "BMS Update" document, the
+Solectrac Parts Catalog (e25), and live injection tests on the tractor.
 
 Confidence markers used throughout:
 
@@ -24,7 +23,6 @@ Confidence markers used throughout:
 - [Motor controller (SA 0xCA)](#motor-controller-sa-0xca)
 - [Charger (SA 0xE5)](#charger-sa-0xe5)
 - [Vehicle controller (SA 0xD0)](#vehicle-controller-sa-0xd0)
-- [Error code system](#error-code-system)
 - [Instrument cluster hardware](#instrument-cluster-hardware)
 - [Vendor error code tables](#vendor-error-code-tables)
 - [Open questions](#open-questions)
@@ -35,8 +33,10 @@ Confidence markers used throughout:
 The tractor is a **Solectrac 25G** (non-HST variant).
 
 "Pack" refers to the tractor's traction battery — the high-voltage
-lithium-ion battery that powers the motor, as distinct from the 12 V
-accessory battery that runs the cluster and lights.
+lithium-ion battery that powers the motor, as distinct from the
+**12 V / 20 Ah accessory battery** that runs the cluster and lights.
+The accessory rail is fed by a **500 W 72 V → 12 V DC-DC converter**
+off the pack (parts catalog Table 65).
 
 | Property                  | Service manual              | Vendor BMS GUI       |
 |---------------------------|-----------------------------|----------------------|
@@ -68,23 +68,20 @@ back-compatibility with prior captures; the manual values are
 documented here for nameplate accuracy.
 
 Escorts Kubota is the corporate parent of Farmtrac; the BMS-GUI
-"ESCORTS-INTERNAL" footer matches the manual's "Escorts Solution"
-pack-vendor attribution. The service manual's BMS troubleshooting
-section delegates all live-data inspection to a host-side application
-called **UDAAN** (referenced repeatedly: "Connect UDAAN and check the
-minimum cell voltage", etc.). UDAAN has been identified as the
-**UDAN iBMS Upper Utility** from **Anhui UDAN Technology Co., Ltd.**
-— a Chinese BMS vendor. The Solectrac/Farmtrac pack is rebadged UDAN
-hardware. The tool is publicly downloadable Windows software (CAN @
-250 kbit/s, supports cheap CANalyst-II / PCAN / USBCAN dongles); the
-V3.1 user manual is in this repo at
-`docs/UDAN_iBMS_Upper_Utility_v3.1_manual.pdf`. The service manual
-itself contains no byte-level payload tables for the BMS broadcast
-frames, but UDAN's tool has a `Comm. Message` recording feature that
-captures the raw CAN exchange alongside a labeled Excel export of
-every System Overview UI field — running both simultaneously produces
-a time-aligned raw-CAN + labeled-field log, i.e. an empirical DBC.
-See the open-questions section for the practical decode path.
+"ESCORTS-INTERNAL" footer matches the manual's "Escorts Solution" pack-vendor
+attribution. The service manual's BMS troubleshooting section delegates all
+live-data inspection to a host-side application called **UDAAN** (referenced
+repeatedly: "Connect UDAAN and check the minimum cell voltage", etc.). UDAAN
+has been identified as the **UDAN iBMS Upper Utility** from **Anhui UDAN
+Technology Co., Ltd.** — a Chinese BMS vendor. The Solectrac/Farmtrac pack is
+rebadged UDAN hardware. The tool is publicly downloadable Windows software (CAN
+@ 250 kbit/s, supports cheap CANalyst-II / PCAN / USBCAN dongles).  The service
+manual itself contains no byte-level payload tables for the BMS broadcast
+frames, but UDAN's tool has a `Comm. Message` recording feature that captures
+the raw CAN exchange alongside a labeled Excel export of every System Overview
+UI field — running both simultaneously produces a time-aligned raw-CAN +
+labeled-field log, i.e. an empirical DBC.  See the open-questions section for
+the practical decode path.
 
 **BMS field connector** is part number **`RT061412SNHEC03`** (12-pin
 circular). Per the manual's DTC 125 troubleshooting (page 30 of the
@@ -98,7 +95,7 @@ troubleshooting steps and are the most likely physical home of the
 **second (debug) CAN pair** — see "Second 2-pin CAN port" under the
 CAN topology section.
 
-Schematic 5.7 uses BMS-internal terminal letters that do **not** map
+Schematic 5.7 in the FT 25G service manual uses BMS-internal terminal letters that do **not** map
 1:1 to the field connector — it shows main CAN on pins H/J
 (`CAN_H3`/`CAN_L3`) and a second pair on F/G (`CANDE-H`/`CANDE-L`)
 labelled "TO BMS DEBUG CONNECTOR PIN-1/PIN-2". The schematic's H/J
@@ -118,10 +115,21 @@ two pin-naming conventions are independent.
 The 0.25 V sag from idle to peak load is the cleanest pack-V load
 response observed.
 
+**HV power path.** The pack feeds the traction inverter through the
+**Albright SW200** main contactor (service manual §4.2.3) protected
+by a **350 A battery cut-off fuse** (§4.3.5; parts catalog Table 60
+lists 355 A — same component, rounding). A separate **discrete
+hydraulic contactor** (Table 60) gates HV between the pack and the
+BLDC hydraulic pump motor; its coil is energized from the main
+E-Controller's key-switch wire. Neither contactor is on the CAN
+bus, which is part of why hydraulic activity produces no CAN
+signature (the other part being that the e-hydraulic controller has
+no CAN pins at all — see "What is NOT on this bus").
+
 
 ## CAN bus topology
 
-Single shared CAN bus at 250 kbaud. The diagnostic port we capture from
+Single shared CAN bus at 250 kbaud. The ODB-2 diagnostic port we capture from
 is on the same bus as the ECUs that run the tractor — it is not a
 separate diagnostic segment.
 
@@ -163,8 +171,6 @@ is a mislabel — it's the OBD-II port.
 - OBD = OBD-II capture port (passive tap, no SA).
 - Node order on the schematic is as drawn; physical electrical order
   on the wire is not verified.
-
-Cable spec from the schematic: twisted pair, 33 ± 2 twists per metre.
 
 ### What is NOT on this bus
 
@@ -210,35 +216,6 @@ pairs: the main vehicle bus (above) and this debug pair. If tapped,
 expect BMS-internal diagnostic chatter — likely the same protocol that
 the host-side **UDAAN** tool consumes. This is no longer believed to
 be a hydraulic bus.
-
-### Identified components (from Parts Catalog e25)
-
-The Solectrac parts catalog names the major electrical assemblies. This
-turns several previously-anonymous "drive ECU" / "hydraulic node"
-references into specific parts with public datasheets and fault-code
-references.
-
-| Catalog table | Part                                                    | Role                              |
-|---------------|---------------------------------------------------------|-----------------------------------|
-| Table 60      | Curtis controller (1238E per catalog; nameplate not verified) | Traction inverter (SA 0xCA); service manual confirms "Curtis controller, 200 A" without giving the model number |
-| Table 60      | Albright SW200 main contactor                           | HV pack ↔ inverter contactor; service manual §4.2.3 names the SW200 explicitly |
-| Table 60      | Hydraulic contactor (discrete; separate from main SW200)| HV pack ↔ hydraulic pump motor    |
-| Table 60      | 350 A battery cut-off fuse                              | HV pack main fuse (service manual §4.3.5; catalog shows 355 A — same component, rounding) |
-| Table 46      | Kelly KLS7212M / KLS7218 hydraulic motor controller     | E-Hydraulic node, **not on the CAN bus** — schematic 5.11 shows the e-hydraulic controller's interface is entirely discrete (speed switch, on/off, throttle pot, Hall encoder). Either the Kelly's CAN port is unwired or the catalog refers to a different controller variant |
-| Table 65      | 500 W DC-DC converter (72 V → 12 V)                     | Accessory rail supply             |
-| Table 65      | 12 V 20 Ah accessory battery                            | Accessory rail backup / cluster   |
-| Table 65      | OPC (Operator Presence Control) timer module — "UNIT ENGINE SHUT OFF CONTROLLER TIMER (SEAT AND PARK OPC)" | Seat-switch + park-brake gating. Not shown as a CAN node on schematic 5.10 — see SA 0xD0 discussion |
-| Table 65      | Motor encoder pigtail                                   | Curtis speed/position feedback. 2-channel A/B quadrature, no Z pulse (service manual motor section); PPR is not documented |
-| Table 67      | "FARMTRAC" key ignition lock                            | Confirms Farmtrac (Escorts Kubota) chassis lineage — matches BMS GUI "ESCORTS-INTERNAL" footer and service manual "Escorts Solution" pack attribution |
-| Table 61      | 72 V 300 Ah traction battery box                        | Matches vendor-GUI pack spec; service manual nameplates the pack at 73 V / 350 Ah / 25.5 kWh — see Vehicle and pack section for the discrepancy |
-
-The discrete hydraulic contactor and the no-CAN finding from
-schematic 5.11 jointly explain why hydraulic activity produces no
-signature on this bus: the hydraulic subsystem is gated on/off by a
-coil energized from the main E-Controller's key-switch wire, and the
-e-hydraulic controller that drives the BLDC pump motor has no CAN
-interface at all.
-
 
 ## Source-address map
 
@@ -389,8 +366,7 @@ vendor GUI).
 ### F104F3 — Pack temperature min/max summary
 
 Pack-wide hottest/coldest module-temperature summary, analogous to
-F102. Byte-level decode UNKNOWN; not currently parsed into its own
-CSV.
+F102. Byte-level decode UNKNOWN.
 
 ### F106F3 — BMS state — TENTATIVE
 
@@ -417,7 +393,7 @@ Layout matches the standard J1939 limits-frame template:
 | Bytes | Likely meaning                          | Observed                                       |
 |-------|-----------------------------------------|------------------------------------------------|
 | 0..1  | Discharge current limit, 0.1 A/bit      | 0x2710 (charger inserted) / 0x38A4 (driving)   |
-| 2..3  | Charge current limit, 0.1 A/bit         | 0x2710 in every capture (sentinel)             |
+| 2..3  | Charge current limit, 0.1 A/bit         | 0x2710 in every capture                        |
 | 4..5  | Voltage limit, 0.2 V/bit (guess)        | 0x0000 (charger inserted) / 0x0176 (driving)   |
 | 6..7  | (unknown)                               | 0x0000                                         |
 
@@ -467,9 +443,9 @@ as the code on).
 
 Notable:
 
-- Code 146 ("Maintenance mode status") is **not** encoded in F108
-  anywhere. Operator transcriptions of "146" in cycling captures are
-  almost certainly 145.
+- Code 146 ("Maintenance mode status") is listed in the manual but is **not**
+  encoded in F108
+  anywhere.
 - Bit 6 genuinely re-asserts code 144 (re-verified with single-bit
   injection). Likely a severity-pair the dashboard renders
   identically.
@@ -486,16 +462,18 @@ Notable:
     byte 7 = 0x01 → code 140                      ✓
 
 `bms-124-140-142-143-144-146.asc` — operator-confirmed cycling 124,
-140, 142, 143, 144, 146:
+140, 142, 143, 144, 145:
 
     F108 = 00 00 00 00 00 01 00 BB
     byte 5 = 0x01 → bit 0 → code 124
     byte 7 = 0xBB → {140, 142, 143, 144, 145}
 
-(The operator's "146" maps to 145 — see notable above.)
-
 Codes 100..127 (bytes 0..5) and 140..145 (byte 7) are merged and
 deduplicated by the decoder.
+
+**Latch behavior.** BMS F108 codes track the bitmap in real time —
+clearing the bit clears the dash. This is the opposite of the MC's
+DM1 channel, which latches DTCs until a key cycle (see FECA section).
 
 
 ## Motor controller (Curtis 1238E, SA 0xCA)
@@ -518,15 +496,15 @@ Broadcast at ~85 Hz. Full 29-bit ID is `0x0CFF21CA` (priority 3, not
 the default 6 — higher priority than BMS broadcasts, consistent with a
 real-time inverter feed).
 
-| Byte | data[]  | Meaning                                                          |
-|------|---------|------------------------------------------------------------------|
-| 1    | data[0] | Throttle pedal position, raw (0..0xCC observed; SPN 91 candidate) |
-| 2    | data[1] | 0x00 constant — fault-bitmap candidate (UNKNOWN)                  |
+| Byte | data[]        | Meaning                                                          |
+|------|---------------|------------------------------------------------------------------|
+| 1    | data[0]       | Throttle pedal position, raw (0..0xCC observed; SPN 91 candidate) |
+| 2    | data[1]       | 0x00 constant — fault-bitmap candidate (UNKNOWN)                  |
 | 3..4 | data[2..3] LE | **Motor RPM**: rpm = (le16) − 0x0C80                       |
-| 5    | data[4] | Three-state field 0x28 / 0x3B / 0x3C — startup-calibration related (UNKNOWN) |
-| 6    | data[5] | **Controller temperature**: °C = raw − 40                         |
-| 7    | data[6] | 0x00 constant — fault-bitmap candidate (UNKNOWN)                  |
-| 8    | data[7] | **Packed transmission state** (high nibble = range, low = F/N/R)  |
+| 5    | data[4]       | Three-state field 0x28 / 0x3B / 0x3C — startup-calibration related (UNKNOWN) |
+| 6    | data[5]       | **Controller temperature**: °C = raw − 40                         |
+| 7    | data[6]       | 0x00 constant — fault-bitmap candidate (UNKNOWN)                  |
+| 8    | data[7]       | **Packed transmission state** (high nibble = range, low = F/N/R)  |
 
 **Motor RPM.** Little-endian uint16 with bias 0x0C80 (=3200). At
 commanded zero, data[2..3] = `80 0C` → 0 RPM. At pegged throttle in
@@ -568,7 +546,7 @@ guess pending a "pedal mashed hard in F under load" capture.
         0x4 = Forward
         0x8 = Reverse
 
-Verified by two controlled captures (2026-05-10):
+Verified by two controlled captures:
 
 - `drive-r-n-f.asc` — operator walks F/N/R lever R → N → F with range
   held at 3, no pedal. data[7] = 0x28 → 0x20 → 0x24. Low nibble walks
@@ -577,11 +555,34 @@ Verified by two controlled captures (2026-05-10):
   data[7] = 0x04 → 0x14 → 0x24. High nibble walks 0 → 1 → 2; low
   nibble pinned at 0x4.
 
-Filename hygiene note: older "neutral" captures
-(`full-throttle-range2-neutral.asc`, `full-throttle-hydraulics.asc`)
-actually have data[7] = 0x14 = Range 2 / Forward. Their filenames
-likely refer to the tractor not being driven (parking brake set,
-hydraulics-only test) rather than the F/N/R lever being in N.
+**Range → ground speed.** Range 1/2/3 are the L/M/H positions on the
+mechanical range gear shift lever (Low/Medium/High; the L-M-N-H lever
+also has a Neutral position, which disengages drive entirely — the
+electrical bus reports only the three driven positions). The CET
+Operator Manual page 34 publishes the full motor-RPM → ground-speed
+table for both tire options. The relationship is linear in motor RPM
+within each range:
+
+| Range            | km/h per 1000 motor RPM | km/h at 2800 RPM (max) |
+|------------------|-------------------------|------------------------|
+| 1 (Low, Agri)    | 1.64                    | 4.6                    |
+| 2 (Medium, Agri) | 3.14                    | 8.8                    |
+| 3 (High, Agri)   | 6.25                    | 17.5                   |
+| 1 (Low, Turf)    | 2.04                    | 5.7                    |
+| 2 (Medium, Turf) | 3.07                    | 8.6                    |
+| 3 (High, Turf)   | 6.07                    | 17.0                   |
+
+"Agri" = 5×12 front / 8.0×18 rear; "Turf" = 23×8.5-12 front /
+33×13.5-16.5 rear. The S/N/F switch is a motor-RPM cap (2000/2500/
+2800 RPM), not a gear stage — it does not change the ratio, only the
+maximum motor RPM and therefore the maximum ground speed within the
+selected range.
+
+This resolves the motor → wheel ground-speed derivation without
+needing to compute the gear ratio explicitly: read motor RPM from
+FF21CA data[3..4], read range from data[7] high nibble, multiply by
+the per-range coefficient above.
+
 
 ### FECA (DM1) — MC fault channel — CONFIRMED via injection
 
@@ -723,32 +724,6 @@ therefore unresolved and warrants a fresh look at the captures with
 the 4-node bus constraint in mind.
 
 
-## Error code system
-
-The dashboard renders codes from two distinct channels, both numeric
-but with non-overlapping ranges and different transport mechanisms:
-
-| Subsystem | Code range | Channel                       | Prefix on dash |
-|-----------|------------|-------------------------------|----------------|
-| MC        | 12..99     | J1939 DM1 from SA 0xCA, SPN field | "MC" prepended |
-| BMS       | 100..146   | F108F3 proprietary bitmap     | numeric only   |
-
-A dashboard "code 47" is unambiguously MC; "code 124" is unambiguously
-BMS.
-
-**The cluster does not have a unified DM1 path.** It selects a
-decoder based on source address — MC uses DM1, BMS uses F108. A
-populated DM1 from SA 0xF3 is ignored.
-
-**Latch behavior is subsystem-specific:**
-
-- MC DM1 codes latch on receipt and persist until **key cycle**, even
-  if DM1 returns to empty. This violates standard J1939 (which says
-  3 s of absence should mark DTCs "previously active").
-- BMS F108 codes follow the bitmap in real time — clearing the bit
-  clears the dash.
-
-
 ## Instrument cluster hardware
 
 The dashboard cluster is a **COBO ECO MATRIX VT3** (Italian Tier-1
@@ -812,44 +787,46 @@ harness mating face):
 J35, J36). Solectrac populates 15 cavities total: the five required
 plus 10 discrete-input wires.
 
-| Pin | COBO ID | Generic function                                    | Solectrac usage                |
-|-----|---------|-----------------------------------------------------|--------------------------------|
-| J1  | RELE'   | Out 1 high-side, 150 mA (relay drive)               | (unused)                       |
-| J2  | IDBL    | Positive digital input                              | BACK LIGHT (+)                 |
-| J3  | 30      | + Battery (constant 12 V)                       ★   | + BATTERY                      |
-| J4  | 15      | + Key (ignition / KL15)                         ★   | IGN ON (+)                     |
-| J5  | FR1     | Frequency input, ≤1500 Hz                           | (unused — speed via CAN)       |
-| J6  | ID9     | Positive digital input                              | TURN RIGHT (+)                 |
-| J7  | ID10    | Positive digital input                              | TURN LEFT (+)                  |
-| J8  | 31      | GND                                             ★   | GND                            |
-| J9  | ID3     | Negative digital input                              | (unused)                       |
-| J10 | ID1     | Negative digital input                              | FWD (−) — forward indicator    |
-| J11 | ID5     | Negative digital input                              | (unused)                       |
-| J12 | ID20    | Positive digital input                              | TURN TRAILER (+)               |
-| J13 | ID2     | Negative digital input                              | (unused)                       |
-| J14 | ID8     | Positive digital input                              | HEADLIGHTS (+)                 |
-| J15 | AN2     | Analog resistive input, 90 Ω pull-up (sender)       | (unused)                       |
-| J16 | AN1     | Analog resistive input, 90 Ω pull-up (sender)       | (unused)                       |
-| J17 | ID12    | Positive digital input                              | RUNNING LIGHTS (+)             |
-| J18 | ID13    | Negative digital input                              | PTO (−)                        |
-| J19 | P/BR    | Positive digital input (probable Park Brake)        | (unused)                       |
-| J20 | ID17    | Positive digital input                              | BATTERY CHARGING (+)           |
-| J21 | ID6     | Positive digital input                              | (unused)                       |
-| J22 | ID21    | Negative digital input                              | (unused)                       |
-| J23 | ID18    | Negative digital input                              | PARKING BRAKE (−)              |
-| J24 | ID16    | Positive digital input                              | (unused)                       |
-| J25 | PB/L    | Positive digital input (probable Park Brake Light)  | (unused)                       |
-| J26 | ID15    | Negative digital input                              | (unused)                       |
-| J27 | ID19    | Negative digital input                              | (unused)                       |
-| J28 | ID14    | Negative digital input                              | (unused)                       |
-| J29 | ID11    | Negative digital input                              | (unused)                       |
-| J30 | ID7     | Positive digital input                              | (unused)                       |
-| J31 | ID4     | Negative digital input                              | (unused)                       |
-| J32 | BUZZER  | Out 2 low-side, 150 mA (audible alert)              | (unused)                       |
-| J33 | D+      | D+ alternator excite, neg. digital input            | (unused — no alternator)       |
-| J34 | CS      | CAN shield                                      ★   | (unused — no shield drain)     |
-| J35 | CL      | CAN L                                           ★   | CAN L                          |
-| J36 | CH      | CAN H                                           ★   | CAN H                          |
+`(r,c)` = (row, col) on the populated-grid diagram above.
+
+| Pin | (r,c) | COBO ID | Generic function                                    | Solectrac usage                |
+|-----|-------|---------|-----------------------------------------------------|--------------------------------|
+| J1  | 1,1   | RELE'   | Out 1 high-side, 150 mA (relay drive)               | (unused)                       |
+| J2  | 1,2   | IDBL    | Positive digital input                              | BACK LIGHT (+)                 |
+| J3  | 1,3   | 30      | + Battery (constant 12 V)                       ★   | + BATTERY                      |
+| J4  | 1,4   | 15      | + Key (ignition / KL15)                         ★   | IGN ON (+)                     |
+| J5  | 2,1   | FR1     | Frequency input, ≤1500 Hz                           | (unused — speed via CAN)       |
+| J6  | 2,2   | ID9     | Positive digital input                              | TURN RIGHT (+)                 |
+| J7  | 2,3   | ID10    | Positive digital input                              | TURN LEFT (+)                  |
+| J8  | 2,4   | 31      | GND                                             ★   | GND                            |
+| J9  | 3,1   | ID3     | Negative digital input                              | (unused)                       |
+| J10 | 3,2   | ID1     | Negative digital input                              | 4WD (−) — forward indicator    |
+| J11 | 3,3   | ID5     | Negative digital input                              | (unused)                       |
+| J12 | 3,4   | ID20    | Positive digital input                              | TURN TRAILER (+)               |
+| J13 | 4,1   | ID2     | Negative digital input                              | (unused)                       |
+| J14 | 4,2   | ID8     | Positive digital input                              | HEADLIGHTS (+)                 |
+| J15 | 4,3   | AN2     | Analog resistive input, 90 Ω pull-up (sender)       | (unused)                       |
+| J16 | 4,4   | AN1     | Analog resistive input, 90 Ω pull-up (sender)       | (unused)                       |
+| J17 | 5,1   | ID12    | Positive digital input                              | RUNNING LIGHTS (+)             |
+| J18 | 5,2   | ID13    | Negative digital input                              | PTO (−)                        |
+| J19 | 5,3   | P/BR    | Positive digital input (probable Park Brake)        | (unused)                       |
+| J20 | 5,4   | ID17    | Positive digital input                              | BATTERY CHARGING (+)           |
+| J21 | 6,1   | ID6     | Positive digital input                              | (unused)                       |
+| J22 | 6,2   | ID21    | Negative digital input                              | (unused)                       |
+| J23 | 6,3   | ID18    | Negative digital input                              | PARKING BRAKE (−)              |
+| J24 | 6,4   | ID16    | Positive digital input                              | (unused)                       |
+| J25 | 7,1   | PB/L    | Positive digital input (probable Park Brake Light)  | (unused)                       |
+| J26 | 7,2   | ID15    | Negative digital input                              | (unused)                       |
+| J27 | 7,3   | ID19    | Negative digital input                              | (unused)                       |
+| J28 | 7,4   | ID14    | Negative digital input                              | (unused)                       |
+| J29 | 8,1   | ID11    | Negative digital input                              | (unused)                       |
+| J30 | 8,2   | ID7     | Positive digital input                              | (unused)                       |
+| J31 | 8,3   | ID4     | Negative digital input                              | (unused)                       |
+| J32 | 8,4   | BUZZER  | Out 2 low-side, 150 mA (audible alert)              | (unused)                       |
+| J33 | 9,1   | D+      | D+ alternator excite, neg. digital input            | (unused — no alternator)       |
+| J34 | 9,2   | CS      | CAN shield                                      ★   | (unused — no shield drain)     |
+| J35 | 9,3   | CL      | CAN L                                           ★   | CAN L                          |
+| J36 | 9,4   | CH      | CAN H                                           ★   | CAN H                          |
 
 ### Diagram errata
 
@@ -858,12 +835,10 @@ one omission relative to the as-built tractor:
 
 1. The + BATTERY pin is labelled "Pin 1" on the diagram. The actual
    cavity is J3 (J1 is an empty cavity in the populated grid).
-2. J10 is labelled "4WD (−)". The actual function is FWD (forward
-   direction indicator). Tractor-confirmed 2026-05-13.
-3. J14 is labelled "DIPPED BEAM (+)". Solectrac uses it as the general
+2. J14 is labelled "DIPPED BEAM (+)". Solectrac uses it as the general
    HEADLIGHTS indicator. ("Dipped beam" is the EU term for low-beam
    headlights.)
-4. J18 is populated but not on the diagram. Identified as PTO
+3. J18 is populated but not on the diagram. Identified as PTO
    indicator (−), switch-to-ground when PTO is engaged.
 
 ### Diagnostic tap
@@ -877,7 +852,9 @@ while a capture tool reads the live bus.
 
 Reproduced from the operator manual for cross-reference. The
 disambiguation in the F108F3 and DM1 sections above maps these numbers
-to bit positions and SPN values respectively.
+to bit positions and SPN values respectively. The two ranges do not
+overlap, so a dashboard "code 47" is unambiguously MC and "code 124"
+is unambiguously BMS.
 
 ### BMS codes (100..146)
 
@@ -1050,14 +1027,15 @@ Code 51 is listed out of numeric order in the manual.
   in forward under real load; J1939 SPN 91 convention is raw 250 =
   100 % but not yet ground-truth. A "pedal mashed hard in F under
   load" capture would settle it.
-- **Motor encoder PPR and motor → wheel gear ratio.** Neither is
-  documented in the service manual's motor section. PPR is needed to
-  convert encoder pulses (if they ever surface) to RPM; gear ratio is
-  needed to convert motor RPM to ground speed. The cluster does not
-  display ground speed — only motor RPM — so this is the standing gap
-  for any "vehicle speed in km/h" derivation. Likely findable in the
-  Transmission chapter (pp 240+) or via a Curtis 1313 programmer
-  read of the controller's parameter file.
+- **Motor encoder PPR.** Still not documented in any manual we have
+  (service manual motor section, CET operator manual, parts catalog,
+  Curtis 1238 manual). PPR is needed to convert encoder pulses (if
+  they ever surface) to RPM. Most likely findable by reading the
+  controller's parameter file with a Curtis 1313 programmer, or by
+  spinning the motor at a known RPM and counting pulses on the
+  encoder pigtail. **Motor → wheel ground-speed conversion is now
+  resolved** via the operator manual's published travel-speed table
+  — see "Range → ground speed" in the MC section.
 
 
 ## Sources
@@ -1100,6 +1078,22 @@ Code 51 is listed out of numeric order in the manual.
     F108, SA 0xF3).
   - §**Hydraulic System** (p295) — confirms lift / 3-point / remotes
     are fully mechanical with zero electrical interface.
+- **CET Operator Manual** (63 pages, the international "Compact
+  Electric Tractor" rebadge of the FT 25G):
+  https://solectracsupport.com/FT25GUSAOPM.pdf
+  The PDF has no text layer (CorelDRAW vector export), so text search
+  doesn't work; read by page number. Key sections:
+  - p20–21 PTO ratios: rear 540 PTO at 2504 motor RPM; rear 540E at
+    2035 motor RPM. (Manual also lists a mid-PTO option at 2200 RPM
+    / 2410 motor RPM — not fitted on this tractor.)
+  - p33 spec table — three-range constant-mesh transmission with
+    L/M/N/H lever, "Bull Gear" rear-axle reduction. Note: this table
+    lists max motor torque as **84 Nm** vs the FT 25G service
+    manual's 90 Nm — small discrepancy, likely rebadge nameplate
+    variation.
+  - p34 Travel-speed table — full motor-RPM → ground-speed table for
+    both tire options, the source for the "Range → ground speed"
+    section above.
 - **UDAAN = UDAN iBMS Upper Utility** from Anhui UDAN Technology
   Co., Ltd. — the Chinese BMS vendor whose hardware is rebadged into
   the Solectrac/Farmtrac pack. Public download:
@@ -1114,13 +1108,16 @@ Code 51 is listed out of numeric order in the manual.
   mode permitted without login.
 - Solectrac Parts Catalog (e25):
   https://docs.thebackyard.engineer/solectrac/troubleshooting-guides/documentation
-  — source for the component identifications in the "Identified
-  components" subsection (Curtis 1238E MC, Kelly KLS7212M/KLS7218
-  hydraulic controller, Albright SW200 main contactor, 500 W DC-DC
-  converter, OPC timer module, 72 V 300 Ah pack box, "FARMTRAC" key
-  ignition). Note: the Kelly identification predates the FT 25G
-  service manual; schematic 5.11 shows the e-hydraulic controller has
-  no CAN pins regardless of which controller it actually is.
+  — source for the named components referenced throughout this
+  document: Curtis 1238E MC (Table 60), Kelly KLS7212M/KLS7218
+  hydraulic controller (Table 46), Albright SW200 main contactor +
+  discrete hydraulic contactor + 350 A cut-off fuse (Table 60),
+  500 W DC-DC converter + 12 V/20 Ah accessory battery + OPC timer
+  module + motor encoder pigtail (Table 65), 72 V 300 Ah pack box
+  (Table 61), "FARMTRAC" key ignition (Table 67). Note: the Kelly
+  identification predates the FT 25G service manual; schematic 5.11
+  shows the e-hydraulic controller has no CAN pins regardless of
+  which controller it actually is.
 - Curtis 1238 controller manual — public fault-code-list reference
   for the MC short codes reproduced above.
 - Kelly KLS7218MC / KLS7218NC CAN protocol:

@@ -272,6 +272,21 @@ LIMIT_CURRENT_LSB_A = 0.01     # F107 bytes 0-1 / 2-3 BE, 0.01 A/bit
 # render as >100% rather than silently saturating.
 THROTTLE_DEAD_LOW = 3          # idle resting offset (subtracted from raw)
 THROTTLE_PCT_PER_BIT = 0.4     # J1939 SPN 91 convention: raw 250 = 100%
+# Motor RPM -> ground speed coefficients per range, calibrated for the
+# Turf/Industrial tire option (23x8.5-12 front, 33x13.5-16.5 rear).
+# Source: CET Operator Manual page 34 travel-speed table
+# (https://solectracsupport.com/FT25GUSAOPM.pdf), at the max-RPM column:
+# Low 5.7 km/h @ 2800 RPM, Medium 8.6 km/h @ 2800 RPM, High 17.0 km/h @
+# 2800 RPM. Relationship is linear in motor RPM within each range. The
+# S/N/F switch is a motor-RPM cap, not a gear stage, and does not affect
+# this calibration. The Agri tire option uses different coefficients
+# (5x12 / 8.0x18) — swap in 4.6/8.8/17.5 if those tires are fitted.
+KMH_PER_RPM_TURF = {
+    1: 5.7 / 2800,    # Low (range gear "L")
+    2: 8.6 / 2800,    # Medium (range gear "M")
+    3: 17.0 / 2800,   # High (range gear "H")
+}
+KMH_TO_MPH = 0.6213712
 # Pack ratings: the vendor BMS GUI reports 300 Ah at 72.0 V nominal
 # (21.6 kWh). The FT 25G service manual battery section nameplates the
 # pack at 350 Ah / 73 V / 25.5 kWh (20S4P NMC modules, cell
@@ -1558,6 +1573,22 @@ def render_motor(state: State, now: float) -> Panel:
     else:
         rg_text = Text(f"R{int(rg)}")
     t.add_row("range", rg_text)
+
+    rpm_signed = state.motor_rpm.value
+    if rpm_signed is None or rg is None:
+        gs_text = Text("---", style="dim")
+    else:
+        coef = KMH_PER_RPM_TURF.get(int(rg))
+        if coef is None:
+            gs_text = Text("---", style="dim")
+        else:
+            kmh = rpm_signed * coef
+            mph = kmh * KMH_TO_MPH
+            gs_text = Text(f"{kmh:+5.1f} km/h  ({mph:+5.1f} mph)")
+            if state.motor_rpm.is_stale(now):
+                gs_text = Text(f"{kmh:+5.1f} km/h  ({mph:+5.1f} mph)  (stale)",
+                               style="yellow dim")
+    t.add_row("ground speed", gs_text)
 
     def _temp_text(ch: Channel) -> Text:
         if ch.value is None:
