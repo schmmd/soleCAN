@@ -152,11 +152,23 @@ of the linear bus:
                                     at this end
 
 The **OBD-II diagnostic connector** is a passive tap on the same bus —
-not an extra node. Per schematic 5.8, it follows standard OBD-II
-HS-CAN pinout: pin 4 ground, pin 5 chassis ground, **pin 6 CAN_H**
-(yellow 0.75 mm²), **pin 14 CAN_L** (green 0.75 mm²), pin 16 +12 V
-battery. The older Solectrac topology diagram's "DB9" connector label
-is a mislabel — it's the OBD-II port.
+not an extra node. It follows standard OBD-II HS-CAN pinout with four
+cavities populated (verified by physical inspection):
+
+- **Pin 4** — chassis ground
+- **Pin 6** — CAN_H (yellow 0.75 mm²)
+- **Pin 14** — CAN_L (green 0.75 mm²)
+- **Pin 16** — +12 V battery
+
+Pin 5 (signal ground) is **not** populated — only pin 4 carries
+ground. For a CAN-only diagnostic tap this is fine: pin 4 gives any
+attached tool a common reference for the differential pair, and pin 5
+is mostly a legacy/emissions-tool concession. A generic OBD-II adapter
+expecting pin 5 to be live may need a jumper from pin 4 to pin 5 on
+the dongle side, or simply tie its signal ground to pin 4.
+
+The older Solectrac topology diagram's "DB9" connector label is a
+mislabel — it's the OBD-II port.
 
 ```
    [120 Ω]─┬────────┬────────┬────────┬────────┬─[120 Ω]
@@ -197,14 +209,15 @@ spool, and no solenoids/sensors/transducers anywhere).
 
 ### Bus termination
 
-Bus measures **30 Ω** across J35/J36 at the cluster (key off, all
-nodes connected) versus the textbook **60 Ω** for two 120 Ω
-terminators in parallel — four 120 Ω resistors in parallel, two
-beyond what the schematic draws. Drivers tolerate it and captures are
-clean. The extra terminators are almost certainly inside the BMS and
-the Charger (both ECUs commonly ship with internal termination);
-unplug-and-measure with each node removed would localize them
-precisely.
+Bus measures **40 Ω** across CAN_H/CAN_L at the OBD-II port (key off,
+all nodes connected) — three 120 Ω resistors in parallel, one beyond
+what the schematic draws. Unplugging the BMS field connector raises
+the reading to the textbook **60 Ω**, confirming the extra terminator
+is **internal to the BMS**. The Charger does not terminate internally
+(otherwise the BMS-disconnected reading would have stayed at 40 Ω).
+The remaining two terminators are the schematic 5.10 endpoints
+(at the MC and Cluster locations). Drivers tolerate the 3-terminator
+config and captures are clean.
 
 ### Second 2-pin CAN port
 
@@ -216,6 +229,20 @@ pairs: the main vehicle bus (above) and this debug pair. If tapped,
 expect BMS-internal diagnostic chatter — likely the same protocol that
 the host-side **UDAAN** tool consumes. This is no longer believed to
 be a hydraulic bus.
+
+**Resistance confirms it is a separate, BMS-only bus.** Measured
+key-off with nothing plugged in, the 2-pin connector reads **120 Ω
+across the pair** — i.e. exactly one 120 Ω terminator on that pair.
+If the 2-pin were a tap onto the main bus, it would read the same
+as any other tap on the main bus (40 Ω at OBD-II in the same
+conditions, §"Bus termination" above). Unplugging the BMS field
+connector causes the 2-pin reading to go **open** (overload), which
+proves the only node electrically present on that pair is the BMS —
+no other module in the harness taps it. The single 120 Ω is therefore
+the BMS's internal terminator on its debug pair, and the 2-pin
+connector is its physical termination at the harness end (no second
+terminator until a tool is plugged in). All consistent with the
+schematic 5.7 `CANDE-H`/`CANDE-L` debug-pair interpretation.
 
 ## Source-address map
 
@@ -981,11 +1008,14 @@ Code 51 is listed out of numeric order in the manual.
   shows the BMS exposing two CAN pairs: the main bus (CAN_H3/CAN_L3
   on internal pins H/J, field-connector pins D/E) and a debug pair
   (`CANDE-H`/`CANDE-L` on internal pins F/G) labeled "TO BMS DEBUG
-  CONNECTOR PIN-1/PIN-2". Confirmation = tap the 2-pin connector and
-  see if traffic resembles BMS-internal diagnostic chatter. The
-  previously-suspected "Kelly KLS hydraulic CAN" interpretation is
-  ruled out by schematic 5.11, which shows the e-hydraulic controller
-  has no CAN pins at all.
+  CONNECTOR PIN-1/PIN-2". 120 Ω across the 2-pin pair (key-off,
+  nothing plugged in) electrically confirms it is a separate,
+  single-terminated bus — see the "Second 2-pin CAN port" section.
+  What remains open is *what protocol* runs on it; confirmation =
+  tap the connector and see if traffic resembles BMS-internal
+  diagnostic chatter. The previously-suspected "Kelly KLS hydraulic
+  CAN" interpretation is ruled out by schematic 5.11, which shows the
+  e-hydraulic controller has no CAN pins at all.
 - **UDAAN tool — identified, downloadable; one practical blocker.**
   UDAAN is the **UDAN iBMS Upper Utility** from Anhui UDAN Technology
   Co., Ltd. (Chinese BMS vendor); the Solectrac pack is rebadged UDAN
@@ -1018,11 +1048,6 @@ Code 51 is listed out of numeric order in the manual.
   logical SAs emitted by one of the four documented ECUs (cluster is
   the natural candidate). Worth re-examining the captures with the
   4-node constraint as the prior.
-- **Extra terminators.** Bus measures 30 Ω instead of the
-  schematic-predicted 60 Ω — two additional 120 Ω terminators that
-  schematic 5.10 doesn't show. Unplug-and-measure with each node
-  removed would localize them; most likely BMS and Charger (both
-  commonly ship with internal termination).
 - **True throttle full-scale.** FF21CA data[0] = 0xCC = 204 observed
   in forward under real load; J1939 SPN 91 convention is raw 250 =
   100 % but not yet ground-truth. A "pedal mashed hard in F under
