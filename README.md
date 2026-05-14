@@ -52,7 +52,7 @@ produced it:
 * `frames.csv` — what was on the bus (one row per consumed frame, joined to
   signals via `frame_index`)
 * `decoders.csv` — how we decoded it (per-signal formula catalog)
-* `ids.csv` — every unique CAN ID seen, with J1939 breakdown (metadata, not a
+* `can_ids.csv` — every unique CAN ID seen, with J1939 breakdown (metadata, not a
   timeseries, so it has its own schema)
 
 To re-derive a value by hand: pick a row from `signals.csv`, look up its
@@ -101,10 +101,10 @@ One row per signal name (parametric signals like `cell.NN.voltage_v` use
 `NN` as a placeholder). `bytes` references positions within `frames.csv`'s
 `b0..b7` columns. `confidence` is `verified`, `tentative`, or `unknown`.
 
-#### `ids.csv` — per-unique-CAN-ID J1939 decode
+#### `can_ids.csv` — per-unique-CAN-ID J1939 decode
 
 ```
-id, ext, count, priority, R, DP, PF, PS, SA, PGN, PDU, PS_role, name
+can_id, ext, count, priority, R, DP, PF, PS, SA, PGN, PDU, PS_role, name
 ```
 
 One row per distinct CAN ID seen, with the J1939 field breakdown described
@@ -124,7 +124,7 @@ One row per distinct CAN ID seen, with the J1939 field breakdown described
 3. Add a row per new signal name to the `DECODERS` catalog so the formula
    and confidence land in `decoders.csv`.
 4. Optionally add a human-readable name for the PGN to `PGN_NAMES` so it
-   surfaces in `ids.csv`.
+   surfaces in `can_ids.csv`.
 5. To surface the new signal in the stdout summary, add a
    `values_for(rows, scenario, "your.signal")` block to `summarize()`.
 
