@@ -94,6 +94,8 @@ One row per distinct CAN ID seen, with the J1939 field breakdown described
 Live (or replayed) BMS / charger / motor dashboard. Decodes the same
 J1939 frames as `solectrac-analyze.py`.
 
+![solectrac-stream TUI](screenshot.svg)
+
 ```sh
 # Live capture using slcan
 solectrac-stream.py --interface slcan --channel /dev/cu.usbmodem101 --bitrate 250000
