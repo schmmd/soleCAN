@@ -662,6 +662,22 @@ non-zero values into FF21CA byte 7 flashed dashboard lamps but never
 produced a numeric code.
 
 
+### Speed encoder connector
+
+The motor's 2-channel A/B quadrature encoder (no Z pulse, PPR not
+yet measured) connects to the MC via a 4-pin IC pigtail. Pin
+assignments from the service manual's code-12 and code-36 DTC
+troubleshooting procedures:
+
+- **Pins 1 & 4** — 12 V supply (12 V should appear between these pins
+  with the pigtail unplugged from the motor, IGN on)
+- **Pins 2 & 3** — A and B signal channels (frequency increases
+  proportionally with motor speed)
+
+To measure PPR, probe pins 2 and 3 while spinning at a known RPM —
+see open questions.
+
+
 ## Charger (SA 0xE5)
 
 ### FF50E5 — Charger telemetry — CONFIRMED (V, A, status)
@@ -730,10 +746,8 @@ remain 0xFF and have not been decoded.
 
 **OPC timer.** The VC does not trip instantly when the operator leaves
 the seat — there is a hardware grace timer (the OPC timer module; see
-below). In the bouncing captures with ~3-second off-seat intervals,
-byte 0 never left 0x0C, confirming the timer is longer than ~3 s.
-Exact duration is not yet measured; a sustained unseated capture with
-a known elapsed time would pin it.
+below). The service manual specifies the timer as **7 s** (§Tractor
+Controls SOP).
 
 **Dashboard wrench indicator.** A blinking wrench appears on the
 cluster immediately when the operator leaves the seat, even before the
@@ -919,24 +933,26 @@ while a capture tool reads the live bus.
 
 ## Vendor error code tables
 
-Reproduced from the operator manual for cross-reference. The
-disambiguation in the F108F3 and DM1 sections above maps these numbers
-to bit positions and SPN values respectively. The two ranges do not
-overlap, so a dashboard "code 47" is unambiguously MC and "code 124"
-is unambiguously BMS.
+Reproduced from the operator manual for cross-reference. Detecting
+conditions in parentheses are from the service manual DTC
+troubleshooting section; codes without a parenthetical have no
+explicit threshold data in this corpus. The disambiguation in the
+F108F3 and DM1 sections above maps these numbers to bit positions and
+SPN values respectively. The two ranges do not overlap, so a dashboard
+"code 47" is unambiguously MC and "code 124" is unambiguously BMS.
 
 ### BMS codes (100..146)
 
-    100  SOC is too high
-    101  SOC is too low
-    102  Total voltage is too high
-    103  Total voltage is too low
-    104  Charge current fault
-    105  Discharge current fault
-    106  Battery temperature is too low
-    107  Battery temperature is too high
-    108  Battery under voltage
-    109  Battery over voltage
+    100  SOC is too high                   (pack V > 84 V)
+    101  SOC is too low                    (SOC ≤ 15 %; pack V < 60 V)
+    102  Total voltage is too high         (pack V > 84 V)
+    103  Total voltage is too low          (SOC ≤ 15 %; pack V < 60 V)
+    104  Charge current fault              (charge I differs from programmed)
+    105  Discharge current fault           (discharge I differs from programmed)
+    106  Battery temperature is too low    (cell temp < −10 °C)
+    107  Battery temperature is too high   (cell temp > 54 °C)
+    108  Battery under voltage             (SOC ≤ 15 %; pack V < 60 V)
+    109  Battery over voltage              (pack V > 84 V)
     110  Battery temperature unbalance
     111  Battery voltage unbalance
     112  The battery does not match
@@ -967,28 +983,28 @@ is unambiguously BMS.
 
 ### MC codes (12..99)
 
-    12  Controller Over Current
-    13  Current Sensor Fault
-    15  Controller Severe Undertemp
-    16  Controller Severe Overtemp
-    17  Severe B+ Undervoltage
-    18  Severe B+ Overvoltage
-    18  Severe KSI Overvoltage           [duplicate S.No. 18]
-    22  Controller Over temp Cutback
+    12  Controller Over Current          (current > limit or phase short; motor phase R < 9 mΩ)
+    13  Current Sensor Fault             (sensor reading invalid or absent)
+    15  Controller Severe Undertemp      (controller temp < −10 °C)
+    16  Controller Severe Overtemp       (controller temp > 75 °C)
+    17  Severe B+ Undervoltage           (B+ input < 62 V)
+    18  Severe B+ Overvoltage            (regen pushes pack > 84 V)
+    18  Severe KSI Overvoltage           (KSI pin > 84 V) [duplicate S.No. 18]
+    22  Controller Over temp Cutback     (controller temp > 60 °C; cutback, not shutdown)
     23  B+ Undervoltage Cutback
-    24  B+ Overvoltage Cutback
-    25  +5V Supply Failure
-    28  Motor Temp Hot Cutback
+    24  B+ Overvoltage Cutback           (pack > 84 V)
+    25  +5V Supply Failure               (pin 26 load impedance too low)
+    28  Motor Temp Hot Cutback           (motor temp > 125 °C)
     29  Motor Temp Sensor Fault
-    31  Coil1 Driver Open/Short
+    31  Coil1 Driver Open/Short          (contactor coil; 150 Ω at J1-6↔J1-13)
     31  Main Open/Short                  [duplicate S.No. 31]
     32  Coil2 Driver Open/Short
     32  EM Brake Open/Short              [duplicate S.No. 32]
-    36  Encoder Fault
+    36  Encoder Fault                    (signal invalid; 12 V on pins 1&4, signal on pins 2&3)
     36  Sin/Cos Sensor Fault             [duplicate S.No. 36]
-    37  Motor Open
-    38  Main Contactor Welded
-    39  Main Contactor Did Not Close
+    37  Motor Open                       (phase open; motor phase R < 9 mΩ)
+    38  Main Contactor Welded            (won't open after IGN off)
+    39  Main Contactor Did Not Close     (didn't close at startup)
     41  Throttle Wiper High
     42  Throttle Wiper Low
     43  Pot2 Wiper High
@@ -1083,9 +1099,8 @@ Code 51 is listed out of numeric order in the manual.
 - **SA 0x12 role.** Emits a constant FF21 payload
   `01 00 00 00 00 00 00 00`. Distinct from FF21CA from 0xCA despite
   sharing a PGN.
-- **OPC timer duration — ~6 s.** The VC waits approximately 6 seconds
-  after the operator leaves the seat before tripping F100D0 byte 0 to
-  0x00.
+- **OPC timer duration — CONFIRMED 7 s** per service manual §Tractor
+  Controls SOP; VC heartbeat section updated.
 - **SA 0xD0 and 0xF4 physical home.** Schematic 5.10 only documents
   four CAN nodes (MC, BMS, Charger, Cluster). The OPC module shown on
   schematic 5.9 is wired entirely discretely (no CAN). So either the
@@ -1097,15 +1112,16 @@ Code 51 is listed out of numeric order in the manual.
   in forward under real load; J1939 SPN 91 convention is raw 250 =
   100 % but not yet ground-truth. A "pedal mashed hard in F under
   load" capture would settle it.
-- **Motor encoder PPR.** Still not documented in any manual we have
-  (service manual motor section, CET operator manual, parts catalog,
-  Curtis 1238 manual). PPR is needed to convert encoder pulses (if
-  they ever surface) to RPM. Most likely findable by reading the
-  controller's parameter file with a Curtis 1313 programmer, or by
-  spinning the motor at a known RPM and counting pulses on the
-  encoder pigtail. **Motor → wheel ground-speed conversion is now
-  resolved** via the operator manual's published travel-speed table
-  — see "Range → ground speed" in the MC section.
+- **Motor encoder PPR.** Not documented in any manual (service manual,
+  CET operator manual, parts catalog, Curtis 1238 manual). The encoder
+  connector pinout is now known — signal on pins 2 & 3, supply on
+  pins 1 & 4 (see "Speed encoder connector" in the MC section) — so
+  tapping the pigtail is straightforward. Most likely findable by
+  reading the controller's parameter file with a Curtis 1313
+  programmer, or by spinning the motor at a known RPM and counting
+  pulses on pins 2 and 3. **Motor → wheel ground-speed conversion is
+  resolved** via the operator manual's travel-speed table — see
+  "Range → ground speed" in the MC section.
 
 
 ## Sources
