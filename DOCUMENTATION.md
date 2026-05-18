@@ -46,7 +46,7 @@ off the pack (parts catalog Table 65).
 | Cells in parallel         | —                                     | —                                                  | 4 modules × 5P1S = 20P      | "~20 cells in parallel" | —        |
 | Cells in series           | —                                     | —                                                  | 20 (one per module)         | 20                      | —        |
 | Charging temp range       | 0–40 °C                               | —                                                  | —                           | —                       | —        |
-| Charging time             | 5.5 hr (Lvl 2, 220 VAC, 20→80%)<br>11 hr (Lvl 1, 110 VAC) | 8 hr (0→100%, on-board charger) | —                       | —                       | —        |
+| Charging time             | 5.5 hr (Lvl 2, 220 VAC, 20→80%); 11 hr (Lvl 1, 110 VAC) | 8 hr (0→100%, on-board charger)  | —                           | —                       | —        |
 | Charging-target voltage   | 83 V                                  | 82 VDC (§9.1)                                      | —                           | —                       | —        |
 | Cluster supply            | —                                     | 12 V / 20 Ah aux battery                           | 12 V (accessory, not pack)  | Hardware                | —        |
 | Cycle life                | 2500 cycles @ 25 °C                   | 2500 cycles @ 25 °C                                | —                           | —                       | —        |
