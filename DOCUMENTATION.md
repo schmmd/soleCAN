@@ -24,7 +24,7 @@ Confidence markers used throughout:
   - [Motor controller (SA 0xCA)](#motor-controller-sa-0xca)
   - [Charger (SA 0xE5)](#charger-sa-0xe5)
   - [Vehicle controller (SA 0xD0)](#vehicle-controller-sa-0xd0)
-  - [Instrument cluster hardware](#instrument-cluster-hardware)
+- [Instrument cluster hardware](#instrument-cluster-hardware)
 - [Vendor error code tables](#vendor-error-code-tables)
 - [Open questions](#open-questions)
 
@@ -44,6 +44,7 @@ off the pack (parts catalog Table 65).
 | Bus baud                  | —                                     | —                                                  | 250 kbaud (J1939 default)   | —                       | —        |
 | Cell P/N                  | —                                     | —                                                  | `SEPNI-8688190P-17.5AH-5P`  | —                       | `SEPNI8688190P-15Ah` (battery faceplate) |
 | Cells in parallel         | —                                     | —                                                  | 4 modules × 5P1S = 20P      | "~20 cells in parallel" | —        |
+| Cells in series           | —                                     | —                                                  | 20 (one per module)         | 20                      | 20 (CAN captures) |
 | Charging temp range       | 0–40 °C                               | —                                                  | —                           | —                       | —        |
 | Charging time             | 5.5 hr (Lvl 2, 220 VAC, 20→80%); 11 hr (Lvl 1, 110 VAC) | 8 hr (0→100%, on-board charger)  | —                           | —                       | —        |
 | Charging-target voltage   | 83 V                                  | 82 VDC (§9.1)                                      | —                           | —                       | —        |
@@ -64,19 +65,11 @@ off the pack (parts catalog Table 65).
 | Temperature probes        | —                                     | —                                                  | -                           | 7 active                | 7 active (CAN captures) |
 | Voltage operating range   | —                                     | 60–84 V (§1.2 plate)                               | 60–84 V                     | —                       | 60–84 V (battery faceplate) |
 
-Five sources supply pack specs: the Solectrac **brochure**
-(`docs/Solectrac-e25G-Brochure-230818.pdf`); the **operator manual**
-(CET, `docs/CET Operator Manual.pdf`, especially §1.2 nameplate photo
-and §9.1 specification table); the FT 25G **service manual** battery
-section; the **BMS GUI** as relayed second-hand; and the **battery
-faceplate** observed directly on this tractor.
-
-**The 300 Ah vs 350 Ah split is a two-SKU situation, not a single-pack
-disagreement.** The service manual cell P/N is
-`SEPNI-8688190P-17.5AH-5P` (17.5 Ah cells); the as-installed pack's
-nameplate sticker is `SEPNI8688190P-15Ah` (15 Ah cells). Same cell
-family (SEPNI 86 × 88 × 190 mm prismatic NMC), different capacity
-grade. Plugged into the 20-series × 4-module × 5-parallel topology:
+**The 300 Ah vs 350 Ah split is a two-SKU situation.** The service manual cell
+P/N is `SEPNI-8688190P-17.5AH-5P` (17.5 Ah cells); the as-installed pack's
+nameplate sticker is `SEPNI8688190P-15Ah` (15 Ah cells). Same cell family
+(SEPNI 86 × 88 × 190 mm prismatic NMC), different capacity grade. Plugged into
+the 20-series × 4-module × 5-parallel topology:
 
 - 17.5 Ah cells → 4 × 5 × 17.5 = **350 Ah pack, 25.5 kWh @ 73 V** —
   service-manual and brochure-quoted SKU.
@@ -87,19 +80,12 @@ grade. Plugged into the 20-series × 4-module × 5-parallel topology:
 The `solectrac-analyze.py` / `solectrac-stream.py` Wh display uses
 72 V × 300 Ah = 21.6 kWh, which matches the faceplate exactly.
 
-**Pack vendor is Soundon; UDAN is the BMS firmware/tool vendor, not
-the pack maker.** The battery faceplate is laser-etched **Soundon New
-Energy Technology Co., Ltd.** (Chinese NMC pack manufacturer; the
-`docs/BMS Update Error and Data Extraction - MS Soundon Battery.pdf`
-file in this repo is from them). An Escorts-branded white sticker
-rides on top: Escorts Kubota Limited (Farmtrac's parent in India,
-Solectrac's US distribution brand) buys the pack from Soundon, applies
-its own QR-coded serial ("Escorts 72V300Ah NO.079"), and ships it into
-Farmtrac/Solectrac tractors. The BMS-GUI "ESCORTS-INTERNAL" footer and
-the service manual's "Escorts Solution" pack-vendor attribution both
-reflect the Escorts integrator label, not the upstream pack
-manufacturer. Whether the BMS PCB itself is Soundon-built, UDAN-built,
-or third-party is not resolved by the available documents.
+**Pack vendor is Soundon; UDAN is the BMS firmware/tool vendor.** The battery
+faceplate is laser-etched **Soundon New Energy Technology Co., Ltd.** (Chinese
+NMC pack manufacturer). An Escorts-branded white sticker rides on top: Escorts
+Kubota Limited (Farmtrac's parent in India, Solectrac's US distribution brand)
+buys the pack from Soundon, applies its own QR-coded serial ("Escorts 72V300Ah
+NO.079"), and ships it into Farmtrac/Solectrac tractors.
 
 The service manual's BMS troubleshooting section delegates all
 live-data inspection to a host-side application called **UDAAN**
@@ -116,10 +102,6 @@ running both simultaneously produces a time-aligned raw-CAN +
 labeled-field log, i.e. an empirical DBC. See the open-questions
 section for the practical decode path.
 
-This tractor's pack carries manufacture date **2021-12-02** and
-Escorts serial **NO.079** — useful as a calendar-age anchor for SOH
-and capacity-fade discussions.
-
 **BMS field connector** is part number **`RT061412SNHEC03`** (12-pin
 circular). Per the manual's DTC 125 troubleshooting (page 30 of the
 battery section), main vehicle CAN exits on **pins D and E** — a 60 Ω
@@ -132,12 +114,12 @@ troubleshooting steps and are the most likely physical home of the
 **second (debug) CAN pair** — see "Second 2-pin CAN port" under the
 CAN topology section.
 
-Schematic 5.7 in the FT 25G service manual uses BMS-internal terminal letters that do **not** map
-1:1 to the field connector — it shows main CAN on pins H/J
-(`CAN_H3`/`CAN_L3`) and a second pair on F/G (`CANDE-H`/`CANDE-L`)
-labelled "TO BMS DEBUG CONNECTOR PIN-1/PIN-2". The schematic's H/J
-and the field connector's D/E refer to the same physical bus; the
-two pin-naming conventions are independent.
+Schematic 5.7 in the FT 25G service manual uses BMS-internal terminal letters
+that do **not** map 1:1 to the field connector — it shows main CAN on pins H/J
+(`CAN_H3`/`CAN_L3`) and a second pair on F/G (`CANDE-H`/`CANDE-L`) labelled "TO
+BMS DEBUG CONNECTOR PIN-1/PIN-2". The schematic's H/J and the field connector's
+D/E refer to the same physical bus; the two pin-naming conventions are
+independent.
 
 100 % SOC reference set (5 captures at full charge):
 
@@ -197,13 +179,6 @@ cavities populated (verified by physical inspection):
 - **Pin 14** — CAN_L (green 0.75 mm²)
 - **Pin 16** — +12 V battery
 
-Pin 5 (signal ground) is **not** populated — only pin 4 carries
-ground. For a CAN-only diagnostic tap this is fine: pin 4 gives any
-attached tool a common reference for the differential pair, and pin 5
-is mostly a legacy/emissions-tool concession. A generic OBD-II adapter
-expecting pin 5 to be live may need a jumper from pin 4 to pin 5 on
-the dongle side, or simply tie its signal ground to pin 4.
-
 The older Solectrac topology diagram's "DB9" connector label is a
 mislabel — it's the OBD-II port.
 
@@ -231,11 +206,8 @@ from the main E-Controller (`KS01A`), and three-phase U/V/W out to a
 BLDC pump motor. It is not a CAN-speaking ECU on this vehicle.
 
 The parts catalog identifies the e-hydraulic as a **Kelly KLS7212M /
-KLS7218** controller, which is a CAN-capable family. Either the
-Kelly's CAN port is physically present but not wired, or the catalog
-identification is for a different controller variant. Either way, the
-CAN-decode-from-the-Kelly-protocol-PDF plan is not applicable on this
-vehicle.
+KLS7218** controller, which is a CAN-capable family. However, no CAN
+data has been found that is related to the hydraulic system.
 
 The rear 3-point hitch, lift, PTO, power steering, and remote
 hydraulics are all mechanical-hydraulic with no electrical interface
@@ -246,15 +218,11 @@ spool, and no solenoids/sensors/transducers anywhere).
 
 ### Bus termination
 
-Bus measures **40 Ω** across CAN_H/CAN_L at the OBD-II port (key off,
-all nodes connected) — three 120 Ω resistors in parallel, one beyond
-what the schematic draws. Unplugging the BMS field connector raises
-the reading to the textbook **60 Ω**, confirming the extra terminator
-is **internal to the BMS**. The Charger does not terminate internally
-(otherwise the BMS-disconnected reading would have stayed at 40 Ω).
-The remaining two terminators are the schematic 5.10 endpoints
-(at the MC and Cluster locations). Drivers tolerate the 3-terminator
-config and captures are clean.
+Bus measures **40 Ω** across CAN_H/CAN_L at the OBD-II port (key off, all nodes
+connected) — three 120 Ω resistors in parallel, one beyond what the schematic
+draws. Unplugging the BMS field connector raises the reading to the textbook
+**60 Ω**, confirming the extra terminator is **internal to the BMS**. Drivers
+tolerate the 3-terminator config and captures are clean.
 
 ### Second 2-pin CAN port
 
@@ -264,8 +232,7 @@ on schematic 5.7 as `CANDE-H` / `CANDE-L`, explicitly labelled "TO
 BMS DEBUG CONNECTOR PIN-1 / PIN-2". The BMS thus exposes two CAN
 pairs: the main vehicle bus (above) and this debug pair. If tapped,
 expect BMS-internal diagnostic chatter — likely the same protocol that
-the host-side **UDAAN** tool consumes. This is no longer believed to
-be a hydraulic bus.
+the host-side **UDAAN** tool consumes.
 
 **Resistance confirms it is a separate, BMS-only bus.** Measured
 key-off with nothing plugged in, the 2-pin connector reads **120 Ω
@@ -303,13 +270,13 @@ as additional data storage:
 
 ```
   if (PF < 0xF0) {
-      // PDU1: PS is DA, not in PGN                                                                                                
-      PGN = (DP << 16) | (PF << 8);                                                                                                
-      DA  = PS;                                                                                                                    
-  } else {                                                                                                                         
-      // PDU2: PS is GE, part of PGN                                                                                               
+      // PDU1: PS is DA, not in PGN
+      PGN = (DP << 16) | (PF << 8);
+      DA  = PS;
+  } else {
+      // PDU2: PS is GE, part of PGN
       PGN = (DP << 16) | (PF << 8) | PS;
-  }    
+  }
 ```
 
 In data J1939 data collected for the Solectrac, > 99% (all except the 1806E5F4
@@ -332,7 +299,6 @@ elsewhere in this document.
 | 0xCA | Motor controller / drive ECU          | DM1 (FECA) + FF21 motor telemetry (~85 Hz); silent while charging |
 | 0x12 | Unknown                               | Constant FF21 payload `01 00 00 00 00 00 00 00`              |
 | 0x041 (11-bit) | Ignition event marker (non-J1939) | Standard CAN 2.0A, not J1939. Constant payload `20 12 01 00 00 00 01 11`. Observed exactly twice per full ignition cycle (one frame at key-on, one at key-off); absent from captures that don't span a power transition. Source ECU unconfirmed. |
-
 
 ### BMS (SA 0xF3)
 
@@ -477,11 +443,6 @@ Periodic frame; byte 0 carries a state-machine vocabulary:
 | 0x80   | standby / charger detected |
 | 0x45   | ready / driving            |
 
-Observed full payloads:
-
-    driving captures:               45 E0 FC FF FF FF FF FF
-    ignition with charger inserted: 80 C4 FC FF FF FF FF FF
-
 Vendor GUI implies more states exist (Calibrating, Charging,
 Discharging, Fault, Sleep); not observed in captured data.
 
@@ -551,29 +512,6 @@ Notable:
 - Bits 1 and 2 might still carry internal flags that don't surface as
   numeric codes.
 
-##### F108 cross-validation against pre-injection captures
-
-`bms-fullcharge-102-109-140.asc` — operator-confirmed cycling 102, 109, 140:
-
-    F108 = 10 00 04 00 00 00 00 01
-    byte 0 = 0x10 → bits 4-5 (pair 2) → code 102  ✓
-    byte 2 = 0x04 → bits 2-3 (pair 1) → code 109  ✓
-    byte 7 = 0x01 → code 140                      ✓
-
-`bms-124-140-142-143-144-146.asc` — operator-confirmed cycling 124,
-140, 142, 143, 144, 145:
-
-    F108 = 00 00 00 00 00 01 00 BB
-    byte 5 = 0x01 → bit 0 → code 124
-    byte 7 = 0xBB → {140, 142, 143, 144, 145}
-
-Codes 100..127 (bytes 0..5) and 140..145 (byte 7) are merged and
-deduplicated by the decoder.
-
-**Latch behavior.** BMS F108 codes track the bitmap in real time —
-clearing the bit clears the dash. This is the opposite of the MC's
-DM1 channel, which latches DTCs until a key cycle (see FECA section).
-
 
 ### Motor controller (Curtis 1238E, SA 0xCA)
 
@@ -605,24 +543,16 @@ real-time inverter feed).
 | 7    | data[6]       | 0x00 constant — fault-bitmap candidate (UNKNOWN)                  |
 | 8    | data[7]       | **Packed transmission state** (high nibble = range, low = F/N/R)  |
 
-**Motor RPM.** Little-endian uint16 with bias 0x0C80 (=3200). At
-commanded zero, data[2..3] = `80 0C` → 0 RPM. At pegged throttle in
-neutral, sweeps to `30..40 16` → ~2480..2496 RPM. The
-`accellerate-decelerate.asc` capture shows a textbook 0 → 2500 → 0
-ramp matching operator-reported ~2500 RPM at full throttle.
-
-RPM is **magnitude only** — values below 0x0C80 are not emitted even
-in reverse. Reverse is signaled separately by data[7]; the 0x0C80 bias
-is best understood as a fixed configuration constant, not a
-signed-value zero. Form a signed value as `direction × |rpm|` if
-needed.
+**Motor RPM.** Little-endian uint16 with bias 0x0C80 (=3200).  RPM is
+**magnitude only** — values below 0x0C80 are not emitted even in reverse.
+Reverse is signaled separately by data[7].
 
 **Throttle pedal position (data[0]).** Consistent with J1939 SPN 91
 (Accel Pedal Position 1) at 0.4 %/bit with raw 250 = 100 %:
 
     0x69 = 42 % (neutral-only captures, max observed)
+    0x96 = 60 % (reverse, real load)
     0xCC = 82 % (forward, real load)
-    0x96 = 60 % (reverse, real load — same pedal hardware)
 
 The F/R ceiling asymmetry strongly suggests a controller-side
 reverse-speed limiter applied before the byte goes on the wire. Idle
@@ -644,15 +574,6 @@ guess pending a "pedal mashed hard in F under load" capture.
         0x0 = Neutral
         0x4 = Forward
         0x8 = Reverse
-
-Verified by two controlled captures:
-
-- `drive-r-n-f.asc` — operator walks F/N/R lever R → N → F with range
-  held at 3, no pedal. data[7] = 0x28 → 0x20 → 0x24. Low nibble walks
-  8 → 0 → 4; high nibble pinned at 0x2.
-- `range-1-2-3.asc` — operator walks range 1 → 2 → 3 in Forward.
-  data[7] = 0x04 → 0x14 → 0x24. High nibble walks 0 → 1 → 2; low
-  nibble pinned at 0x4.
 
 **Startup interlock.** data[7] reflects lever position only, not
 drivetrain readiness. After power-on the motor controller requires the
@@ -706,13 +627,6 @@ populated until injection.
 | 5     | FMI / occurrence count                                 |
 | 6..7  | 0xFFFF terminator                                      |
 
-Confirmed via `util/mc_inject.py` injecting `0x18FECACA` with
-single-DTC payloads:
-
-    SPN 12 (0x0C) → dashboard "MC12"  (Controller Over Current)
-    SPN 47 (0x2F) → dashboard "MC47"  (HPD/Sequencing Fault)
-    SPN 99 (0x63) → dashboard "MC99"  (Parameter Mismatch)
-
 The cluster prepends "MC" based on source address. A populated DM1
 injected from SA 0xF3 (BMS) was **ignored** by the cluster — the
 cluster has subsystem-specific decoders rather than a unified DM1
@@ -724,9 +638,7 @@ path:
 **Latch quirk.** The cluster latches DM1 DTCs on receipt and does
 **not** unlatch when DM1 returns to empty. Standard J1939 prescribes
 DTCs going "previously active" after 3 s of frame absence; this
-cluster keeps them on screen until a key cycle. When iterating on
-injection tests, key-cycle between probes so you can tell whether a
-new code came from the new injection or from a stale latch.
+cluster keeps them on screen until a key cycle.
 
 FF21CA bytes 1 and 6 (data[1], data[6]) are constant zero and remain
 fault-bitmap candidates for non-DM1 status surfacing — injection of
