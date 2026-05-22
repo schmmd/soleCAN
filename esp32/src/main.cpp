@@ -250,11 +250,12 @@ void decodeCAN(uint32_t can_id, const uint8_t* raw, uint8_t len) {
     uint8_t  pf  = (can_id >> 16) & 0xFF;
     uint8_t  ps  = (can_id >> 8)  & 0xFF;
     uint16_t pgn = ((uint16_t)pf << 8) | (pf >= 0xF0 ? ps : 0);
-    bool decoded = false;
 
+    // Count any frame from a known source as decoded, before the per-PGN
+    // decoders below — they often early-return on all-zero idle frames.
     if (src == SRC_BMS || src == SRC_BMS_CHGR_IF || src == SRC_CHARGER ||
         src == SRC_VEHICLE || src == SRC_MOTOR || src == SRC_DASH)
-        decoded = true;
+        g_frames_decoded++;
 
     if (src == SRC_BMS) {
 
@@ -434,8 +435,6 @@ void decodeCAN(uint32_t can_id, const uint8_t* raw, uint8_t len) {
         }
         g_chgr_cmd.valid = true;
     }
-
-    if (decoded) g_frames_decoded++;
 }
 
 // ── JSON builder ──────────────────────────────────────────────────────────────
