@@ -18,6 +18,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <ESPmDNS.h>
+#include <DNSServer.h>
 #include <WebServer.h>
 #include <ArduinoJson.h>
 #include "driver/twai.h"
@@ -33,6 +34,12 @@
 
 #define CAN_TX_PIN GPIO_NUM_8
 #define CAN_RX_PIN GPIO_NUM_14
+
+// WiFi runs in dual AP+STA mode: the board always broadcasts its own hotspot
+// (so it's reachable in the field), and concurrently tries to join the
+// configured home network for bench use. AP IP is 192.168.4.1.
+#define AP_SSID "solectrac"
+#define AP_PASS "electricity"
 
 // ── J1939 source addresses ────────────────────────────────────────────────────
 
@@ -213,6 +220,7 @@ uint32_t    g_frames_rx      = 0;   // total frames received
 uint32_t    g_frames_decoded = 0;   // frames matching a known PGN/source
 uint32_t    g_last_frame_ms  = 0;   // millis() at last received frame
 bool        g_can_initialized = false;
+bool        g_ap_running      = false;
 
 // Session energy tracking (integrated power since boot)
 uint32_t    g_session_last_ms   = 0;
@@ -221,6 +229,7 @@ float       g_session_wh_drawn  = 0.0f;
 float       g_session_wh_charged = 0.0f;
 
 WebServer server(80);
+DNSServer  dns_server;
 
 // Dashboard HTML, embedded at build time via board_build.embed_txtfiles in
 // platformio.ini. The linker generates these symbols from the file path:
@@ -234,7 +243,7 @@ extern const uint8_t dashboard_html_end[]   asm("_binary_src_dashboard_html_end"
 // Adafruit ESP32-S3 Reverse TFT Feather has a NeoPixel on GPIO 33 whose power
 // rail is gated by GPIO 21 — both must be driven before any colour is visible.
 //   Red blink     — CAN driver failed to initialize
-//   Amber blink   — Wi-Fi not connected
+//   Amber blink   — No Wi-Fi up at all (AP failed and STA not connected)
 //   Dim white     — Alive, no CAN frames received recently
 //   Green blink   — CAN frames arriving (toggles on bus activity)
 
@@ -268,7 +277,7 @@ void updateLed() {
         ledWrite(g_led_on ? 32 : 0, 0, 0);
         return;
     }
-    if (WiFi.status() != WL_CONNECTED) {
+    if (!g_ap_running && WiFi.status() != WL_CONNECTED) {
         if (toggle) { g_led_last_toggle = now; g_led_on = !g_led_on; }
         ledWrite(g_led_on ? 24 : 0, g_led_on ? 12 : 0, 0);
         return;
@@ -891,11 +900,17 @@ void setup() {
         if (err == ESP_OK) g_can_initialized = true;
     }
 
+    // Bring up the soft-AP first so the board is always reachable in the field
+    // at 192.168.4.1 even if there's no home network in range. STA connect
+    // happens in the background; we don't block boot waiting on it.
+    WiFi.mode(WIFI_AP_STA);
+    g_ap_running = WiFi.softAP(AP_SSID, AP_PASS);
     WiFi.begin(WIFI_SSID, WIFI_PASS);
-    while (WiFi.status() != WL_CONNECTED) {
-        updateLed();
-        delay(50);
-    }
+
+    // Wildcard DNS on the soft-AP: any hostname (solectrac.local, solectrac,
+    // captive-portal probes, etc.) resolves to the board's AP IP. Needed
+    // because phones generally don't do mDNS over an AP with no internet.
+    if (g_ap_running) dns_server.start(53, "*", WiFi.softAPIP());
 
     MDNS.begin("solectrac");
 
@@ -920,6 +935,7 @@ void loop() {
     }
     slcanPoll();
     socketcandPoll();
+    dns_server.processNextRequest();
     server.handleClient();
     updateLed();
 }
