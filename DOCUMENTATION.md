@@ -102,6 +102,12 @@ running both simultaneously produces a time-aligned raw-CAN +
 labeled-field log, i.e. an empirical DBC. See the open-questions
 section for the practical decode path.
 
+**BMS firmware project identification.** When connected via UDAN, the
+BMS reports its loaded project file as **`C121.082.001.01`** with the
+display name **`印度索伦72V300Ah原版`** ("India Solectrac 72V 300Ah
+Original Version"). This is the UDAN-side project key for the
+firmware/parameter set on this tractor.
+
 **BMS field connector** is part number **`RT061412SNHEC03`** (12-pin
 circular). Per the manual's DTC 125 troubleshooting (page 30 of the
 battery section), main vehicle CAN exits on **pins D and E** — a 60 Ω
@@ -428,10 +434,19 @@ healthy low-cycle-count NMC pack should be effectively constant at
 The byte-constancy sweep eliminates every other plausible SOH location
 in the visible BMS frames — every other constant byte is either
 already attributed (cell count, voltage, current, SOC) or is a J1939
-sentinel (0x00 / 0xFF). Upgrading from leading candidate to CONFIRMED
-needs a capture where SOH demonstrably differs from 100 % (older
-firmware, older/degraded pack, or an injected spoof watched on the
-vendor GUI).
+sentinel (0x00 / 0xFF).
+
+Corroborating evidence from UDAN's host-side System State export: UDAN
+exposes a separately labeled **`SOH(%)`** field that reads exactly
+**`100.0`** on this pack, sitting alongside its own `Shown SOC` and
+`Real SOC` fields. So the BMS does internally publish SOH as a real
+named field, not just hardcode the constant — strengthening "data[5]
+is the SOH byte" over "data[5] is a fixed config byte that happens to
+decode to 100 %". Still TENTATIVE on the byte assignment because both
+hypotheses still predict 250 here; upgrading to CONFIRMED needs a
+situation where SOH demonstrably differs from 100 % (older
+firmware/pack, or an injected spoof watched on the vendor GUI to
+verify the byte tracks).
 
 #### F104F3 — Pack temperature min/max summary
 
@@ -1041,13 +1056,21 @@ Code 51 is listed out of numeric order in the manual.
 - **SOH confirmation.** F100F3 data[5] = 0xFA (250 raw × 0.4 %/bit =
   100 %) is the leading candidate — the only byte across 42 captures
   that is both constant everywhere and decodes to 100 % under a
-  plausible scaling. See the F100F3 section. Promoting from leading
-  candidate to CONFIRMED needs a capture where SOH differs from 100 %
-  (older firmware/pack, or an injected spoof watched on the vendor
-  GUI).
-- **KL15 / wake-up status bit.** Vendor GUI shows "Wake-up signal:
-  KL15" — implying an ignition-status bit lives somewhere in the BMS
-  broadcasts. Not yet identified.
+  plausible scaling. UDAN's host-side export confirms the BMS does
+  publish a labeled `SOH(%)` field (= 100.0 on this pack), so the
+  thing exists; what remains open is whether F100F3 data[5] is the
+  byte that carries it. See the F100F3 section. Promoting to
+  CONFIRMED needs a capture where SOH differs from 100 % (older
+  firmware/pack, or an injected spoof watched on the vendor GUI).
+- **Wake-up signal source — partially answered.** UDAN exports a
+  labeled "Wake-up signal" field whose value is a categorical enum
+  (not a single status bit). Two values observed directly in UDAN
+  exports: **`KL15`** (idle, key-on, no charger) and **`OBC`**
+  (plugged into the AC charger). Implication: the BMS broadcasts
+  must encode the wake source as a multi-value field somewhere — not
+  yet located in our decoded CAN traffic. Open question reframed:
+  *which BMS broadcast byte carries this enum*, given that we now
+  know it isn't a single bit.
 - **F104 byte-level decode.** Pack temperature min/max summary,
   analogous to F102 for cells. Not parsed.
 - **F106 / F107 byte-level decode.** Running-mode vocabulary and
