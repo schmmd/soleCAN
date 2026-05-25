@@ -21,9 +21,6 @@ Confidence markers used throughout: **CONFIRMED**, **TENTATIVE**, **UNKNOWN**.
 | MCU (per UDAN symbol table)        | NXP S32K142 / S32K314 (ARM Cortex-M)  |
 | Flash                              | GD25Q64 (SPI NOR, 64 Mbit) + W25N01G (NAND, 1 Gbit) |
 
-The `C121.*` project numbers diverge between UI (`C121.082`) and hardware
-string (`C121.074`); TENTATIVE: firmware-project vs hardware-revision tag.
-
 ## Pack structure (CONFIRMED)
 
 - Chemistry: NCM
@@ -82,7 +79,7 @@ are required before any write or routine call is honored.
 ```
 
 The L1 key algorithm (CONFIRMED, fully reversed) is implemented in
-compiled C inside `app/iBMSUpper.exe` (cgo-called from
+compiled C inside `iBMSUpper.exe` (cgo-called from
 `uds_udan_key_calculator_YJC.go`). Python reimplementation:
 `util/udan_seedkey.py` — verifies 9/9 captured pairs. See "SecAccess L1
 key algorithm" in the reverse-engineering notes appendix for the full
