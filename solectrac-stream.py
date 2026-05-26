@@ -1787,7 +1787,7 @@ def build_layout(state: State, args, now: float, mode: str = "live") -> Layout:
         Layout(name="header", size=3),
         Layout(name="row1", size=17),
         Layout(name="cells", size=11),
-        Layout(name="row4", size=8),
+        Layout(name="row4", size=9),
         Layout(name="faults", size=15),
         Layout(name="alerts", size=8),
     )
