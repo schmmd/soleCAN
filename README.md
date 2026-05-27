@@ -1,6 +1,6 @@
 # solectrac
 
-Reverse-engineered J1939 CAN-bus tooling for a Solectrac electric tractor:
+J1939 CAN-bus tooling for a Solectrac electric tractor:
 
 * `solectrac-analyze.py` — offline batch decoder. Reads CAN logs and writes
   long-format CSVs suitable for spreadsheets, pandas, or plotting.
@@ -114,6 +114,5 @@ Requires `python-can` and `rich` (`pip install -r requirements.txt`).
 
 ## Disclaimer
 
-This is a personal reverse-engineering exercise based on observed CAN
-traffic, not on vendor documentation. PGN meanings beyond the SAE-standard
-DM1 frame are inferred from data and may be wrong.
+This is a personal exercise based on observed CAN traffic.
+PGN meanings beyond the SAE-standard DM1 frame are inferred from data and may be wrong.
