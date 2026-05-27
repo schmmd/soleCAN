@@ -78,13 +78,6 @@ are required before any write or routine call is honored.
 3.  06 27 02 <4-byte key>                    → 02 67 02                   SecAccess L1: send key
 ```
 
-The L1 key algorithm (CONFIRMED, fully reversed) is implemented in
-compiled C inside `iBMSUpper.exe` (cgo-called from
-`uds_udan_key_calculator_YJC.go`). Python reimplementation:
-`util/udan_seedkey.py` — verifies 9/9 captured pairs. See "SecAccess L1
-key algorithm" in the reverse-engineering notes appendix for the full
-derivation.
-
 ### Connection bootstrap
 
 The iBMS PC tool performs a fixed 11-step sequence on every connection
@@ -710,77 +703,6 @@ times. Procedure:
 
 CSV row *values* are not usable for correlation (BMS RTC is unset). CSV
 *schema* (column names, widths, units) is the reliable cross-reference.
-
-### SecAccess L1 — captured pairs and cryptanalysis
-
-The Level-1 unlock key is computed by `uds_udan_key_calculator_YJC.go`
-inside `app/iBMSUpper.exe`. Captured (seed, key) pairs:
-
-| Seed (hex)    | Key (hex)     | Source capture          |
-|---------------|---------------|-------------------------|
-| `0D 4A F9 74` | `38 20 62 9F` | `bms-connection.asc`    |
-| `66 80 20 47` | `92 0F 02 BA` | `bms-connection-2.asc`  |
-| `9C 43 69 8E` | `9A 00 4F 4E` | `bms-connection-3.asc`  |
-| `2A 4B 8D D2` | `3B 87 BE E1` | `bms-connection-4.asc`  |
-| `2A 64 C4 19` | `16 37 31 4D` | `bms-connection-5.asc`  |
-| `09 E6 16 7A` | `17 26 91 AD` | `bms-connection-6.asc`  |
-| `9F 9C 21 C7` | `E1 42 86 06` | `bms-connection-7.asc`  |
-| `DD F5 53 1B` | `13 1F 61 69` | `bms-connection-8.asc`  |
-| `F8 FD 0C 44` | `B1 3E 9A 09` | earlier capture         |
-
-Seeds are non-deterministic per session; each listed key was accepted
-(positive `02 67 02` response).
-
-CONFIRMED key algorithm (reversed from `app/iBMSUpper.exe` v3.1.6):
-
-The Go-side path is `main.UDSKeyCalculateForUDAN` → cgo wrapper
-`main._Cfunc_CalculateKey` (file offset 0x9b61a0) → C trampoline at
-0xa4bca0 → real C function at **0xa4bb90**. The C function takes a
-pointer to 4 seed bytes and returns a uint32.
-
-Algorithm (verified against 9/9 captured pairs):
-
-1. Nibble-shuffle the 4 seed bytes `S0..S3` into `bufA`:
-   ```
-   bufA[0] = (S0 & 0x0F) | (S3 & 0xF0)
-   bufA[1] = (S1 & 0x0F) | (S2 & 0xF0)
-   bufA[2] = (S1 & 0xF0) | (S2 & 0x0F)
-   bufA[3] = (S0 & 0xF0) | (S3 & 0x0F)
-   ```
-2. `crcA = crc16_ccitt(bufA, init=0x13F8)` — poly 0x1021, MSB-first,
-   table at binary VA 0x2731960 is the standard CRC-16-CCITT LUT.
-3. Bit-mask-shuffle the ORIGINAL seed (not bufA) into `bufB`:
-   ```
-   bufB[0] = (S0 & 0x3C) | (S3 & 0xC3)
-   bufB[1] = (S1 & 0x3C) | (S2 & 0xC3)
-   bufB[2] = (S2 & 0x3C) | (S1 & 0xC3)
-   bufB[3] = (S3 & 0x3C) | (S0 & 0xC3)
-   ```
-4. `crcB = crc16_ccitt(bufB, init=0x76ED)` — same poly / LUT as step 2.
-5. Key (4 bytes big-endian on the wire) =
-   `(crcA & 0xFF) (crcB & 0xFF) (crcA >> 8) (crcB >> 8)`.
-
-Reference implementation: `util/udan_seedkey.py`. Example:
-
-```
-$ python3 util/udan_seedkey.py 0D4AF974
-38 20 62 9F
-```
-
-The algorithm is GF(2)-**affine**: `key = M · seed ⊕ c` where `c =
-calc_key(0) = 0x888CCA87` and `M` is a fixed 32×32 binary matrix
-(verified: `key_i ⊕ key_j = calc_key(seed_i ⊕ seed_j) ⊕ c` for all
-36 pairs from the 9 captures). This is consistent with the algorithm
-being two CRC-16s (linear in GF(2)) with nonzero init constants
-(adding the affine offset) over linearly-shuffled inputs.
-
-Earlier cryptanalysis ruled out pure linearity (`key = M · seed`, no
-constant) and many specific forms (XOR/add/multiply by constant,
-rotations, bit-reverse, byte-swap, complement, per-nibble S-box, LFSR
-with common polynomials), but the GF(2)-linear test was run in the
-homogeneous form — adding a free affine constant would have solved
-it from the 9 captures alone, since 4 well-chosen seeds suffice to
-pin down all 32 columns of `M`.
 
 ### Bootstrap RequestDownload (UNKNOWN purpose, CONFIRMED static)
 
