@@ -256,6 +256,66 @@ The `0x28xx` range is segmented by purpose, not a single state block:
 | `0x2850`           | UNKNOWN 2-byte block                             |
 | `0x2803`, `0x2804` | Cell-level extremum / index (Cell info tab)      |
 
+### Pack topology — DIDs `0x0202` and `0x0205` (CONFIRMED static)
+
+Two one-shot lookup tables that describe the BMS-internal channel layout
+for this pack. Both have been static across every capture, so they are
+read once at connection and stored in `BmsState.cell_index_map` and
+`BmsState.probe_channel_map`.
+
+| DID    | Bytes | Sample value                                              | Meaning                                  |
+|--------|-------|-----------------------------------------------------------|------------------------------------------|
+| `0x0202` | 20  | `00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F 14 15 16 17` | Logical → physical cell index map        |
+| `0x0205` | 7   | `00 01 02 04 05 06 07`                                    | Logical → physical NTC channel map       |
+
+Two findings:
+
+- `0x0202` shows the BMS uses a **24-channel cell-monitoring chip** on a
+  20-series pack: physical slots 0..15 are used contiguously, then 20..23;
+  physical slots 16..19 are skipped.
+- `0x0205` shows the **NTC probe map skips channel 3** — probes wired to
+  physical channels 0, 1, 2, 4, 5, 6, 7 only. Aligned with the 7-populated
+  layout in `0x1620` and J1939 `F155F3..F15EF3`.
+
+### BMU on-board telemetry — DIDs `0x0E00`, `0x0E40`, `0x1600`, `0x1620` (CONFIRMED layouts)
+
+The BMS-tab DIDs that surface internal sensor state. All four have explicit
+byte layouts now:
+
+#### `0x0E00` — HV detection (12 data bytes)
+
+| Offset | Type   | Field                                | Notes |
+|--------|--------|--------------------------------------|-------|
+| 0..1   | u16 BE | HV1 pack voltage × 10 (V)            | Matches F100F3 data[1] decode within 0.1 V across the dual-bus capture |
+| 2..3   | u16 BE | HV1 pack voltage × 10 (V) — duplicate | Always equal to bytes 0..1 in observed captures |
+| 4..7   | bytes  | State flags (UNKNOWN)                | Idle: `00 01 00 01` |
+| 8..11  | u32    | Sentinel `0xFFFFFFFF`                | "Not present" |
+
+#### `0x0E40` — Hall current sensing (7 data bytes)
+
+| Offset | Type   | Field                                | Notes |
+|--------|--------|--------------------------------------|-------|
+| 0..1   | i16 BE | Hall current × 10 (A)                | Steady-state matches 0x2800 pack_a within ~1 A; diverges during transients (slope 9.31, R² 0.81 across 137 paired samples) |
+| 2..6   | bytes  | Constant `FD FF F4 00 02`            | Likely calibration / status — UNKNOWN |
+
+The Hall current and 0x2800 shunt current are not interchangeable: they
+agree at steady-state but track different waveforms during rapid current
+changes. Use 0x2800 as the authoritative pack current; treat 0x0E40 as a
+cross-check / sensor-health indicator.
+
+#### `0x1600` — BMU power-supply rail (22 data bytes)
+
+| Offset | Type   | Field                                | Notes |
+|--------|--------|--------------------------------------|-------|
+| 0..1   | u16 BE | BMU 12 V rail × 1000 (V)             | Observed 12.66 – 12.79 V across captures |
+| 2..21  | bytes  | All `0x00` on this pack              | Likely other rails not populated |
+
+#### `0x1620` — BMU on-board NTC temps (7 data bytes)
+
+Each byte is one NTC channel; °C = raw − 50 (UDAN convention). `0x00`
+marks "not present". On this pack only channels 1, 2, 5 are wired (the
+same skip pattern as `0x0205`, except byte 0 here is also unpopulated).
+
 ### DIDs observed but not yet identified
 
 These are polled by the iBMS but not yet mapped to a known UDAN message:
@@ -263,16 +323,13 @@ These are polled by the iBMS but not yet mapped to a known UDAN message:
 | Range                                                  | Notes |
 |--------------------------------------------------------|-------|
 | `0x0100`, `0x0103`–`0x0105`                            | `0x0100` is constant config (thresholds); others mostly empty |
-| `0x0200`–`0x020B` (mixed)                              | `0x0202` is a fixed cell-index table; `0x0205` is a probe-channel map |
+| `0x0200`, `0x0201`, `0x0203`, `0x0204`, `0x0206`–`0x020B` | Mostly empty; `0x0202` and `0x0205` decoded above |
 | `0x0620`, `0x0621`, `0x0648`                           | Mostly-empty sub-block, UNKNOWN |
 | `0x0641`–`0x0647`                                      | Per-channel 1-byte values (7 total), UNKNOWN |
-| `0x0E00`                                               | HV detection / Hlss state — contains pack-V × 10 twice |
 | `0x0E21`, `0x0F50`, `0x0F60`                           | UNKNOWN small values |
-| `0x0E40`                                               | Shunt state (Hall current sensing) |
 | `0x0E70`–`0x0E72`, `0x0EF0`, `0x0F10`, `0x0F30`        | Signal detection / on-board rails |
 | `0x0EA0`, `0x0EA1`, `0x0ED0`–`0x0ED7`                  | Cell info tab — balancing / open-wire / short flags |
 | `0x0960`, `0x0961`, `0x0905`, `0x0962`                 | UNKNOWN |
-| `0x1600`, `0x1620`                                     | `0x1600` = BMU power-supply rail (~12.75 V); `0x1620` = on-board temps |
 
 ---
 

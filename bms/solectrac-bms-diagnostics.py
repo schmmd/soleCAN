@@ -422,6 +422,9 @@ class BmsState:
     fw_version: Optional[str] = None
     hw_string: Optional[str] = None
     discovery: Optional[int] = None
+    # Pack topology, static (one-shot)
+    cell_index_map: list = field(default_factory=list)   # 0x0202 — 20 phys cell idx
+    probe_channel_map: list = field(default_factory=list)  # 0x0205 — 7 channel idx
 
     # Pack state (DID 0x2800)
     soc_pct: Optional[float] = None
@@ -464,9 +467,13 @@ class BmsState:
 
     # BMU on-board rails (BMS tab)
     bmu_power: bytes = b""         # 0x1600 — BMU power-supply rail (~12.75 V)
+    bmu_rail_v: Optional[float] = None   # decoded bytes 0..1 BE × 0.001 V/bit
     bmu_temps: bytes = b""         # 0x1620 — on-board NTC temps
+    bmu_temps_c: list = field(default_factory=list)  # decoded; None where absent
     hv_detect: bytes = b""         # 0x0E00 — pack-V × 10 twice + state
+    hv_detect_pack_v: Optional[float] = None   # bytes 0..1 BE × 0.1 V/bit
     shunt_state: bytes = b""       # 0x0E40 — Hall / Shunt current
+    hall_current_a: Optional[float] = None     # bytes 0..1 BE i16 ÷ 10 A/bit
 
     # Cell health (Cell info tab)
     balance_a: bytes = b""         # 0x0EA0 — balancing
@@ -500,6 +507,8 @@ class BmsState:
                 "fw_version": self.fw_version,
                 "hw_string": self.hw_string,
                 "discovery": self.discovery,
+                "cell_index_map": list(self.cell_index_map),
+                "probe_channel_map": list(self.probe_channel_map),
                 "ident_503": self.ident_503.hex(),
                 "ident_505": self.ident_505.hex(),
                 "ident_50d": self.ident_50d.hex(),
@@ -537,9 +546,13 @@ class BmsState:
             },
             "bmu": {
                 "power": self.bmu_power.hex(),
+                "rail_v": self.bmu_rail_v,
                 "temps": self.bmu_temps.hex(),
+                "temps_c": list(self.bmu_temps_c),
                 "hv_detect": self.hv_detect.hex(),
+                "hv_detect_pack_v": self.hv_detect_pack_v,
                 "shunt_state": self.shunt_state.hex(),
+                "hall_current_a": self.hall_current_a,
             },
             "cell_health": {
                 "balance_a": self.balance_a.hex(),
@@ -613,6 +626,47 @@ def decode_temps(data: bytes, st: BmsState):
     st.temp_c = [b - 50 for b in data]
 
 
+def decode_hv_detect(data: bytes, st: BmsState):
+    # 0x0E00 — 12 bytes. Bytes 0..1 BE = HV1 pack voltage × 10; bytes 2..3
+    # repeat the same value. Cross-validated against F100F3 data[1] within
+    # 0.1 V in dual-bus captures.
+    st.hv_detect = data
+    if len(data) >= 2:
+        st.hv_detect_pack_v = _be_u16(data, 0) / 10.0
+
+
+def decode_bmu_power(data: bytes, st: BmsState):
+    # 0x1600 — 22 bytes. Bytes 0..1 BE = BMU power-supply rail × 1000.
+    # Remaining bytes are 0x00 on this pack (unused rails).
+    st.bmu_power = data
+    if len(data) >= 2:
+        st.bmu_rail_v = _be_u16(data, 0) / 1000.0
+
+
+def decode_bmu_temps(data: bytes, st: BmsState):
+    # 0x1620 — 7 bytes. Each byte is an NTC channel temp with the UDAN +50
+    # offset (°C = raw − 50); 0x00 marks "not present". On this pack only
+    # channels 1, 2, 5 are populated.
+    st.bmu_temps = data
+    st.bmu_temps_c = [None if b == 0 else (b - 50) for b in data]
+
+
+def decode_shunt_state(data: bytes, st: BmsState):
+    # 0x0E40 — 7 bytes. Bytes 0..1 BE i16 ÷ 10 = Hall current in A
+    # (positive = drawing, negative = charging into pack). Scale fit
+    # empirically against 137 paired samples vs 0x2800 pack_a: slope 9.31,
+    # so ÷ 10 is the scale to within ~7%. In steady-state the two agree
+    # within ~1 A; during rapid current transients they diverge
+    # substantially (residual stdev ~6.6 A, R² 0.81), likely because the
+    # Hall and shunt have different bandwidths or measure different points
+    # in the HV path. Use 0x2800 as the authoritative pack current; 0x0E40
+    # is a cross-check / sensor-health indicator.
+    # Bytes 2..6 are constant (FD FF F4 00 02) across captures — UNKNOWN.
+    st.shunt_state = data
+    if len(data) >= 2:
+        st.hall_current_a = _be_i16(data, 0) / 10.0
+
+
 def decode_peak_v(data: bytes) -> list:
     # 4 × (u16 BE mV, u8 subsys, u8 cell_idx)
     out = []
@@ -683,10 +737,10 @@ ALL_POLLS = [
     (0x0901, _store("charging_meas")),
     (0x0902, _store("charging_state")),
     # BMU on-board rails
-    (0x1600, _store("bmu_power")),
-    (0x1620, _store("bmu_temps")),
-    (0x0E00, _store("hv_detect")),
-    (0x0E40, _store("shunt_state")),
+    (0x1600, decode_bmu_power),
+    (0x1620, decode_bmu_temps),
+    (0x0E00, decode_hv_detect),
+    (0x0E40, decode_shunt_state),
     # Cell health
     (0x0EA0, _store("balance_a")),
     (0x0EA1, _store("balance_b")),
@@ -715,6 +769,14 @@ def read_identity(transport, st: BmsState):
         st.discovery = d[0] if d else None
     except (IsoTpError, UdsError) as e:
         st.last_error = f"0xA500: {e}"
+    try:
+        st.cell_index_map = list(transport.read_did(0x0202))
+    except (IsoTpError, UdsError) as e:
+        st.last_error = f"0x0202: {e}"
+    try:
+        st.probe_channel_map = list(transport.read_did(0x0205))
+    except (IsoTpError, UdsError) as e:
+        st.last_error = f"0x0205: {e}"
 
 
 def poll_once(transport, st: BmsState, lock: threading.Lock):
@@ -1283,11 +1345,11 @@ function renderBmu(b) {
   } else {
     $('bmu-hv').innerHTML = `<div class="sub">${dash}</div>`;
   }
-  // 0x0E40 shunt
+  // 0x0E40 Hall current sensor (bytes 0..1 BE i16 ÷ 10 A/bit)
   if (b.shunt_state && b.shunt_state.length >= 4) {
-    const hall = (beI16(b.shunt_state, 0) / 100).toFixed(2);
+    const hall = (beI16(b.shunt_state, 0) / 10).toFixed(1);
     $('bmu-shunt').innerHTML = `<div class="bignum">${hall >= 0 ? '+' : ''}${hall}<span class="unit">A</span></div>
-      <div class="sub">i16 ÷ 100 — TENTATIVE scale</div>
+      <div class="sub">Hall current — i16 BE ÷ 10. Differs from 0x2800 shunt by BMS self-draw (~1 A).</div>
       <div class="hex" style="margin-top:8px;">${hexSpaced(b.shunt_state)}</div>`;
   } else {
     $('bmu-shunt').innerHTML = `<div class="sub">${dash}</div>`;
@@ -1344,10 +1406,14 @@ function renderCellHealth(c) {
 }
 
 function renderIdentity(id) {
+  const cellMap = id.cell_index_map || [];
+  const probeMap = id.probe_channel_map || [];
   $('id-basic').innerHTML = `<tbody>
     ${row('Firmware (0xF195)', id.fw_version || dash)}
     ${row('Hardware (0xA50F)', id.hw_string || dash)}
     ${row('Discovery (0xA500)', id.discovery == null ? dash : '0x' + id.discovery.toString(16).padStart(2, '0').toUpperCase())}
+    ${row('Cell map (0x0202)', cellMap.length ? cellMap.join(' ') : dash)}
+    ${row('Probe map (0x0205)', probeMap.length ? probeMap.join(' ') : dash)}
   </tbody>`;
 
   // Batt config decoded
