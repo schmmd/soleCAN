@@ -248,9 +248,10 @@ def c_to_f(c: float) -> float:
 PACK_CURRENT_LSB_A = 0.1
 PACK_CURRENT_BIAS_RAW = 0x7D00  # F100F3 bytes 2-3 BE, biased so 0x7D00 = 0 A
 PACK_VOLTAGE_LSB_V = 0.1        # F100F3 byte 1 and FF50E5 bytes 1-2 LE
-PACK_VOLTAGE_OFFSET_V = 76.8    # V = raw * 0.1 + 76.8
+PACK_VOLTAGE_OFFSET_HI_V = 76.8 # F100F3 variant 0x03 / FF50 charger (high range, 76.8–102.3 V)
+PACK_VOLTAGE_OFFSET_LO_V = 51.2 # F100F3 variant 0x02 (low range, 51.2–76.7 V); variant byte acts as 9th MSB on data[1]
 CHARGER_V_LSB_V = PACK_VOLTAGE_LSB_V       # charger uses identical encoding
-CHARGER_V_OFFSET_V = PACK_VOLTAGE_OFFSET_V
+CHARGER_V_OFFSET_V = PACK_VOLTAGE_OFFSET_HI_V
 CHARGER_I_LSB_A = 0.1
 RPM_BIAS = 0x0C80
 LIMIT_CURRENT_LSB_A = 0.01     # F107 bytes 0-1 / 2-3 BE, 0.01 A/bit
@@ -595,9 +596,11 @@ def decode(msg: "can.Message", state: State, now: float) -> None:
         elif pgn == PGN_F100:
             if all(b == 0 for b in data):
                 return
-            # byte 1 = pack terminal voltage (b * 0.1 + 76.8 V).
+            # byte 0 selects voltage range: 0x03 = high (≥76.8 V), 0x02 = low (<76.8 V).
+            # byte 1 = pack terminal voltage (b * 0.1 + offset).
+            offset = PACK_VOLTAGE_OFFSET_LO_V if data[0] == 0x02 else PACK_VOLTAGE_OFFSET_HI_V
             state.pack_v_terminal.update(
-                data[1] * PACK_VOLTAGE_LSB_V + PACK_VOLTAGE_OFFSET_V, now
+                data[1] * PACK_VOLTAGE_LSB_V + offset, now
             )
             # bytes 2-3 BE = signed pack current (biased u16, 0.1 A/bit).
             raw_i = be16(data[2], data[3])
@@ -858,9 +861,12 @@ def decode(msg: "can.Message", state: State, now: float) -> None:
         status = data[0]
         flags = data[4]
         state.chgr_status.update(status, now)
-        if status == CHGR_STATUS_ACTIVE and flags == 0x00:
+        # Mirror the F100F3 variant convention defensively: if status 0x02
+        # is ever observed with a meaningful voltage, decode at the LO base.
+        if status in (0x02, CHGR_STATUS_ACTIVE) and flags == 0x00:
             v_raw = le16(data[1], data[2])
-            state.chgr_v.update(v_raw * CHARGER_V_LSB_V + CHARGER_V_OFFSET_V, now)
+            offset = PACK_VOLTAGE_OFFSET_LO_V if status == 0x02 else CHARGER_V_OFFSET_V
+            state.chgr_v.update(v_raw * CHARGER_V_LSB_V + offset, now)
             state.chgr_i.update(data[3] * CHARGER_I_LSB_A, now)
         else:
             state.chgr_v.clear()

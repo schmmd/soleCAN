@@ -431,7 +431,8 @@ class BmsState:
     soh_pct: Optional[float] = None
     pack_v: Optional[float] = None
     pack_a: Optional[float] = None
-    state_extra: tuple = ()
+    cell_spread_mv: Optional[int] = None    # 0x2800 byte 9 — mirrored by 0x2810 byte 8
+    state_extra: tuple = ()                 # 0x2800 bytes 8, 10 (UNKNOWN)
 
     # Counters
     lifetime_counter: Optional[int] = None
@@ -443,6 +444,8 @@ class BmsState:
     # Energy (DID 0x2810)
     cell_count: Optional[int] = None
     cycle_count: Optional[int] = None
+    avg_cell_mv: Optional[int] = None       # 0x2810 bytes 4..5 BE
+    avg_cell_temp_c: Optional[int] = None   # 0x2810 byte 6, °C = raw − 50
     charge_ah: Optional[float] = None
     discharge_ah: Optional[float] = None
 
@@ -519,6 +522,9 @@ class BmsState:
                 "soh_pct": self.soh_pct,
                 "pack_v": self.pack_v,
                 "pack_a": self.pack_a,
+                "cell_spread_mv": self.cell_spread_mv,
+                "avg_cell_mv": self.avg_cell_mv,
+                "avg_cell_temp_c": self.avg_cell_temp_c,
                 "state_extra": list(self.state_extra),
                 "cell_count": self.cell_count,
                 "cycle_count": self.cycle_count,
@@ -586,13 +592,27 @@ def _be_u32(data: bytes, off: int) -> int:
 
 
 def decode_pack_state(data: bytes, st: BmsState):
+    # 0x2800 — 12 data bytes:
+    #   0..1  BE u16  Real SOC × 10 (%)
+    #   2..3  BE u16  SOH × 10 (%)
+    #   4..5  BE u16  HV1 pack voltage × 10 (V)
+    #   6..7  BE i16  signed pack current × 10 (A) — positive = charging,
+    #                 negative = discharging (opposite of F100F3 J1939)
+    #   8     u8      0x00 padding
+    #   9     u8      cell-mV spread (max − min); r ≈ 0.83 vs 0x2820/0x2828
+    #   10    u8      Pack-current state code (TENTATIVE): 50 = discharge,
+    #                 51 = idle / charging, 52 = brief rare. Mirrored 99.9%
+    #                 by 0x2810 byte 9. NOT WakeupSignal (stays at 51 across
+    #                 an entire 120 V charging session).
+    #   11    u8      0x06 constant (struct version tag)
     if len(data) < 12:
         return
     st.soc_pct = _be_u16(data, 0) / 10.0
     st.soh_pct = _be_u16(data, 2) / 10.0
     st.pack_v = _be_u16(data, 4) / 10.0
-    st.pack_a = _be_i16(data, 6) / 10.0  # TENTATIVE: signed pack current per BMS.md
-    st.state_extra = (_be_u16(data, 8), _be_u16(data, 10))
+    st.pack_a = _be_i16(data, 6) / 10.0
+    st.cell_spread_mv = data[9]
+    st.state_extra = (data[8], data[10])
 
 
 def decode_times(data: bytes, st: BmsState):
@@ -606,10 +626,26 @@ def decode_times(data: bytes, st: BmsState):
 
 
 def decode_energy(data: bytes, st: BmsState):
+    # 0x2810 — 20 data bytes:
+    #   0..1   BE u16  cell count (= 20)
+    #   2..3   BE u16  cycle count (= 7)
+    #   4..5   BE u16  average cell voltage (mV)  — r ≈ 1.0 vs mean(0x0101)
+    #   6      u8      average cell temperature (°C = raw − 50)
+    #   7      u8      0x00 padding
+    #   8      u8      cell-mV spread (mirrors 0x2800 byte 9)
+    #   9      u8      UNKNOWN, slow 50..52 (mirrors 0x2800 byte 10)
+    #   10     u8      0x00 padding
+    #   11     u8      0x1E constant (struct version tag)
+    #   12..15 BE u32  accumulated charge × 0.01 Ah
+    #   16..19 BE u32  accumulated discharge × 0.01 Ah
     if len(data) < 20:
         return
     st.cell_count = _be_u16(data, 0)
     st.cycle_count = _be_u16(data, 2)
+    st.avg_cell_mv = _be_u16(data, 4)
+    st.avg_cell_temp_c = data[6] - 50
+    if st.cell_spread_mv is None:
+        st.cell_spread_mv = data[8]
     st.charge_ah = _be_u32(data, 12) * 0.01
     st.discharge_ah = _be_u32(data, 16) * 0.01
 

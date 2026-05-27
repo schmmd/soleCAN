@@ -79,7 +79,8 @@
 #define PACK_CURRENT_BIAS_RAW   0x7D00   // raw u16 value at 0 A
 #define PACK_CURRENT_LSB_A      0.1f     // A per bit
 #define PACK_VOLTAGE_LSB_V      0.1f     // V per bit
-#define PACK_VOLTAGE_OFFSET_V   76.8f    // V offset (shared by BMS and charger)
+#define PACK_VOLTAGE_OFFSET_HI_V 76.8f    // F100F3 variant 0x03 / FF50 charger offset (high range, 76.8–102.3 V)
+#define PACK_VOLTAGE_OFFSET_LO_V 51.2f    // F100F3 variant 0x02 offset (low range, 51.2–76.7 V); variant byte acts as 9th MSB on data[1]
 #define RPM_BIAS                0x0C80   // raw u16 value at 0 RPM
 #define LIMIT_CURRENT_LSB_A     0.01f    // A per bit for F107 limits
 #define CHARGER_I_LSB_A         0.1f     // A per bit for charger current
@@ -363,7 +364,9 @@ void decodeCAN(uint32_t can_id, const uint8_t* raw, uint8_t len) {
             uint16_t raw_cur = be16(d[2], d[3]);
             // Sign convention: positive = charging, negative = discharging.
             float amps  = -((int32_t)raw_cur - PACK_CURRENT_BIAS_RAW) * PACK_CURRENT_LSB_A;
-            float volts = d[1] * PACK_VOLTAGE_LSB_V + PACK_VOLTAGE_OFFSET_V;
+            // d[0] selects voltage range: 0x03 = high (≥76.8 V), 0x02 = low (<76.8 V).
+            float offset = (d[0] == 0x02) ? PACK_VOLTAGE_OFFSET_LO_V : PACK_VOLTAGE_OFFSET_HI_V;
+            float volts = d[1] * PACK_VOLTAGE_LSB_V + offset;
             g_pack.voltage_v   = volts;
             g_pack.current_raw = raw_cur;
             g_pack.current_a   = amps;
@@ -491,8 +494,11 @@ void decodeCAN(uint32_t can_id, const uint8_t* raw, uint8_t len) {
         g_charger.output_disabled= (d[4] & 0x04) != 0;
         g_charger.line_ok        = (d[4] & 0x08) != 0;
         g_charger.no_line        = (d[4] & 0x10) != 0;
-        if (d[0] == 0x03 && d[4] == 0x00) {
-            g_charger.voltage_v = g_charger.v_raw * PACK_VOLTAGE_LSB_V + PACK_VOLTAGE_OFFSET_V;
+        // Mirror the F100F3 variant convention defensively: if d[0] == 0x02
+        // is ever observed with a meaningful voltage, decode at the LO base.
+        if ((d[0] == 0x02 || d[0] == 0x03) && d[4] == 0x00) {
+            float offset = (d[0] == 0x02) ? PACK_VOLTAGE_OFFSET_LO_V : PACK_VOLTAGE_OFFSET_HI_V;
+            g_charger.voltage_v = g_charger.v_raw * PACK_VOLTAGE_LSB_V + offset;
             g_charger.current_a = d[3] * CHARGER_I_LSB_A;
         } else {
             g_charger.voltage_v = NAN;

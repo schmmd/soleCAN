@@ -426,9 +426,10 @@ BMS_FAULT_CODES_BYTES_0_TO_6 = {
 PACK_CURRENT_LSB_A = 0.1                  # F100F3 bytes 3-4 BE, 0.1 A/bit
 PACK_CURRENT_BIAS_RAW = 0x7D00            # raw value at 0 A (positive = discharge)
 PACK_VOLTAGE_LSB_V = 0.1                  # F100F3 byte 2 and FF50E5 bytes 2-3 LE
-PACK_VOLTAGE_OFFSET_V = 76.8              # same encoding shared by BMS and charger
+PACK_VOLTAGE_OFFSET_HI_V = 76.8           # F100F3 variant 0x03 / FF50 charger (high range, 76.8–102.3 V)
+PACK_VOLTAGE_OFFSET_LO_V = 51.2           # F100F3 variant 0x02 (low range, 51.2–76.7 V); variant byte acts as 9th MSB on data[1]
 CHARGER_V_LSB_V = PACK_VOLTAGE_LSB_V      # charger reports the same encoding
-CHARGER_V_OFFSET_V = PACK_VOLTAGE_OFFSET_V
+CHARGER_V_OFFSET_V = PACK_VOLTAGE_OFFSET_HI_V
 CHARGER_I_LSB_A = 0.1
 RPM_BIAS = 0x0C80                         # FF21CA bytes 2-3 LE zero-RPM offset
 LIMIT_CURRENT_LSB_A = 0.01                # F107F3 bytes 0-1 / 2-3 BE, 0.01 A/bit
@@ -628,7 +629,9 @@ def decode_file(path: Path, scenario: str, rows: list, frames: list,
                         continue
                     raw = be16(data[2], data[3])  # bytes 2-3 BE, biased u16
                     amps = (raw - PACK_CURRENT_BIAS_RAW) * PACK_CURRENT_LSB_A
-                    volts = data[1] * PACK_VOLTAGE_LSB_V + PACK_VOLTAGE_OFFSET_V
+                    # byte 0 selects voltage range: 0x03 = high, 0x02 = low.
+                    offset = PACK_VOLTAGE_OFFSET_LO_V if data[0] == 0x02 else PACK_VOLTAGE_OFFSET_HI_V
+                    volts = data[1] * PACK_VOLTAGE_LSB_V + offset
                     emissions.append(("pack.voltage_v", round(volts, 2), "v"))
                     emissions.append(("pack.current_raw", raw, ""))
                     emissions.append(("pack.current_a", round(amps, 1), "a"))
@@ -1046,10 +1049,14 @@ def decode_file(path: Path, scenario: str, rows: list, frames: list,
                 # asserted). This excludes the 4 ghost frames in
                 # soc-100-idle.asc where status briefly reports 0x03 with
                 # flags==0x14 (no AC line).
-                if status == 0x03 and flags == 0x00:
+                # Mirror the F100F3 variant convention defensively: if
+                # status 0x02 is ever observed with a meaningful voltage,
+                # decode at the LO base.
+                if status in (0x02, 0x03) and flags == 0x00:
+                    offset = PACK_VOLTAGE_OFFSET_LO_V if status == 0x02 else CHARGER_V_OFFSET_V
                     emissions.append(
                         ("charger.voltage_v",
-                         round(v_raw * CHARGER_V_LSB_V + CHARGER_V_OFFSET_V, 2),
+                         round(v_raw * CHARGER_V_LSB_V + offset, 2),
                          "v"))
                     # Current is encoded in byte 3 alone (low byte u8 *
                     # 0.1 A/bit), since byte 4 is the flags byte.

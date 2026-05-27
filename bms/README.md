@@ -130,16 +130,18 @@ Sample `0x0102` payload: `41 41 41 41 40 41 41` → ~22 °C across 7 probes.
 
 ### Pack-level state — DID `0x2800` (UDAN `0x93`)
 
-12 data bytes. Six BE uint16 fields; three identified by live-UI match:
+12 data bytes.
 
-| Offset | BE u16   | Field                          | Sample          |
-|--------|----------|--------------------------------|-----------------|
-| 0      | `0x0312` | Real SOC × 10                  | 78.6 %          |
-| 2      | `0x03E8` | SOH × 10                       | 100.0 %         |
-| 4      | `0x0311` | HV1 / Pack voltage × 10        | 78.5 V          |
-| 6      | `0xFFED` | TENTATIVE: signed pack current | ≈ −0.2 A (idle) |
-| 8      | small    | UNKNOWN counter / flag         | 5–7             |
-| 10     | varies   | UNKNOWN                        | ~`0x33xx`       |
+| Offset | Type    | Field                                | Sample          |
+|--------|---------|--------------------------------------|-----------------|
+| 0..1   | BE u16  | Real SOC × 10 (%)                    | `0x0312` = 78.6 % |
+| 2..3   | BE u16  | SOH × 10 (%)                         | `0x03E8` = 100.0 % |
+| 4..5   | BE u16  | HV1 / Pack voltage × 10 (V)          | `0x0311` = 78.5 V |
+| 6..7   | BE i16  | Signed pack current × 10 (A). **Positive = charging into pack, negative = discharging** — opposite sign convention from J1939 `F100F3` data[2..3] | `0xFFED` = −1.9 A (idle standby draw); +194 (`0x00C2`) during 120 V charging |
+| 8      | u8      | `0x00` padding                       | constant        |
+| 9      | u8      | Cell-mV spread (max − min)           | 4–15 mV; r ≈ 0.83 vs `0x2820`/`0x2828`; exact match ≈ 76 % of the time (small skew from staggered polls) |
+| 10     | u8      | Pack-current state code — TENTATIVE. Three observed values: **51 = charge / idle**, **50 = discharge**, **52 = brief (rare, idle only)**. Hypothesis: a quantized current-direction state. Counter-evidence vs `WakeupSignal` enum: byte 10 stays constant at 51 across an entire 120 V charging session (where `WakeupSignal` should switch from KL15 to OBC); negatively confirms NOT WakeupSignal. Mirrored 99.9 % by `0x2810` byte 9. Negatively confirms NOT max-temp raw (r = 0.0 vs `0x2830` top-1) | discharge → mostly 50; idle/charge → mostly 51 |
+| 11     | u8      | `0x06` constant (struct version tag) | constant        |
 
 ### Peak data — DID cluster `0x2820`/`0x2828`/`0x2830`/`0x2838` (UDAN `0x06`)
 
@@ -178,14 +180,19 @@ column in the iBMS System-state CSV.
 
 20 data bytes:
 
-| Offset | Width | Field                                                |
-|--------|-------|------------------------------------------------------|
-| 0–1    | u16   | Cell count (= 20)                                    |
-| 2–3    | u16   | Cycle count (= 7)                                    |
-| 4–7    | u32   | UNKNOWN (TENTATIVE: avg cell × scale)                |
-| 8–11   | u32   | UNKNOWN (instantaneous quantity)                     |
-| 12–15  | u32   | Accumulated charge capacity × 0.01 Ah                |
-| 16–19  | u32   | Accumulated discharge capacity × 0.01 Ah             |
+| Offset | Type    | Field                                                 |
+|--------|---------|-------------------------------------------------------|
+| 0..1   | BE u16  | Cell count (= 20)                                     |
+| 2..3   | BE u16  | Cycle count (= 7)                                     |
+| 4..5   | BE u16  | Average cell voltage (mV) — r ≈ 1.000 vs mean(`0x0101`); mean error 0.3 mV |
+| 6      | u8      | Average cell temperature (°C = raw − 50) — matches round(mean(`0x0102`)) ≥99 % |
+| 7      | u8      | `0x00` padding                                        |
+| 8      | u8      | Cell-mV spread (mirrors `0x2800` byte 9)              |
+| 9      | u8      | UNKNOWN, slow 50..52 (mirrors `0x2800` byte 10; 99.9 % match) |
+| 10     | u8      | `0x00` padding                                        |
+| 11     | u8      | `0x1E` constant (struct version tag)                  |
+| 12..15 | BE u32  | Accumulated charge capacity × 0.01 Ah                 |
+| 16..19 | BE u32  | Accumulated discharge capacity × 0.01 Ah              |
 
 ### `0x4000` — active-session status (UDAN `0x87` mapping QUESTIONED)
 
@@ -391,7 +398,8 @@ These are polled by the iBMS but not yet mapped to a known UDAN message:
 | `0x0641`–`0x0647`                                      | Per-channel 1-byte values (7 total), UNKNOWN |
 | `0x0E21`, `0x0F50`, `0x0F60`                           | UNKNOWN small values |
 | `0x0E70`–`0x0E72`, `0x0EF0`, `0x0F10`, `0x0F30`        | Signal detection / on-board rails |
-| `0x0EA0`, `0x0EA1`, `0x0ED0`–`0x0ED7`                  | Cell info tab — balancing / open-wire / short flags |
+| `0x0EA0`, `0x0EA1`                                     | Cell info tab — balancing. Both all-`0xFF` in observed captures (no balancing active; cell delta < 11 mV) |
+| `0x0ED0`–`0x0ED7`                                      | Open-wire / cell-monitor flags. Of 8 DIDs only `0x0ED0`, `0x0ED1`, `0x0ED2`, `0x0ED5` respond on this pack; `0x0ED3`/`0x0ED4`/`0x0ED6`/`0x0ED7` return no response. `0x0ED0`/`0x0ED1` 4-byte payloads: bytes 0..1 `FF FF` (no-fault sentinel mask), bytes 2..3 BE u16 oscillating in a narrow 4982–4998 range (purpose UNKNOWN — likely a per-DID ADC self-check reading; not a counter, not monotonic). `0x0ED2` and `0x0ED5` are all-zero on this pack |
 | `0x0960`, `0x0961`, `0x0905`, `0x0962`                 | UNKNOWN |
 
 ---

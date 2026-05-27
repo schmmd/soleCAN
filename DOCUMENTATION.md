@@ -385,44 +385,44 @@ Smallest spread observed across all captures: 3 mV (124 frames in
 
 | Byte | data[]  | Meaning                                                     |
 |------|---------|-------------------------------------------------------------|
-| 1    | data[0] | **Frame variant**: 0x03 = normal, 0x02 = high-load cruise (see below) |
-| 2    | data[1] | **Pack terminal voltage**: V = raw × 0.1 + 76.8 (only valid when data[0] = 0x03) |
+| 1    | data[0] | **Voltage-range selector**: 0x03 = high range, 0x02 = low range (see below) |
+| 2    | data[1] | **Pack terminal voltage**: V = raw × 0.1 + (76.8 if data[0]=0x03 else 51.2) |
 | 3..4 | data[2..3] BE | **Signed pack current**: A = (be16 − 0x7D00) × 0.1    |
 | 5    | data[4] | **BMS-published SOC** (TENTATIVE; two-point fit at 80 %/90 %) |
 | 6    | data[5] | 0xFA constant — **leading SOH candidate** (250 raw × 0.4 %/bit = 100 %) |
 | 7    | data[6] | 0x14 (= 20) — series cell count                             |
 | 8    | data[7] | 0x00 constant                                               |
 
-**Frame variant (data[0]).** `0x03` in normal driving (net discharge);
-flips to `0x02` whenever the pack is taking net positive current, from
-either source:
+**Voltage-range selector (data[0]).** The variant byte selects one of
+two adjacent 25.5 V bands for the 8-bit `data[1]` field. Same 0.1 V
+LSB in both:
 
-  - **Regenerative braking from high speed** (originally noted during
-    deceleration from the 2800-RPM top-speed region in high gear). data[1]
-    reads `0xFC–0xFF`. Not observed in lighter regen because the regen
-    current at lower speeds doesn't exceed the tractor's standby load
-    (BMS + dashboard + DC-DC, ~16–17 A from `amp-1.asc` baseline), so net
-    pack current stays positive and the frame stays in variant `0x03`.
-  - **Active L1 wall charging — CC phase** (observed in
-    `data/dual-capture/dual-capture-charging-120.asc`, 215 s at ~19 A
-    into the pack, pack at ~75 V). data[1] reads `0xF1..0xF4` (steady
-    ~120–122 V if read as `× 0.5 V/bit`, matching the 120 V AC mains).
+| data[0] | Formula | Encodable range |
+|---------|---------|-----------------|
+| 0x03 (high) | V = data[1] × 0.1 + 76.8 | 76.8 – 102.3 V |
+| 0x02 (low)  | V = data[1] × 0.1 + 51.2 | 51.2 – 76.7 V |
 
-In both cases data[1] is **not** pack terminal voltage — the normal
-`× 0.1 + 76.8` scale decodes to an impossible 100–102 V. The unifying
-read is that variant `0x02` repurposes data[1] for the charge-input
-voltage (AC mains during wall charging; a "no AC source" reading,
-possibly an open-circuit-ADC garbage value, during regen). Use
-cell-sum from F113..F13C as the trustworthy pack-V source whenever
-data[0] = `0x02`. data[2..3] (current) remains valid in both variants,
-and its sign distinguishes the two contexts (regen is brief and
-intermittent; wall charging holds steady-state for minutes to hours).
+`76.8 − 51.2 = 25.6 = 256 × 0.1`, so the variant byte effectively acts
+as a 9th high-order bit on `data[1]`, giving a combined dynamic range
+of 51.2 – 102.3 V. The BMS switches variants automatically as pack V
+crosses the 76.8 V threshold — observed at lower SOC (every soc-50,
+soc-60, and load-sagged soc-70 capture is variant 0x02; soc-70-idle is
+still variant 0x03; soc-80+ are all variant 0x03), and transiently
+during heavy-load sag or active charging even at higher SOC.
 
 **Pack terminal voltage** anchored by linear regression of data[1]
-versus 20 × mean(cell mV) across 24 captures with data[0] = 0x03
-(residuals < 0.55 V), and cross-checked against the FF50 charger frame
-which uses an identical encoding (R² = 0.986 across 2863
-active-charging frames).
+versus 20 × mean(cell mV) across all 70 captures, separately for each
+variant:
+
+| Variant | Fit | n | RMSE |
+|---------|-----|---|------|
+| 0x03 | V = 0.0998 × raw + 76.82 | 13,370 | 0.028 V |
+| 0x02 | V = 0.1003 × raw + 51.13 | 14,127 | 0.033 V |
+
+Max residual under 1 V in both, attributable to high-current
+transients where pack V swings faster than the BMS broadcasts.
+Cross-checked against the FF50 charger frame which uses the
+variant-0x03 encoding (R² = 0.986 across 2863 active-charging frames).
 
 **Pack current** is signed BE-16 with a fixed bias of 0x7D00 (raw
 32000 = 0 A) at 0.1 A/bit. Convention: positive = drawing from pack,
