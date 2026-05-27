@@ -644,11 +644,18 @@ def decode_bmu_power(data: bytes, st: BmsState):
 
 
 def decode_bmu_temps(data: bytes, st: BmsState):
-    # 0x1620 — 7 bytes. Each byte is an NTC channel temp with the UDAN +50
-    # offset (°C = raw − 50); 0x00 marks "not present". On this pack only
-    # channels 1, 2, 5 are populated.
+    # 0x1620 — 7 bytes. Byte 0 is `BoardTempNum`, the count of valid board
+    # temps; bytes 1..6 are up to 6 temp values, °C = raw − 50. On this pack
+    # count is always 0 (board-temp feature not configured) and the iBMS
+    # tool exports no BoardTemp CSV. Bytes 1..6 carry firmware-default stub
+    # values (e.g. `47 47 00 00 45 00` constant across captures) that look
+    # like real temps but should be ignored when count == 0.
     st.bmu_temps = data
-    st.bmu_temps_c = [None if b == 0 else (b - 50) for b in data]
+    if len(data) >= 1:
+        count = data[0]
+        st.bmu_temps_c = [(b - 50) for b in data[1:1 + count]]
+    else:
+        st.bmu_temps_c = []
 
 
 def decode_shunt_state(data: bytes, st: BmsState):
@@ -1354,15 +1361,20 @@ function renderBmu(b) {
   } else {
     $('bmu-shunt').innerHTML = `<div class="sub">${dash}</div>`;
   }
-  // 0x1620 on-board temps
+  // 0x1620 on-board temps. Byte 0 is BoardTempNum (count); on this pack
+  // it's 0, so no on-board temps are configured. The remaining bytes are
+  // firmware stub values and must NOT be displayed as live temps.
   if (b.temps) {
-    const bytes = [];
-    for (let i = 0; i < b.temps.length; i += 2) bytes.push(parseInt(b.temps.slice(i, i + 2), 16));
-    const rows = bytes.map((v, i) => {
-      const t = v === 0 ? 'off' : `${v - 40}°C`;
-      return row(`NTC #${i}`, t);
-    }).join('');
-    $('bmu-temps').innerHTML = `<table>${rows}</table>`;
+    const count = b.temps.length >= 2 ? parseInt(b.temps.slice(0, 2), 16) : 0;
+    if (count === 0) {
+      $('bmu-temps').innerHTML = `<div class="sub">no on-board temps configured (BoardTempNum = 0)</div>
+        <div class="hex" style="margin-top:8px;">${hexSpaced(b.temps)}</div>`;
+    } else {
+      const temps_c = b.temps_c || [];
+      const rows = temps_c.map((v, i) => row(`NTC #${i}`, `${v}°C`)).join('');
+      $('bmu-temps').innerHTML = `<table>${rows}</table>
+        <div class="hex" style="margin-top:8px;">${hexSpaced(b.temps)}</div>`;
+    }
   } else {
     $('bmu-temps').innerHTML = `<div class="sub">${dash}</div>`;
   }

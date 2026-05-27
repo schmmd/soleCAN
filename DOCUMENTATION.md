@@ -393,15 +393,30 @@ Smallest spread observed across all captures: 3 mV (124 frames in
 | 7    | data[6] | 0x14 (= 20) — series cell count                             |
 | 8    | data[7] | 0x00 constant                                               |
 
-**Frame variant (data[0]).** `0x03` in normal operation; flips to
-`0x02` when the tractor is driven at top speed in high gear, around
-the point motor RPM crosses into the 2800-RPM speed-cap region and
-throttle starts backing off into the limiter. When data[0] = `0x02`,
-data[1] reads `0xFC–0xFF` (decodes to the impossible 101.6–102.3 V via
-the normal scale), so data[1] is a J1939 "not available" sentinel in
-this mode — cell-sum from F113..F13C remains the trustworthy pack-V
-source. data[2..3] (current) remains valid in both variants. Variant
-`0x02` is not observed in regen or in lighter-load driving.
+**Frame variant (data[0]).** `0x03` in normal driving (net discharge);
+flips to `0x02` whenever the pack is taking net positive current, from
+either source:
+
+  - **Regenerative braking from high speed** (originally noted during
+    deceleration from the 2800-RPM top-speed region in high gear). data[1]
+    reads `0xFC–0xFF`. Not observed in lighter regen because the regen
+    current at lower speeds doesn't exceed the tractor's standby load
+    (BMS + dashboard + DC-DC, ~16–17 A from `amp-1.asc` baseline), so net
+    pack current stays positive and the frame stays in variant `0x03`.
+  - **Active L1 wall charging — CC phase** (observed in
+    `data/dual-capture/dual-capture-charging-120.asc`, 215 s at ~19 A
+    into the pack, pack at ~75 V). data[1] reads `0xF1..0xF4` (steady
+    ~120–122 V if read as `× 0.5 V/bit`, matching the 120 V AC mains).
+
+In both cases data[1] is **not** pack terminal voltage — the normal
+`× 0.1 + 76.8` scale decodes to an impossible 100–102 V. The unifying
+read is that variant `0x02` repurposes data[1] for the charge-input
+voltage (AC mains during wall charging; a "no AC source" reading,
+possibly an open-circuit-ADC garbage value, during regen). Use
+cell-sum from F113..F13C as the trustworthy pack-V source whenever
+data[0] = `0x02`. data[2..3] (current) remains valid in both variants,
+and its sign distinguishes the two contexts (regen is brief and
+intermittent; wall charging holds steady-state for minutes to hours).
 
 **Pack terminal voltage** anchored by linear regression of data[1]
 versus 20 × mean(cell mV) across 24 captures with data[0] = 0x03
@@ -796,15 +811,30 @@ Proprietary B frame from the on-board charger.
 
 Status byte vocabulary:
 
-| Value      | Meaning                                                       |
-|------------|---------------------------------------------------------------|
-| 0x00       | Idle / not delivering                                         |
-| 0x01, 0x02 | Transient handshake (only seen briefly during wake-up / ramp) |
-| 0x03       | **Actively delivering charge**                                |
+| Value      | Meaning                                                                       |
+|------------|-------------------------------------------------------------------------------|
+| 0x00       | Idle / not delivering                                                         |
+| 0x01       | Transient handshake (only seen briefly during wake-up / ramp)                 |
+| 0x02       | **Actively delivering charge, CC phase** (steady-state, pack below CV setpoint) |
+| 0x03       | **Actively delivering charge, CV phase** (steady-state, pack at CV setpoint)  |
 
-Voltage encoding is identical to F100F3 byte 2 (data[1]) — same scale,
-same +76.8 V offset. Anchored against contemporaneous F100F3 readings
-in `charging-120V-90ish-to-100.asc`:
+Status `0x02` was previously believed to be a brief handshake state.
+`data/dual-capture/dual-capture-charging-120.asc` (215 s of L1 charging
+at ~60 % SOC, 120 V AC mains, pack at ~75 V) shows it as the
+steady-state during the constant-current phase: status stayed at `0x02`
+for the entire capture while F100F3 reported a steady −19 A into the
+pack.
+
+**`data[3..4]` LE = DC current × 0.1 A/bit applies in both `0x02` and
+`0x03`.** Cross-checked against F100F3 in the CC capture: FF50
+`data[3..4]` LE = `0x00C7` = 199 → 19.9 A; F100F3 `data[2..3]` BE
+decoded to −19.1 A simultaneously.
+
+**`data[1..2]` LE encoding differs between phases.**
+
+In status `0x03` (CV phase), `data[1..2]` LE = pack terminal V × 0.1 +
+76.8. Anchored against contemporaneous F100F3 in
+`charging-120V-90ish-to-100.asc` (90→100 % SOC, CC→CV taper at ~83 V):
 
 - data[1..2] vs Pack_V: slope 0.1024, intercept 77.04, R² = 0.9856 →
   factor 0.1, offset 76.8 V.
@@ -814,9 +844,20 @@ in `charging-120V-90ish-to-100.asc`:
 End-to-end the decoded current showed a textbook CC→CV taper
 (~18.5 A → ~9.9 A → ~2.9 A) at constant ~83 V over the capture.
 
-**Don't trust V/I unless status == 0x03.** The charger module beacons
-self-test artifacts during wake-up and when the plug is inserted
-without AC mains:
+In status `0x02` (CC phase), `data[1..2]` LE does **not** decode as
+pack V — in `dual-capture-charging-120.asc` the raw u16 stayed at
+`0x00EE..0x00F1` (238..241), which under the CV-phase formula would
+read as an impossible 100.6 V on a 75 V pack. Numerically `raw × 0.5
+≈ 119–120.5 V` matches the 120 V AC mains in the file name, but the
+scale is not anchored to a second measurement so this is SPECULATIVE.
+Best current interpretation: in CC phase the charger reports an
+AC-side or charger-internal voltage in `data[1..2]` rather than the
+DC pack output. The 0x4000 DID mirrors FF50 `data[0..4]` at its bytes
+5..9 during charging — see `bms/README.md` §`0x4000`.
+
+**Don't trust `data[1..2]` as pack V unless status == 0x03.** The
+charger module also beacons self-test artifacts during wake-up and
+when the plug is inserted without AC mains:
 
 - Plug inserted, no AC: status = 0x00, v_raw = 2, i_raw = 2048
   (constant). FF50E5 still beacons at ~10 Hz.

@@ -187,34 +187,86 @@ column in the iBMS System-state CSV.
 | 12–15  | u32   | Accumulated charge capacity × 0.01 Ah                |
 | 16–19  | u32   | Accumulated discharge capacity × 0.01 Ah             |
 
-### Alarms — DID `0x4000` (UDAN `0x87`)
+### `0x4000` — active-session status (UDAN `0x87` mapping QUESTIONED)
 
-31 data bytes, one severity-level enum per byte:
+31 data bytes. The original interpretation (31 severity-level enums, one
+per fault category) **does not fit the wire data**: an active-charge
+capture (`data/dual-capture/dual-capture-charging-120.asc`, ~215 s of
+L1/120 V charging at ~19 A) shows several bytes carrying numeric
+measurements and counters, not severity enums.
 
-- `0x00` — No Fault
-- `0x01` / `0x02` / `0x03` — TENTATIVE: Lvl 1 / 2 / 3 Alarm
-- `0xFF` — fault category not implemented on this BMS variant
+Observed structure (144 polls, no broadcast fault on F108F3, charger
+delivering ~19 A throughout):
 
-Constant idle payload (10 sentinels at fixed positions `{11, 12, 21, 24–30}`):
+| Byte    | Idle (charger off) | Active (charging) | Interpretation                          |
+|---------|--------------------|-------------------|-----------------------------------------|
+| 0       | `00`               | `02`              | Active-alarm count? (matches CSV "Alarm number" col) |
+| 1       | `00`               | `03`              | Status bit — set when charging engages   |
+| 2       | `00`               | `01`              | Static `01` once charger present         |
+| 3–5     | `00 00 00`         | `01 01 02`        | Status bits — set when charging engages  |
+| 6       | `00`               | `EE..F1` (=238–241) | **AC mains voltage × 0.5 V/bit** (≈ 119–120.5 V) — mirrors FF50 `data[1]` |
+| 7       | `00`               | `00`              | Padding (high byte of byte 6 if read BE) |
+| 8       | `00`               | `C7` (=199)       | **DC charge current × 0.1 A/bit** (19.9 A) — mirrors FF50 `data[3]` |
+| 9       | `00`               | `00`              | Padding                                  |
+| 10      | `00..D7`           | `00..D7`          | **1-Hz tick counter** (rolls 0x00..0xFF) |
+| 11      | `FF` → `53..56`    | `53..56`          | Slowly-varying u8 (semantics UNKNOWN; possibly time-remaining or temp) |
+| 12      | `FF`               | `00..FF` (varies) | UNKNOWN dynamic u8 (124 unique values in 144 polls) |
+| 13–20   | `00`               | `00`              | Reserved / zero                          |
+| 21      | `FF`               | `00`              | Status — `FF` when no charger, `00` during charge |
+| 22–23   | `00`               | `00`              | Reserved                                 |
+| 24      | `FF`               | `00`              | Status — same flip as byte 21            |
+| 25      | `FF`               | `FC`              | Status — `FF` no charger, `FC` charging  |
+| 26–30   | `FF`               | `FF`              | True sentinels (constant)                |
 
-```
-00 00 00 00 00 00 00 00 00 00 00 ff ff 00 00 00 00 00 00 00 00 ff 00 00 ff ff ff ff ff ff ff
-```
+**Bytes 5–9 mirror FF50 `data[0..4]`.** At t=83.3 s the diagnostic-port
+DID 0x4000 carries `... 02 EE 00 C7 00 ...` at positions 5–9 and the
+broadcast `18FF50E5` frame carries `02 EE 00 C7 00` at `data[0..4]`. This
+is a confirmed mirror (DID/broadcast pair), and it lets us decode FF50
+variant `02` (L1 charging, see DOCUMENTATION.md FF50 section): `data[1]`
+is AC mains × 0.5 V/bit, `data[3]` is DC charge current × 0.1 A/bit.
 
-The CSV export has ~73 fault columns; only ~21 are wired on this pack.
-Per-byte-to-column mapping needs an active fault to pin down.
+**Implication for the UDAN `0x87 = DID 0x4000` mapping.** Byte 0 plausibly
+mirrors the CSV "Alarm number" column (count of active alarms), and the
+historical on-pack alarm CSV showing `ChgOV` + `ChgPackOV` as persistent
+Lvl 1 alarms is consistent with byte 0 = `0x02` in our capture (= 2
+alarms still active). But the rest of the 31-byte block is dominated by
+charging telemetry, not severity codes. Two possibilities remain open:
 
-### Charging — DID cluster `0x0900` + `0x0901` + `0x0902` (UDAN `0x94`, TENTATIVE)
+  - **Mixed-purpose DID.** `0x4000` carries both an alarm header (byte 0
+    = active-alarm count, maybe a few flag bytes) *and* a charging-status
+    block — and the UDAN `0x87` "Alarm state" CSV is sourced from byte 0
+    alone (or from a different DID merged with it).
+  - **Mis-attributed DID.** UDAN `0x87` actually maps to a DID we haven't
+    polled, and `0x4000` is the (mis-labeled in our notes) "ChgState"
+    block that UDAN tag `0x99` ("Charging state / ChgState — UNKNOWN")
+    refers to.
+
+Still TENTATIVE. The 73-column Alarm CSV's per-byte-to-column mapping
+remains unresolved — a capture with a *new* fault firing (i.e. byte 0
+incrementing past `0x02`) is needed to pin it down. The historical
+on-pack CSV only ever shows the same two alarms across all 240 rows, so
+its column ordering alone cannot anchor the byte order.
+
+### Charging — DID cluster `0x0900` + `0x0901` + `0x0902` (UDAN `0x94`)
 
 Three DIDs polled in parallel during the Charge-info / BMS tab. Combined
-35 data bytes covers the 16 non-time CSV columns. Field layout is
-TENTATIVE — every observation so far has the charger disconnected.
+35 data bytes covers the 16 non-time CSV columns of `Charging 0x94.csv`
+(Charger conn., elapsed time, req V/A, output V/A, fault stat., S2 state,
+CC/CC2 resistance, CP freq./duty, lock state, 3× port temp). Cross-checked
+against an active-charge capture
+(`data/dual-capture/dual-capture-charging-120.asc`, ~215 s of L1/120 V
+charging at ~19 A; 144 polls of each DID).
 
-| DID      | Data (B) | Sample                                          | Interpretation                                  |
-|----------|----------|-------------------------------------------------|-------------------------------------------------|
-| `0x0900` | 7        | `01 00 01 00 00 00 00`                          | Enum/flag block (Charger conn., S2, Lock state) |
-| `0x0901` | 14       | `33 0c 00 00 33 0c 00 00 00 00 ff ff ff ff`     | Measurements; trailing `FF FF FF FF` = CC Res + CC2 Res sentinels |
-| `0x0902` | 14       | `00 00 00 00 00 00 00 00 00 00 00 00 00 00`     | All-zero in idle; likely fault / state machine  |
+| DID      | Data (B) | Idle sample                                       | Active-charge behavior                           |
+|----------|----------|---------------------------------------------------|--------------------------------------------------|
+| `0x0900` | 7        | `01 00 01 00 00 00 00`                            | **Invariant** in 144 polls of active charging — same value as charger-disconnected baseline. Byte 0 = `0x01` = "AC Chg" enum (CSV "Charger conn." column). Remaining bytes likely the categorical enums that stay at their pack-default values on this BMS variant (Charger fault stat. = "Status", S2 state = "Open", Elec. lock state = "Unlocked"). |
+| `0x0901` | 14       | `33 0c 00 00 33 0c 00 00 00 00 ff ff ff ff`       | Bytes 0..1 BE and 4..5 BE are **paired dynamic u16 measurements** that move together during charging (range 0x2F39..0x3364 ≈ 12089..13156 raw). Almost certainly the CSV's "Charge Req. Volt." / "Charger Output Volt." pair, but the per-bit scale doesn't land on a clean V at the observed pack voltage (~75 V) — appears to be a charger-internal raw count. Byte 7 alternates `00 ↔ 0B` across the session (semantics UNKNOWN). Trailing 4 bytes (10..13) are **`FF FF FF FF` = CC Resistance + CC2 Resistance "Invalid" sentinels** (CSV value 65535) — CONFIRMED. |
+| `0x0902` | 14       | `00 00 00 00 00 00 00 00 00 00 00 00 00 00`       | **Invariant all-zero** in 144 polls of active charging — refutes the earlier "likely fault / state machine" guess. Consistent with the CSV showing 0 / "Invalid" for CP freq., CP duty, and the three Charger-port-temp columns on this pack variant. Likely just unused fields padded to zero. |
+
+Per-byte ↔ CSV-column mapping of `0x0901`'s dynamic head is still
+TENTATIVE — the contents of the two u16 fields don't decode to volts at
+any common scale, so a contemporaneous iBMS UI screenshot + capture pair
+is needed to anchor units.
 
 ### X700 IoT subsystem — DIDs `0xA501`, `0xA502`, `0xA506`, `0xA507`, `0xA50E`
 
@@ -312,9 +364,20 @@ cross-check / sensor-health indicator.
 
 #### `0x1620` — BMU on-board NTC temps (7 data bytes)
 
-Each byte is one NTC channel; °C = raw − 50 (UDAN convention). `0x00`
-marks "not present". On this pack only channels 1, 2, 5 are wired (the
-same skip pattern as `0x0205`, except byte 0 here is also unpopulated).
+| Offset | Type  | Field                                | Notes |
+|--------|-------|--------------------------------------|-------|
+| 0      | u8    | `BoardTempNum` — count of valid temps | `0x00` on this pack |
+| 1..6   | u8 × N | First `N` bytes are temps; °C = raw − 50 | Bytes beyond the count are firmware-default stubs and must be ignored |
+
+`BoardTempNum` is always `0` on this pack — the BMS-side board-temperature
+feature is not configured on the India 72V 300Ah Solectrac variant, and
+the iBMS PC tool reflects this by exporting no `BoardTemp` CSV
+(inventory under "Historical CSV exports" in the appendix lists 8 files,
+none of them BoardTemp). The trailing bytes carry a constant stub
+pattern (`47 47 00 00 45 00` across every observed capture); decoding
+those as live temps gives plausible-looking but spurious 17–21 °C
+readings even when ambient is 15 °C. The decoder gates on byte 0 and
+returns an empty list when count is zero.
 
 ### DIDs observed but not yet identified
 
@@ -355,7 +418,8 @@ capture):
 | `0x2828` top-1 min-cell tuple              | `F102F3` data[3..4] BE + data[6]     | Min cell mV + 1-based cell number         |
 | `0x2830` top-1 max-temp tuple              | `F104F3` data[0] + data[2]           | Max module °C + 1-based probe number      |
 | `0x2838` top-1 min-temp tuple              | `F104F3` data[1] + data[3]           | Min module °C + 1-based probe number      |
-| `0x4000` (alarms / active faults)          | `F108F3` (active fault bitmap)       | Fault flags (different encodings; see DOCUMENTATION.md)  |
+| `0x4000` byte 0 (active-alarm count, TENTATIVE) | `F108F3` (active fault bitmap)  | `F108F3` is the authoritative broadcast bitmap; `0x4000`'s relationship to alarms is now questioned — see the `0x4000` section above. |
+| `0x4000` bytes 5..9 (charger telemetry block) | `FF50E5` `data[0..4]`         | Variant tag + AC mains × 0.5 V/bit + DC current × 0.1 A/bit (charging) |
 
 The diagnostic-port DIDs expose the **full** BMS internal state (cell
 extrema as top-4 sorted tuples, calibration tables, identity blocks,
@@ -565,13 +629,13 @@ arbitration IDs.
 | 0x84  | DTU info                        | —                |
 | 0x85  | Charging                        | alt name for `0x94` |
 | 0x86  | Balancing state                 | UNKNOWN          |
-| 0x87  | Alarm state                     | `0x4000`         |
+| 0x87  | Alarm state                     | `0x4000` byte 0 only (TENTATIVE — the rest of `0x4000` is charger telemetry; see above) |
 | 0x88  | (Dis)charged energy             | alt name for `0x89` |
 | 0x89  | (Dis)charged energy (alt)       | `0x2810`         |
 | 0x91  | List of supported commands      | —                |
 | 0x92  | Device info (alt)               | —                |
 | 0x93  | System state (alt)              | `0x2800`         |
-| 0x94  | Charging (alt)                  | `0x0900`+`0x0901`+`0x0902` TENTATIVE |
+| 0x94  | Charging (alt)                  | `0x0900`+`0x0901`+`0x0902` (`0x0900` byte 0 + `0x0901` CC sentinels CONFIRMED; rest of `0x0901` head TENTATIVE) |
 | 0x95  | (Dis)charged time               | `0x2801`         |
 | 0x96  | DTU info                        | —                |
 | 0x97  | Enable/disable data             | UNKNOWN          |
@@ -728,8 +792,8 @@ CSV file inventory observed:
 ```
 (Dis)charged energy 0x89.csv      — maps to DID 0x2810
 (Dis)charged time 0x95.csv        — maps to DID 0x2801
-Alarm state 0x87.csv              — maps to DID 0x4000
-Charging 0x94.csv                 — maps to DID 0x0900+0x0901+0x0902 (TENTATIVE)
+Alarm state 0x87.csv              — maps to DID 0x4000 byte 0 (count); per-column severity bytes still UNMAPPED
+Charging 0x94.csv                 — maps to DID 0x0900+0x0901+0x0902 (head TENTATIVE, CC tail CONFIRMED)
 Peak data 0x06.csv                — maps to DID cluster 0x2820/0x2828/0x2830/0x2838
 System state 0x93.csv             — maps to DID 0x2800
 Temperatures 0x09.csv             — maps to DID 0x0102
@@ -806,14 +870,27 @@ Cell volt / Temp) that wasn't screenshotted.
 
 ### Open questions / TODO
 
-- **Active-charge capture.** Connect the charger, capture a session, and:
-  (a) confirm the `0x94 Charging` DID-cluster field layout,
-  (b) test whether `0x4000` byte order matches the Alarm CSV column order.
-- **Active-fault capture or injection.** Needed to lock down per-byte
-  semantics of `0x4000`. Note: the on-pack historical CSV log only ever
-  records two fault types (`ChgOV`, `ChgPackOV`) across all 240 rows, so
-  the on-NAND history alone won't map most byte positions — a live wire
-  capture with the fault active is required.
+- **`0x94 Charging` cluster — finish per-byte ↔ CSV-column mapping.**
+  `data/dual-capture/dual-capture-charging-120.asc` (215 s, ~19 A L1
+  charging, 144 polls) advanced this: `0x0900` is invariant during charge
+  (byte 0 = `0x01` = "AC Chg" enum); `0x0901` trailing `FF FF FF FF` =
+  CC + CC2 Resistance sentinels CONFIRMED; `0x0902` invariant all-zero
+  during active charge (refutes "fault/state machine" guess). Still open:
+  decoding the two dynamic paired u16 fields at `0x0901` bytes 0..1 BE
+  and 4..5 BE (raw values don't land on a clean V at the observed pack
+  voltage) — needs a screenshotted iBMS UI value alongside the wire
+  capture to anchor units.
+- **`0x4000` interpretation — UDAN `0x87` mapping is incorrect or partial.**
+  The above capture shows `0x4000` is dominated by charger telemetry
+  (bytes 5..9 mirror FF50 `data[0..4]`, byte 10 is a 1-Hz tick, bytes
+  6/8/11/12 carry numeric measurements) rather than 31 severity-per-
+  category bytes. Open: identify the actual Alarm-state DID (candidates:
+  UDAN tag `0x99` "Charging state / ChgState — UNKNOWN" might in fact
+  point at `0x4000`, and the real Alarm DID is unpolled), and lock down
+  the byte-to-CSV-column order for the 73-column alarm CSV. Still
+  requires a *new* fault firing (byte 0 incrementing past `0x02`) — the
+  on-pack historical CSV only records `ChgOV` + `ChgPackOV` across all
+  240 rows, so its column ordering alone cannot anchor the byte order.
 - **Thermal offset.** `0x0102` is currently TENTATIVE `°C = raw − 40`.
   Wire-vs-UI alignment in `bms-screenshots.asc` (raw `41 41 41 41 40 41 41`)
   against Screenshots (2)/(3)/(4) shows all 7 probes displayed as 1°C,
