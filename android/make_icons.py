@@ -12,10 +12,9 @@ from PIL import Image
 SRC      = Path(sys.argv[1])
 OUT_RES  = Path(__file__).parent / "app" / "src" / "main" / "res"
 
-# Pixels with R+G+B below this become fully transparent. The tractor's darkest
-# shadows are still well above ~30 in this image, so a low threshold cleanly
-# kills the background without eroding the silhouette.
-BLACK_THRESH = 25
+# Per-channel distance from the sampled background color, in 0–255 units.
+# Pixels within this distance of the corner color are keyed to transparent.
+BG_TOLERANCE = 25
 
 LAUNCHER_SIZES = {
     "mipmap-mdpi":    48,
@@ -29,14 +28,18 @@ LAUNCHER_SIZES = {
 ADAPTIVE_FG_SIZE = 432
 ADAPTIVE_SAFE    = 264
 
-def alpha_key_black(img: Image.Image) -> Image.Image:
+def alpha_key_corner(img: Image.Image) -> Image.Image:
+    """Keys out the background by sampling the top-left pixel — works for black,
+    white, or any solid backdrop. Per-channel tolerance handles JPEG noise."""
     img = img.convert("RGBA")
     px = img.load()
     w, h = img.size
+    br, bg, bb, _ = px[0, 0]
+    tol = BG_TOLERANCE
     for y in range(h):
         for x in range(w):
             r, g, b, _ = px[x, y]
-            if r + g + b < BLACK_THRESH:
+            if abs(r - br) <= tol and abs(g - bg) <= tol and abs(b - bb) <= tol:
                 px[x, y] = (0, 0, 0, 0)
     return img
 
@@ -64,8 +67,11 @@ def make_adaptive_fg(square: Image.Image) -> Image.Image:
     return canvas
 
 def main() -> None:
-    src = Image.open(SRC)
-    keyed   = alpha_key_black(src)
+    src = Image.open(SRC).convert("RGBA")
+    # If the source already has transparency, trust it — alpha-keying near-black
+    # would eat the tractor's own dark shadows. Otherwise key out the bg.
+    has_alpha = src.getextrema()[3][0] < 255
+    keyed = src if has_alpha else alpha_key_corner(src)
     cropped = crop_to_subject(keyed)
     square  = pad_square(cropped)
 
