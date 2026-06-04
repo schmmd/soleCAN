@@ -36,8 +36,23 @@
 #error "Set WIFI_PASS env var before building"
 #endif
 
-#define CAN_TX_PIN GPIO_NUM_8
-#define CAN_RX_PIN GPIO_NUM_14
+// Per-board pin map. Selected via -DBOARD_* in platformio.ini.
+#if defined(BOARD_ADAFRUIT_FEATHER_S3)
+  #define CAN_TX_PIN       GPIO_NUM_8
+  #define CAN_RX_PIN       GPIO_NUM_14
+  #define LED_PIN          GPIO_NUM_33
+  #define LED_POWER_PIN    GPIO_NUM_21
+  #define LED_IS_NEOPIXEL  1
+#elif defined(BOARD_LILYGO_T2CAN)
+  // LilyGo T-2CAN: native TWAI on GPIO 6/7. The board's second CAN
+  // (MCP2518FD on SPI: CS=10, SCK=12, MOSI=11, MISO=13, INT=8) is unused.
+  // pin_config.h documents no user-controllable LED.
+  #define CAN_TX_PIN       GPIO_NUM_7
+  #define CAN_RX_PIN       GPIO_NUM_6
+  #define LED_IS_NEOPIXEL  0
+#else
+  #error "Define a board: BOARD_ADAFRUIT_FEATHER_S3 or BOARD_LILYGO_T2CAN"
+#endif
 
 // WiFi runs in dual AP+STA mode: the board always broadcasts its own hotspot
 // (so it's reachable in the field), and concurrently tries to join the
@@ -245,15 +260,14 @@ extern const uint8_t dashboard_html_start[] asm("_binary_src_dashboard_html_star
 extern const uint8_t dashboard_html_end[]   asm("_binary_src_dashboard_html_end");
 
 // ── LED status indicator ──────────────────────────────────────────────────────
-// Adafruit ESP32-S3 Reverse TFT Feather has a NeoPixel on GPIO 33 whose power
-// rail is gated by GPIO 21 — both must be driven before any colour is visible.
+// On boards with a NeoPixel (Adafruit Feather S3 — GPIO 33, power gated by
+// GPIO 21), status is colour-coded:
 //   Red blink     — CAN driver failed to initialize
 //   Amber blink   — No Wi-Fi up at all (AP failed and STA not connected)
 //   Dim white     — Alive, no CAN frames received recently
 //   Green blink   — CAN frames arriving (toggles on bus activity)
+// On boards without a user LED (LilyGo T-2CAN), the calls are no-ops.
 
-#define LED_PIN          GPIO_NUM_33
-#define LED_POWER_PIN    GPIO_NUM_21
 #define LED_BLINK_MS     50
 #define LED_ACTIVE_MS    200
 
@@ -261,15 +275,21 @@ static uint32_t g_led_last_toggle = 0;
 static bool     g_led_on = false;
 
 static inline void ledInit() {
+#if LED_IS_NEOPIXEL
     pinMode(LED_POWER_PIN, OUTPUT);
     digitalWrite(LED_POWER_PIN, HIGH);   // enable NeoPixel power rail
+#endif
 }
 
 static inline void ledWrite(uint8_t r, uint8_t g, uint8_t b) {
-#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+#if LED_IS_NEOPIXEL
+  #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
     rgbLedWrite(LED_PIN, r, g, b);
-#else
+  #else
     neopixelWrite(LED_PIN, r, g, b);
+  #endif
+#else
+    (void)r; (void)g; (void)b;
 #endif
 }
 
