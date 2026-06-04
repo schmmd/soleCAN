@@ -8,24 +8,12 @@ streams from a live CAN interface (or a python-can log file) and
 displays a real-time dashboard:
 
     * Pack voltage estimate, current magnitude, DC and estimated AC power.
-    * State-of-charge (SOC) estimate from min cell voltage (NMC OCV curve;
-      load-sensitive — see SOC notes below).
+    * State-of-charge (SOC) from the BMS-published F100F3 byte.
     * Charger output V / A / power, status flag.
     * Per-cell voltages with min/max/spread (1-based BMS numbering).
     * Per-channel module temperatures (with the +40 C offset removed).
     * Vehicle-controller heartbeat state.
     * Live alerts (low/high cell, spread, temp, AC budget, stale BMS).
-
-SOC estimate notes:
-    * Voltage-only SOC is approximate. The OCV->SOC table assumes NMC
-      chemistry (consistent with the ~4.1 V/cell range observed on this
-      pack); LFP cells would need a different table.
-    * Estimate is taken from the **lowest** cell voltage so it tracks the
-      limiting cell (the one that will trip the BMS first), not the pack
-      average.
-    * Terminal voltage drops below OCV under load and rises above OCV
-      while charging, so the OCV row will diverge from the BMS's
-      coulomb-counted SOC whenever the pack is under significant load.
 
 Data sources:
     --interface socketcan --channel can0    live SocketCAN bus
@@ -312,30 +300,9 @@ NUM_TEMPS = 7
 
 STALE_S = 2.0  # mark a channel stale if no update for this long
 
-# OCV (open-circuit voltage) -> SOC table for typical NMC Li-ion at room
-# temperature, in (mV-per-cell, percent). Composite curve; vendor-specific
-# cells can drift from this by ~5-10% SOC. The lower knee is steeper than
-# the upper, which is why the table is denser near the bottom.
-NMC_OCV_TABLE: List[Tuple[int, float]] = [
-    (3000,   0.0),
-    (3300,   5.0),
-    (3450,  10.0),
-    (3530,  15.0),
-    (3620,  20.0),
-    (3690,  30.0),
-    (3740,  40.0),
-    (3800,  50.0),
-    (3870,  60.0),
-    (3930,  70.0),
-    (4000,  80.0),
-    (4080,  90.0),
-    (4150,  95.0),
-    (4200, 100.0),
-]
-
-# Treat the SOC reading as "loaded" (terminal voltage != OCV) when |I|
-# exceeds this. At rest the estimate is the most trustworthy.
-SOC_REST_CURRENT_A = 2.0
+# Current threshold above which the pack is considered actively drawn (gates
+# the runtime-to-empty estimate so a parked tractor doesn't show an ETA).
+PACK_DRAW_CURRENT_A = 2.0
 
 # Time-to-full estimator: retain (ts, soc%) samples for SOC_ETA_HISTORY_S,
 # slope over the most recent SOC_ETA_WINDOW_S when SOC is rising in that
@@ -355,23 +322,6 @@ SOC_ETA_STABLE_TRANSITIONS = 3      # transitions before dropping "(rough)"
 # arrives at ~10 Hz so 60 s gives ~600 samples; bucketing averages them.
 POWER_HISTORY_S = 60.0
 POWER_SPARK_WIDTH = 30
-
-
-def soc_from_cell_mv(mv: float) -> float:
-    """Linear-interpolated SOC % from a per-cell OCV using NMC_OCV_TABLE.
-
-    Clamps below the table's first point to 0 % and above the last to
-    100 %. This is voltage-only; load and temperature are not corrected.
-    """
-    table = NMC_OCV_TABLE
-    if mv <= table[0][0]:
-        return 0.0
-    if mv >= table[-1][0]:
-        return 100.0
-    for (v0, s0), (v1, s1) in zip(table, table[1:]):
-        if v0 <= mv <= v1:
-            return s0 + (s1 - s0) * (mv - v0) / (v1 - v0)
-    return 0.0
 
 
 def parse_id(can_id: int) -> Tuple[int, int]:
@@ -480,10 +430,7 @@ class State:
     limit_discharge_a: Channel = field(default_factory=Channel)
     limit_charge_a: Channel = field(default_factory=Channel)
     limit_mode: Channel = field(default_factory=Channel)           # 0 chg / 1 drv
-    # Voltage-derived SOC (from min cell mV via NMC OCV table).
-    soc_pct: Channel = field(default_factory=Channel)
-    # BMS-published SOC (F100F3 byte 4). More authoritative than the
-    # voltage-only estimate when present; preferred in render_pack.
+    # BMS-published SOC (F100F3 byte 4): % = raw × 0.4 − 0.8.
     bms_soc_pct: Channel = field(default_factory=Channel)
     # Recent (ts, bms_soc%) samples used to estimate time-to-full during
     # charging. Pruned to SOC_ETA_HISTORY_S; the estimator prefers slope
@@ -679,8 +626,6 @@ def decode(msg: "can.Message", state: State, now: float) -> None:
             state.pack_v_est.update(
                 NUM_CELLS * (max_mv + min_mv) / 2.0 / 1000.0, now
             )
-            # SOC tracks the limiting (lowest) cell; conservative.
-            state.soc_pct.update(soc_from_cell_mv(min_mv), now)
             state.decoded += 1
 
         elif pgn == PGN_F104:
@@ -1237,10 +1182,8 @@ def render_pack(state: State, mains_v: float, efficiency: float,
                        f"({net / PACK_CAPACITY_WH * 100:+.1f}% of pack)",
                        style=net_style))
 
-    def _soc_row(label: str, ch: Channel) -> Optional[Text]:
-        if ch.value is None:
-            return None
-        soc = ch.value
+    if state.bms_soc_pct.value is not None:
+        soc = state.bms_soc_pct.value
         bar_w = 20
         filled = int(round(soc * bar_w / 100))
         bar = Text("█" * filled + "░" * (bar_w - filled))
@@ -1250,21 +1193,13 @@ def render_pack(state: State, mains_v: float, efficiency: float,
             soc_style = "yellow"
         else:
             soc_style = "green"
-        tag = " stale" if ch.is_stale(now) else ""
-        return Text.assemble(
+        tag = " stale" if state.bms_soc_pct.is_stale(now) else ""
+        t.add_row("SOC", Text.assemble(
             bar,
             Text(f"  {soc:>3.0f}%", style=soc_style),
             Text(tag, style="dim"),
-        )
-
-    bms_row = _soc_row("BMS", state.bms_soc_pct)
-    if bms_row is not None:
-        t.add_row("SOC (BMS)", bms_row)
-    ocv_row = _soc_row("OCV", state.soc_pct)
-    if ocv_row is not None:
-        t.add_row("SOC (OCV)", ocv_row)
-    if state.bms_soc_pct.value is not None:
-        kwh_remaining = state.bms_soc_pct.value / 100.0 * PACK_CAPACITY_WH / 1000.0
+        ))
+        kwh_remaining = soc / 100.0 * PACK_CAPACITY_WH / 1000.0
         kwh_total = PACK_CAPACITY_WH / 1000.0
         t.add_row("remaining", Text(f"{kwh_remaining:.1f} / {kwh_total:.1f} kWh"))
 
@@ -1273,7 +1208,7 @@ def render_pack(state: State, mains_v: float, efficiency: float,
     # when the pack is actually being drawn from -- a parked tractor
     # with zero load would otherwise show a "(rough)" never-ending ETA.
     if (state.bms_soc_pct.value is not None
-            and pi is not None and pi > SOC_REST_CURRENT_A):
+            and pi is not None and pi > PACK_DRAW_CURRENT_A):
         eta = estimate_drain_eta_s(state)
         if eta is None:
             t.add_row("ETA to 0%", Text("estimating...", style="dim"))
