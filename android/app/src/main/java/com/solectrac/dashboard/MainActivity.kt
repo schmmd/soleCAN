@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.view.View
+import android.view.WindowManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import androidx.activity.result.contract.ActivityResultContracts
@@ -99,6 +100,11 @@ class MainActivity : AppCompatActivity(), BleClient.Listener {
     override fun onStateChange(state: BleClient.State, detail: String) {
         b.status.text = detail
         val connected = state == BleClient.State.CONNECTED
+        if (connected) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
         // Hide the half-rendered dashboard whenever we're not connected — show a
         // plain "Disconnected" overlay instead.
         b.disconnectedOverlay.visibility = if (connected) View.GONE else View.VISIBLE
