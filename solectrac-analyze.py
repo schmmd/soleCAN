@@ -320,7 +320,52 @@ from solectrac_proto import (
     RPM_BIAS, LIMIT_CURRENT_LSB_A,
     BMS_FAULT_CODES_BYTE7, BMS_FAULT_CODES_BYTES_0_TO_6,
     parse_id, be16, le16, data_bytes, c_to_f,
+    decode as proto_decode,
 )
+
+
+# --- emit-time output shaping -----------------------------------------------
+
+# Per-signal rounding precision (decimals) for the CSV output. Names not in
+# this dict are written as-is (integers stay integers, floats keep full
+# precision -- but most floats in the shared decoder are produced from
+# round-trippable integer arithmetic, so they print cleanly).
+_ROUND_PRECISION = {
+    "pack.voltage_v": 2,
+    "pack.current_a": 1,
+    "pack.power_w": 1,
+    "pack.soc_pct": 1,
+    "pack.v_estimate": 3,
+    "bms.limit.discharge_a": 2,
+    "bms.limit.charge_a": 2,
+    "charger.voltage_v": 2,
+    "charger.current_a": 1,
+    "chgr_cmd.voltage_v": 1,
+    "chgr_cmd.current_a": 1,
+}
+
+# Signal names where value == 0 means "not asserted / absent" and the row
+# is suppressed from the CSV to keep it compact. Matches the conditional
+# emits in the original per-frame decoder.
+_SUPPRESS_ZERO_PREFIXES = ("bms.fault.byte",)
+_SUPPRESS_ZERO_EXACT = (
+    {"dm1.lamp.byte0", "dm1.lamp.byte1"}
+    | {f"dm1.lamp.{n}_state" for n in DM1_LAMP_NAMES}
+    | {f"dm1.lamp.{n}_flash" for n in DM1_LAMP_NAMES}
+)
+
+
+def _make_emit(emissions: list):
+    def emit(name, value, unit):
+        if value == 0 and (
+                name in _SUPPRESS_ZERO_EXACT
+                or any(name.startswith(p) for p in _SUPPRESS_ZERO_PREFIXES)):
+            return
+        prec = _ROUND_PRECISION.get(name)
+        if prec is not None:
+            value = round(value, prec)
+        emissions.append((name, value, unit))
+    return emit
 
 
 # --- script-local protocol tables -------------------------------------------
@@ -417,7 +462,13 @@ def decode_can_id(can_id: int, is_extended: bool) -> dict:
 
 def decode_file(path: Path, scenario: str, rows: list, frames: list,
                 counts: dict, id_counts: dict):
-    """Stream one log via python-can; append decoded rows + frames in-place."""
+    """Stream one log via python-can; append decoded rows + frames in-place.
+
+    The actual byte-level decoding lives in solectrac_proto.decode(); this
+    wrapper drives it with an emit callback that captures (name, value, unit)
+    tuples (with per-name rounding and zero-suppression applied at emit
+    time) and a category-driven counter update.
+    """
     sc = counts.setdefault(scenario, {
         "total": 0, "cells": 0, "temps": 0, "f100": 0, "f102": 0,
         "f108": 0, "charger": 0, "vc": 0, "motor": 0,
@@ -430,562 +481,32 @@ def decode_file(path: Path, scenario: str, rows: list, frames: list,
             sc["total"] += 1
             can_id = msg.arbitration_id
             is_ext = bool(msg.is_extended_id)
-
-            # Track every unique (id, ext) pair we see.
             id_key = (can_id, is_ext)
             id_counts[id_key] = id_counts.get(id_key, 0) + 1
 
-            if not is_ext:
-                # 11-bit IDs aren't J1939; leave them out of the BMS decode.
+            emissions: list = []
+            emit = _make_emit(emissions)
+            category = proto_decode(msg, emit)
+
+            if category == "non_extended":
                 sc["extended_false"] += 1
                 continue
-
-            _, pgn, src = parse_id(can_id)
-            ts = msg.timestamp                # seconds, float
-            data = data_bytes(msg.data)
-
-            # Each decoder branch builds a list of (signal, value, unit)
-            # emissions. We commit a frames.csv entry plus the signals
-            # together at the end if anything was produced, so every signal
-            # row carries the frame_index of its source frame.
-            emissions = []
-
-            if src == SRC_BMS:
-                if PGN_CELL_FIRST <= pgn <= PGN_CELL_LAST:
-                    if all(b == 0 for b in data):
-                        sc["skipped_zero"] += 1
-                        continue
-                    base = (pgn - PGN_CELL_FIRST) * 4
-                    for slot in range(4):
-                        idx = base + slot
-                        # The cell PGN range covers up to 168 channels but
-                        # this pack has only NUM_CELLS real cells; suppress
-                        # the rest along with 0 (empty) and 0xFFFF
-                        # ("not present" sentinel).
-                        if idx >= NUM_CELLS:
-                            continue
-                        mv = be16(data[2 * slot], data[2 * slot + 1])
-                        if mv == 0 or mv == 0xFFFF:
-                            continue
-                        emissions.append(
-                            (f"cell.{idx:02d}.voltage_v",
-                             mv / 1000.0, "v"))
-                    sc["cells"] += 1
-
-                elif PGN_TEMP_FIRST <= pgn <= PGN_TEMP_LAST:
-                    if all(b == 0 for b in data):
-                        sc["skipped_zero"] += 1
-                        continue
-                    base = (pgn - PGN_TEMP_FIRST) * 8
-                    for slot, b in enumerate(data):
-                        idx = base + slot
-                        # 80-channel range, only NUM_TEMPS real probes.
-                        # 0xFF is the "not present" sentinel.
-                        if idx >= NUM_TEMPS:
-                            continue
-                        if b == 0 or b == 0xFF:
-                            continue
-                        emissions.append(
-                            (f"temp.{idx:02d}.c",
-                             b - TEMP_OFFSET_C, "c"))
-                    sc["temps"] += 1
-
-                elif pgn == PGN_F100:
-                    if all(b == 0 for b in data):
-                        sc["skipped_zero"] += 1
-                        continue
-                    raw = be16(data[2], data[3])  # bytes 2-3 BE, biased u16
-                    amps = (raw - PACK_CURRENT_BIAS_RAW) * PACK_CURRENT_LSB_A
-                    # byte 0 selects voltage range: 0x03 = high, 0x02 = low.
-                    offset = PACK_VOLTAGE_OFFSET_LO_V if data[0] == 0x02 else PACK_VOLTAGE_OFFSET_HI_V
-                    volts = data[1] * PACK_VOLTAGE_LSB_V + offset
-                    emissions.append(("pack.voltage_v", round(volts, 2), "v"))
-                    emissions.append(("pack.current_raw", raw, ""))
-                    emissions.append(("pack.current_a", round(amps, 1), "a"))
-                    # Derived: instantaneous pack power (signed). Sign
-                    # convention follows pack.current_a: + = drawing
-                    # (discharging), - = charging. Watts = V * A; the
-                    # voltage offset of +76.8 V means the pack never
-                    # decodes below that threshold, so power is well-
-                    # defined whenever current is.
-                    emissions.append(("pack.power_w",
-                                      round(volts * amps, 1), "w"))
-                    # byte 4: BMS-published State-of-Charge. Identified by
-                    # cross-capture comparison: byte 4 is constant within
-                    # short captures (e.g. 250 across 489 frames in
-                    # accellerate-decelerate.asc despite voltage moving
-                    # 100 mV); saturates at 250 in soc-100-idle.asc.
-                    # Calibrated against two direct screen readings:
-                    # raw=202 at screen 80%, raw=227 at screen 90%.
-                    # Linear fit: slope = 10/25 = 0.4, intercept = -0.8.
-                    soc_pct = round(data[4] * 0.4 - 0.8, 1)
-                    emissions.append(("pack.soc_raw", data[4], ""))
-                    emissions.append(("pack.soc_pct", soc_pct, "%"))
-                    sc["f100"] += 1
-
-                elif pgn == PGN_F102:
-                    # F102 layout (corpus survey, 36,950 active frames):
-                    #   bytes 0-1 BE = max cell mV
-                    #   bytes 2-3 BE = min cell mV
-                    #   byte 4       = max-cell channel (1-based, per BMS GUI)
-                    #   byte 5       = min-cell channel (1-based, per BMS GUI)
-                    #   byte 6       = 0x00 padding (constant across corpus)
-                    #   byte 7       = cell spread in mV (max - min, 1 mV/bit)
-                    # Byte 7 was previously labelled 'pack.flags'; full-
-                    # corpus comparison vs the computed (max_mv - min_mv)
-                    # matched in 36,950 of 36,950 frames, so byte 7 is the
-                    # BMS-reported spread, NOT a status bitmap.
-                    if all(b == 0 for b in data):
-                        sc["skipped_zero"] += 1
-                        continue
-                    max_mv = be16(data[0], data[1])
-                    min_mv = be16(data[2], data[3])
-                    if max_mv == 0 or min_mv == 0:
-                        continue
-                    pack_v = round(20 * (max_mv + min_mv) / 2.0 / 1000.0, 3)
-                    emissions.append(("pack.cell_max_mv", max_mv, "mv"))
-                    emissions.append(("pack.cell_min_mv", min_mv, "mv"))
-                    emissions.append(
-                        ("pack.cell_spread_mv", max_mv - min_mv, "mv"))
-                    emissions.append(("pack.cell_max_n", data[4], ""))
-                    emissions.append(("pack.cell_min_n", data[5], ""))
-                    emissions.append(
-                        ("pack.cell_spread_mv_reported", data[7], "mv"))
-                    emissions.append(("pack.v_estimate", pack_v, "v"))
-                    sc["f102"] += 1
-
-                elif pgn == PGN_F104:
-                    # Symmetric with F102 (cell min/max summary) but for
-                    # module temperatures. Layout verified by cross-
-                    # referencing every capture's F104 payload against
-                    # the per-channel temp.NN.c values decoded from
-                    # F155..F15E in the same capture: byte 0 = max temp
-                    # in °C with the J1939 +40 offset, byte 1 = min
-                    # temp same encoding, byte 2 = max-temp channel
-                    # number (1-based), byte 3 = min-temp channel
-                    # number (1-based), byte 4 = b0 - b1 (spread, °C);
-                    # bytes 5-7 are 0xFF (J1939 unused).
-                    if all(b == 0 for b in data):
-                        sc["skipped_zero"] += 1
-                        continue
-                    if data[0] == 0xFF or data[1] == 0xFF:
-                        continue
-                    emissions.append(
-                        ("pack.temp_max_c", data[0] - TEMP_OFFSET_C, "c"))
-                    emissions.append(
-                        ("pack.temp_min_c", data[1] - TEMP_OFFSET_C, "c"))
-                    emissions.append(("pack.temp_max_n", data[2], ""))
-                    emissions.append(("pack.temp_min_n", data[3], ""))
-                    emissions.append(("pack.temp_spread_c", data[4], "c"))
-                    sc.setdefault("f104", 0)
-                    sc["f104"] += 1
-
-                elif pgn == PGN_F106:
-                    # BMS state byte pair. Across all 30 captures (36,955
-                    # F106F3 frames) only six (byte 0, byte 1) clusters
-                    # ever appear:
-                    #   (0x45, 0xCC) 28599 = active charging
-                    #   (0x45, 0xE0)  5434 = drive ready / running
-                    #   (0x80, 0xC4)  2796 = charger plugged in, no current
-                    #   (0x45, 0xC4)    96 = transient (drive/charge boot)
-                    #   (0x84, 0xC4)    10 = transient (charge teardown)
-                    #   (0x85, 0xCC)     3 = transient (charge teardown)
-                    #   (0x00, 0x80)     6 = init (deepest state, key-on)
-                    #   (others)         5 = brief boot/teardown transients
-                    # Byte 1 bit semantics (decoded into the existing
-                    # bms.state.* sub-signals):
-                    #   bit 7 (0x80) = BMS alive (set whenever published)
-                    #   bit 6 (0x40) = vehicle/contactors awake
-                    #   bit 5 (0x20) = drive mode (set only with motor)
-                    #   bit 3 (0x08) = charging active (set only with
-                    #                  charger status 0x03)
-                    #   bit 2 (0x04) = charger present
-                    # Byte 0 bit semantics, derived from the boot/teardown
-                    # timeline in charging-120V-90ish-to-100.asc:
-                    #   bit 0 (0x01) = BMS output command active (drive or
-                    #                  active-charge request enabled). Set
-                    #                  in 0x45/0x85; cleared in
-                    #                  0x00/0x44/0x80/0x84.
-                    #   bit 2 (0x04) = main contactor closed. Cleared
-                    #                  during init (0x00) and after the
-                    #                  contactor opens at the end of a
-                    #                  charge session (0x80).
-                    #   bit 6 (0x40) = operating mode (power flowing in
-                    #                  either direction: driving or
-                    #                  actively charging).
-                    #   bit 7 (0x80) = standby mode (charger present but
-                    #                  no main-bus current; covers
-                    #                  handshake, post-charge idle, and
-                    #                  fault-blocked charging).
-                    #   bits 6 and 7 are perfectly mutually exclusive
-                    #   across all 36,955 frames; treat them as a
-                    #   one-hot operating/standby flag pair.
-                    # Byte 2 is constant 0xFC across the corpus (vendor
-                    # static identifier?); bytes 3-7 are always 0xFF
-                    # (J1939 'not available').
-                    if all(b == 0 for b in data):
-                        sc["skipped_zero"] += 1
-                        continue
-                    emissions.append(("bms.state.byte0", data[0], ""))
-                    emissions.append(("bms.state.byte1", data[1], ""))
-                    b0 = data[0]
-                    emissions.append(
-                        ("bms.state.output_enable",
-                         1 if b0 & 0x01 else 0, ""))
-                    emissions.append(
-                        ("bms.state.main_contactor",
-                         1 if b0 & 0x04 else 0, ""))
-                    emissions.append(
-                        ("bms.state.operating",
-                         1 if b0 & 0x40 else 0, ""))
-                    emissions.append(
-                        ("bms.state.standby",
-                         1 if b0 & 0x80 else 0, ""))
-                    b1 = data[1]
-                    emissions.append(
-                        ("bms.state.charging", 1 if b1 & 0x08 else 0, ""))
-                    emissions.append(
-                        ("bms.state.charger_present",
-                         1 if b1 & 0x04 else 0, ""))
-                    emissions.append(
-                        ("bms.state.drive_mode",
-                         1 if b1 & 0x20 else 0, ""))
-                    emissions.append(
-                        ("bms.state.contactors",
-                         1 if b1 & 0x40 else 0, ""))
-                    sc.setdefault("f106", 0)
-                    sc["f106"] += 1
-
-                elif pgn == PGN_F107:
-                    # BMS current limits, two BE u16 fields at 0.01 A/bit:
-                    #   bytes 0-1 = max discharge current
-                    #   bytes 2-3 = max charge current
-                    # In every drive capture bytes 0-1 = 0x38A4 = 145.0 A
-                    # and bytes 2-3 = 0x2710 = 100.0 A; in every charging
-                    # capture both fall to 0x2710 = 100.0 A. The pack
-                    # spec lists 200 A peak / 100 A continuous, so the
-                    # 145 A figure is the BMS-published derated peak and
-                    # 100 A is the continuous limit.
-                    # byte 4 = mode flag (0x00 charging, 0x01 driving).
-                    # byte 5 = coarse-quantized pack voltage echo. Across
-                    # 5,326 driving frames (b5 in 0x71..0x77), b5 tracks
-                    # F100F3 pack voltage with R^2=0.97; per-frame fit gives
-                    #   V_pack ~= b5 * 0.2212 + 57.0078
-                    #   b5     ~= 4.5198 * V_pack - 257.66
-                    # The mapping is essentially deterministic at the
-                    # ~0.22 V/bit step (every 2 ticks of F100 voltage byte
-                    # increments b5 by 1). In charging captures b5 is
-                    # 0x00 (BMS not publishing this estimate). Rare
-                    # transient values appear briefly during ignition/
-                    # teardown windows: 0x4D, 0x6B, 0xA5, 0xA7 (each
-                    # spans 5..98 frames). Likely the BMS-published
-                    # "voltage limit"
-                    # echo of the pack voltage, but exact provenance
-                    # (OCV vs terminal vs cell-derived) not established.
-                    if all(b == 0 for b in data):
-                        sc["skipped_zero"] += 1
-                        continue
-                    i_dis_max = be16(data[0], data[1]) * LIMIT_CURRENT_LSB_A
-                    i_chg_max = be16(data[2], data[3]) * LIMIT_CURRENT_LSB_A
-                    emissions.append(
-                        ("bms.limit.discharge_a", round(i_dis_max, 2), "a"))
-                    emissions.append(
-                        ("bms.limit.charge_a", round(i_chg_max, 2), "a"))
-                    emissions.append(("bms.limit.mode", data[4], ""))
-                    emissions.append(("bms.limit.byte5", data[5], ""))
-                    sc.setdefault("f107", 0)
-                    sc["f107"] += 1
-
-                elif pgn == PGN_F108:
-                    # All zeros = healthy idle baseline.
-                    #
-                    # Bytes 0..6 carry vendor codes per BMS_FAULT_CODES_
-                    # BYTES_0_TO_6 (mixed 2-bit and 1-bit encoding by
-                    # byte). Byte 7 carries system/maintenance codes per
-                    # BMS_FAULT_CODES_BYTE7 (1 bit per code, with gaps;
-                    # bits 5 and 6 both = 144). The active code set is
-                    # deduplicated so each code is emitted once per frame.
-                    if all(b == 0 for b in data):
-                        sc["skipped_zero"] += 1
-                        continue
-                    for i, b in enumerate(data):
-                        if b != 0:
-                            emissions.append(
-                                (f"bms.fault.byte{i}", b, ""))
-                    active_codes: set[int] = set()
-                    for byte_idx, codes in BMS_FAULT_CODES_BYTES_0_TO_6.items():
-                        b = data[byte_idx]
-                        for bit_idx, code in enumerate(codes):
-                            if code is None:
-                                continue
-                            if (b >> bit_idx) & 1:
-                                active_codes.add(code)
-                    b7 = data[7]
-                    for bit, code in BMS_FAULT_CODES_BYTE7:
-                        if (b7 >> bit) & 1:
-                            active_codes.add(code)
-                    for code in sorted(active_codes):
-                        emissions.append(
-                            (f"bms.fault.code_{code}", 1, ""))
-                    sc["f108"] += 1
-
-            elif src == SRC_VEHICLE and pgn == PGN_F100:
-                # Vehicle controller F100 is a minimal 1-byte heartbeat:
-                # byte 0 is the only meaningful field (see VC_STATE_NAMES);
-                # bytes 1..7 are 0xFF "not available" sentinels in every
-                # observed frame.
-                emissions.append(("vc.state", data[0], ""))
-                sc["vc"] += 1
-
-            elif src == SRC_MOTOR and pgn == PGN_FF21:
-                # bytes 2-3 little-endian, biased by 0x0C80, give RPM magnitude.
-                rpm_mag = ((data[3] << 8) | data[2]) - RPM_BIAS
-                throttle_raw = data[0]
-                # byte 7 packs (range_gear << 4) | direction.
-                # low nibble: 0=N, 4=F, 8=R; high nibble: 0/1/2 = Range 1/2/3.
-                fnr = data[7] & 0x0F
-                if fnr == 0x4:
-                    direction = 1            # forward
-                elif fnr == 0x8:
-                    direction = -1           # reverse
-                else:
-                    direction = 0            # neutral
-                range_gear = ((data[7] >> 4) & 0x0F) + 1  # 0/1/2 -> 1/2/3
-                rpm_signed = direction * rpm_mag
-                emissions.append(("motor.rpm_signed", rpm_signed, "rpm"))
-                emissions.append(("motor.rpm_magnitude", rpm_mag, "rpm"))
-                emissions.append(("motor.direction", direction, ""))
-                emissions.append(("motor.range_gear", range_gear, ""))
-                emissions.append(("motor.throttle_raw", throttle_raw, ""))
-                # bytes 4 and 5 are both J1939 +40 C-offset temperatures.
-                # The operator manual lists two separate gauges on the dash:
-                # "Main Controller Temperature" and "Motor Temperature".
-                # Across all captures byte 4 is consistently a few degrees
-                # hotter than byte 5 and ramps up from cold-start in
-                # ignition-without-charger-inserted.asc (40->59 raw =
-                # 0->19 C while byte 5 stays at 13 C); inverter electronics
-                # (controller) typically run hotter than the motor housing,
-                # so byte 4 = controller, byte 5 = motor. Raw 0 means
-                # "not present" and is suppressed.
-                if data[4]:
-                    emissions.append(
-                        ("motor.controller_temp_c",
-                         data[4] - TEMP_OFFSET_C, "c"))
-                if data[5]:
-                    emissions.append(
-                        ("motor.motor_temp_c",
-                         data[5] - TEMP_OFFSET_C, "c"))
-                sc["motor"] += 1
-
-            elif src == SRC_DASH and pgn == PGN_FF21:
-                # Dashboard / instrument-cluster heartbeat from SA 0x12.
-                # 0x18FF2112 is the *only* PGN this SA broadcasts (verified
-                # across 30 captures, 6634 frames). Cadence is 10 Hz
-                # (median 97 ms period). Only byte 0 carries information:
-                #   0x00 = booting (first ~7 frames after key-on, ~700 ms)
-                #   0x01 = ready / alive (steady value thereafter)
-                # Bytes 1..7 are always 0x00 padding. The 0x00 -> 0x01
-                # transition was captured only in the two ignition-* asc
-                # files; every other capture started with the dash already
-                # alive. SA 0x12 is non-standard so the "dashboard" label
-                # is by elimination, not from a vendor table.
-                emissions.append(("dash.alive", data[0], ""))
-                sc.setdefault("dash", 0)
-                sc["dash"] += 1
-
-            elif src == SRC_MOTOR and pgn == PGN_FECA:
-                # DM1 (Active Diagnostic Trouble Codes) per SAE J1939-73.
-                #   data[0] = lamp status: 4 lamps x 2 bits each
-                #             bits 7-6 = MIL (Malfunction Indicator Lamp)
-                #             bits 5-4 = Red Stop
-                #             bits 3-2 = Amber Warning
-                #             bits 1-0 = Protect
-                #   data[1] = flash status, same layout as data[0]
-                #   data[2..5] = first DTC (4 bytes, layout below)
-                #   data[6..7] = padding (0xFF) for single-DTC frame
-                # DTC layout (CM=0, the modern SAE convention):
-                #   data[2]      = SPN bits  0..7
-                #   data[3]      = SPN bits  8..15
-                #   data[4]      = SPN bits 16..18 (high 3 bits) | FMI (low 5)
-                #   data[5]      = CM (bit 7) | OC (low 7 bits)
-                # Multi-DTC DM1 messages use J1939 transport-protocol BAM
-                # (PGN 0xECFF / 0xEBFF). None observed in our captures, so
-                # this decoder handles only single-frame DM1.
-                #
-                # Healthy idle convention: 00 00 00 00 00 00 FF FF (all
-                # lamps off, no DTC, padding 0xFF). Suppressed to keep the
-                # CSV compact; only nonzero / interesting frames emit rows.
-                lamp_byte = data[0]
-                flash_byte = data[1]
-                spn = (data[2]
-                       | (data[3] << 8)
-                       | (((data[4] >> 5) & 0x07) << 16))
-                fmi = data[4] & 0x1F
-                cm = (data[5] >> 7) & 0x01
-                oc = data[5] & 0x7F
-                dtc_active = (spn != 0) or (fmi != 0)
-                if lamp_byte == 0 and flash_byte == 0 and not dtc_active:
-                    sc["skipped_zero"] += 1
-                    continue
-                if lamp_byte:
-                    emissions.append(("dm1.lamp.byte0", lamp_byte, ""))
-                    for i, name in enumerate(DM1_LAMP_NAMES):
-                        # i=0 -> bits 7-6, i=1 -> bits 5-4, etc.
-                        shift = 6 - 2 * i
-                        v = (lamp_byte >> shift) & 0x03
-                        if v:
-                            emissions.append(
-                                (f"dm1.lamp.{name}_state", v, ""))
-                if flash_byte:
-                    emissions.append(("dm1.lamp.byte1", flash_byte, ""))
-                    for i, name in enumerate(DM1_LAMP_NAMES):
-                        shift = 6 - 2 * i
-                        v = (flash_byte >> shift) & 0x03
-                        if v:
-                            emissions.append(
-                                (f"dm1.lamp.{name}_flash", v, ""))
-                if dtc_active:
-                    emissions.append(("dm1.dtc.spn", spn, ""))
-                    emissions.append(("dm1.dtc.fmi", fmi, ""))
-                    emissions.append(("dm1.dtc.cm", cm, ""))
-                    emissions.append(("dm1.dtc.oc", oc, ""))
-                sc.setdefault("dm1", 0)
-                sc["dm1"] += 1
-
-            elif src == SRC_CHARGER and pgn == PGN_FF50:
-                if all(b == 0 for b in data):
-                    sc["skipped_zero"] += 1
-                    continue
-                # Byte layout, surveyed across 3,108 FF50E5 frames in 5
-                # of 30 captures (the charger ECU only broadcasts when
-                # plugged in / shortly after key-on; otherwise silent):
-                #   byte 0     = status (0x00 idle, 0x01/0x02 transient,
-                #                0x03 active output)
-                #   bytes 1-2  = LE u16 voltage. During status==0x03 this
-                #                is the pack-side terminal voltage. During
-                #                status==0x00 with the contactor open it
-                #                tracks the charger's own output-rail
-                #                voltage which decays freely after
-                #                disconnect (e.g. 102 V -> 80 V over 136 s
-                #                in charging-120V-90ish-to-100.asc tail).
-                #                Byte 2 (high byte) is 0x00 in 100% of
-                #                frames; this 20-cell pack can't reach
-                #                raw 256 (~102.4 V engineering).
-                #   byte 3     = u8 current low byte, 0.1 A/bit. Range
-                #                0..25.5 A covers the observed 18.5 A
-                #                peak comfortably.
-                #   byte 4     = STATUS FLAGS (NOT current high byte).
-                #                Five values across the corpus, decoded
-                #                as a bitfield:
-                #                  bit 2 (0x04) = output disabled
-                #                  bit 3 (0x08) = plugged in / line OK
-                #                  bit 4 (0x10) = no AC line detected
-                #                Combined (status, flags) tuples form a
-                #                clean charger state machine; engineering
-                #                V/I are only valid when status==0x03 AND
-                #                flags==0x00. Four ghost frames in
-                #                soc-100-idle.asc have status=0x03 with
-                #                flags=0x14 (no line) -- those are NOT
-                #                real charging frames.
-                #   bytes 5-7  = reserved padding (0x00 in all 3,108
-                #                frames; not the J1939 0xFF sentinel).
-                status = data[0]
-                v_raw = le16(data[1], data[2])
-                i_raw = le16(data[3], data[4])  # legacy 16-bit field;
-                # high byte (data[4]) is now known to be the flags byte,
-                # so this combination is meaningless when flags != 0x00.
-                # Kept for forward compatibility but the engineering
-                # current is computed from data[3] alone below.
-                flags = data[4]
-                emissions.append(("charger.status", status, ""))
-                emissions.append(("charger.v_raw", v_raw, ""))
-                emissions.append(("charger.i_raw", i_raw, ""))
-                emissions.append(("charger.flags", flags, ""))
-                emissions.append(
-                    ("charger.flag.output_disabled",
-                     1 if flags & 0x04 else 0, ""))
-                emissions.append(
-                    ("charger.flag.line_ok",
-                     1 if flags & 0x08 else 0, ""))
-                emissions.append(
-                    ("charger.flag.no_line",
-                     1 if flags & 0x10 else 0, ""))
-                # Engineering V/I are only meaningful while the charger
-                # is actively delivering power (status==0x03) AND the
-                # flags byte is clean (no "output disabled" / "no line"
-                # asserted). This excludes the 4 ghost frames in
-                # soc-100-idle.asc where status briefly reports 0x03 with
-                # flags==0x14 (no AC line).
-                # Mirror the F100F3 variant convention defensively: if
-                # status 0x02 is ever observed with a meaningful voltage,
-                # decode at the LO base.
-                if status in (0x02, 0x03) and flags == 0x00:
-                    offset = PACK_VOLTAGE_OFFSET_LO_V if status == 0x02 else CHARGER_V_OFFSET_V
-                    emissions.append(
-                        ("charger.voltage_v",
-                         round(v_raw * CHARGER_V_LSB_V + offset, 2),
-                         "v"))
-                    # Current is encoded in byte 3 alone (low byte u8 *
-                    # 0.1 A/bit), since byte 4 is the flags byte.
-                    emissions.append(
-                        ("charger.current_a",
-                         round(data[3] * CHARGER_I_LSB_A, 1), "a"))
-                sc["charger"] += 1
-
-            elif src == SRC_BMS_CHGR_IF and pgn == PGN_PROP_0600:
-                # BMS->Charger command frame (vendor proprietary PGN
-                # 0x000600, src 0xF4 -> dest 0xE5). Reverse-engineered
-                # by correlating contemporaneous F100 (pack V/I/SoC),
-                # FF50 (charger V/I/status), and F107 (BMS limits)
-                # across charging-120V-90ish-to-100.asc:
-                #   bytes 0-1 BE = voltage setpoint, 0.1 V/bit, no offset
-                #     (always 0x034E = 84.6 V during active requests --
-                #      4.23 V/cell * 20 cells, the NMC max charge V).
-                #   bytes 2-3 BE = current setpoint, 0.1 A/bit, no offset
-                #     (3.0..39.0 A across the charge; charger faithfully
-                #      tracks the request when within its delivery
-                #      capability and saturates near its power-limit
-                #      otherwise).
-                #   byte 4 = enable flag: 0x00 = command power output,
-                #            0x01 = idle / no request (charger drops to
-                #            status 0x00 within a few frames).
-                #   bytes 5-7 = padding 0xFF.
-                # Idle-only frames (00 00 00 00 01 FF FF FF) are
-                # suppressed to keep the CSV compact, the same way
-                # FF50 idle is handled.
-                v_set_raw = be16(data[0], data[1])
-                i_set_raw = be16(data[2], data[3])
-                enable = data[4]
-                idle_pattern = (v_set_raw == 0 and i_set_raw == 0
-                                and enable in (0, 1)
-                                and all(b == 0xFF for b in data[5:]))
-                if idle_pattern:
-                    if enable == 1:
-                        # Idle / no-request frame -- emit just the
-                        # enable flag so analyses can find idle periods,
-                        # but skip the V/I zeros to avoid noise.
-                        emissions.append(
-                            ("chgr_cmd.enable", enable, ""))
-                        sc.setdefault("chgr_cmd", 0)
-                        sc["chgr_cmd"] += 1
-                    else:
-                        # all-zero with enable=0 hasn't been observed;
-                        # treat as malformed and skip.
-                        sc["skipped_zero"] += 1
-                else:
-                    emissions.append(
-                        ("chgr_cmd.voltage_v",
-                         round(v_set_raw * 0.1, 1), "v"))
-                    emissions.append(
-                        ("chgr_cmd.current_a",
-                         round(i_set_raw * 0.1, 1), "a"))
-                    emissions.append(("chgr_cmd.enable", enable, ""))
-                    emissions.append(("chgr_cmd.v_raw", v_set_raw, ""))
-                    emissions.append(("chgr_cmd.i_raw", i_set_raw, ""))
-                    sc.setdefault("chgr_cmd", 0)
-                    sc["chgr_cmd"] += 1
+            if category == "parse_error":
+                # Malformed 29-bit ID; original analyze would have raised
+                # here. Silently drop instead -- not worth crashing the
+                # whole batch on a single bad frame.
+                continue
+            if category == "skipped_zero":
+                sc["skipped_zero"] += 1
+                continue
+            if category is not None:
+                sc.setdefault(category, 0)
+                sc[category] += 1
 
             if emissions:
+                _, pgn, src = parse_id(can_id)
+                ts = msg.timestamp
+                data = data_bytes(msg.data)
                 frame_index = len(frames)
                 frames.append((
                     frame_index, scenario, ts,

@@ -78,6 +78,7 @@ from solectrac_proto import (
     RPM_BIAS, LIMIT_CURRENT_LSB_A,
     BMS_FAULT_CODES_BYTE7, BMS_FAULT_CODES_BYTES_0_TO_6,
     parse_id, be16, le16, c_to_f,
+    decode as proto_decode,
 )
 
 
@@ -427,347 +428,174 @@ def primary_pack_v(state: State) -> Channel:
 
 # --- decoder ----------------------------------------------------------------
 
+import re
+
+# --- decoder routing -------------------------------------------------------
+
+# Canonical signal name (as emitted by solectrac_proto.decode) → State
+# attribute that owns the Channel. Unknown names are silently ignored so
+# stream is forward-compatible with signals analyze.py emits but stream
+# doesn't yet track (e.g. pack.current_raw, charger.flag.*).
+_NAME_TO_ATTR = {
+    # F100 / F102 pack-level scalars
+    "pack.voltage_v": "pack_v_terminal",
+    "pack.current_a": "pack_i_a",
+    "pack.power_w": "pack_power_w",
+    "pack.soc_pct": "bms_soc_pct",
+    "pack.v_estimate": "pack_v_est",
+    "pack.cell_max_mv": "max_cell_mv",
+    "pack.cell_min_mv": "min_cell_mv",
+    "pack.cell_spread_mv": "spread_mv",
+    "pack.cell_max_n": "max_cell_n",
+    "pack.cell_min_n": "min_cell_n",
+    # F104 temp summary
+    "pack.temp_max_c": "temp_max_c",
+    "pack.temp_min_c": "temp_min_c",
+    "pack.temp_max_n": "temp_max_n",
+    "pack.temp_min_n": "temp_min_n",
+    "pack.temp_spread_c": "temp_spread_c",
+    # F106 BMS state
+    "bms.state.byte0": "bms_state_byte0",
+    "bms.state.byte1": "bms_state_byte1",
+    "bms.state.output_enable": "bms_output_enable",
+    "bms.state.main_contactor": "bms_main_contactor",
+    "bms.state.operating": "bms_operating",
+    "bms.state.standby": "bms_standby",
+    "bms.state.charging": "bms_charging",
+    "bms.state.charger_present": "bms_charger_present",
+    "bms.state.drive_mode": "bms_drive_mode",
+    "bms.state.contactors": "bms_contactors",
+    # F107 BMS limits
+    "bms.limit.discharge_a": "limit_discharge_a",
+    "bms.limit.charge_a": "limit_charge_a",
+    "bms.limit.mode": "limit_mode",
+    # FF50 charger
+    "charger.status": "chgr_status",
+    "charger.flags": "chgr_flags",
+    "charger.voltage_v": "chgr_v",
+    "charger.current_a": "chgr_i",
+    # 0600 BMS→Charger command
+    "chgr_cmd.enable": "chgr_cmd_enable",
+    "chgr_cmd.voltage_v": "chgr_cmd_v_v",
+    "chgr_cmd.current_a": "chgr_cmd_i_a",
+    # Vehicle controller heartbeat
+    "vc.state": "vc_state_raw",
+    # FF21 motor telemetry
+    "motor.rpm_signed": "motor_rpm",
+    "motor.rpm_magnitude": "motor_rpm_mag",
+    "motor.direction": "motor_direction",
+    "motor.range_gear": "motor_range_gear",
+    "motor.throttle_raw": "motor_throttle",
+    "motor.controller_temp_c": "controller_temp_c",
+    "motor.motor_temp_c": "motor_temp_c",
+    # FF21 dashboard heartbeat
+    "dash.alive": "dash_alive",
+    # FECA DM1
+    "dm1.lamp.byte0": "dm1_lamp_byte",
+    "dm1.lamp.byte1": "dm1_flash_byte",
+    "dm1.dtc.spn": "dm1_spn",
+    "dm1.dtc.fmi": "dm1_fmi",
+    "dm1.dtc.cm": "dm1_cm",
+    "dm1.dtc.oc": "dm1_oc",
+}
+
+_CELL_NAME = re.compile(r"^cell\.(\d{2})\.voltage_v$")
+_TEMP_NAME = re.compile(r"^temp\.(\d{2})\.c$")
+_FAULT_BYTE_NAME = re.compile(r"^bms\.fault\.byte(\d)$")
+
+
 def decode(msg: "can.Message", state: State, now: float) -> None:
-    """Update state from a single CAN frame."""
+    """Update state from a single CAN frame.
+
+    The byte-level decode lives in solectrac_proto.decode(); this wrapper
+    routes emit(name, value, unit) calls to the matching State Channel
+    (with volts→mV conversion for cells), tracks derived state
+    (power_history + trapezoidal Wh integration on pack.power_w,
+    soc_history on pack.soc_pct), and dispatches clear(name) for the
+    state-machine signals (charger V/I outside the active window, DM1
+    idle, chgr_cmd idle).
+    """
     state.frames += 1
     state.last_frame_ts = now
-    if not getattr(msg, "is_extended_id", True):
-        return
-    try:
-        _, pgn, src = parse_id(msg.arbitration_id)
-    except Exception:
-        state.errors += 1
-        return
 
-    data = list(msg.data) + [0] * max(0, 8 - len(msg.data))
+    did_anything = False
 
-    if src == SRC_BMS:
-        if PGN_CELL_FIRST <= pgn <= PGN_CELL_LAST:
-            if all(b == 0 for b in data):
-                return
-            base = (pgn - PGN_CELL_FIRST) * 4
-            for slot in range(4):
-                idx = base + slot
-                if idx >= NUM_CELLS:
-                    continue
-                mv = be16(data[2 * slot], data[2 * slot + 1])
-                if mv == 0 or mv == 0xFFFF:
-                    continue
-                state.cells[idx].update(mv, now)
-            state.decoded += 1
-
-        elif PGN_TEMP_FIRST <= pgn <= PGN_TEMP_LAST:
-            if all(b == 0 for b in data):
-                return
-            base = (pgn - PGN_TEMP_FIRST) * 8
-            for slot, b in enumerate(data):
-                idx = base + slot
-                if idx >= NUM_TEMPS:
-                    continue
-                if b == 0 or b == 0xFF:
-                    continue
-                state.temps[idx].update(b - TEMP_OFFSET_C, now)
-            state.decoded += 1
-
-        elif pgn == PGN_F100:
-            if all(b == 0 for b in data):
-                return
-            # byte 0 selects voltage range: 0x03 = high (≥76.8 V), 0x02 = low (<76.8 V).
-            # byte 1 = pack terminal voltage (b * 0.1 + offset).
-            offset = PACK_VOLTAGE_OFFSET_LO_V if data[0] == 0x02 else PACK_VOLTAGE_OFFSET_HI_V
-            state.pack_v_terminal.update(
-                data[1] * PACK_VOLTAGE_LSB_V + offset, now
-            )
-            # bytes 2-3 BE = signed pack current (biased u16, 0.1 A/bit).
-            raw_i = be16(data[2], data[3])
-            state.pack_i_a.update(
-                (raw_i - PACK_CURRENT_BIAS_RAW) * PACK_CURRENT_LSB_A, now
-            )
-            # Derived: instantaneous pack power (V * I, signed; + draw /
-            # - charge). Integrate trapezoidally over the gap to the
-            # previous F100F3 frame for session Wh totals; gap > 5 s is
-            # treated as a bus dropout and skipped (we don't know what
-            # was happening in between). F100F3 publishes at ~10 Hz so
-            # the typical dt is ~100 ms.
-            volts = state.pack_v_terminal.value
-            amps = state.pack_i_a.value
-            if volts is not None and amps is not None:
-                power = volts * amps
-                state.pack_power_w.update(power, now)
-                state.power_history.append((now, power))
-                p_cutoff = now - POWER_HISTORY_S
-                while (state.power_history
-                       and state.power_history[0][0] < p_cutoff):
-                    state.power_history.popleft()
-                if (state.last_energy_ts is not None
-                        and state.last_energy_p is not None):
-                    dt = now - state.last_energy_ts
-                    if 0.0 < dt <= 5.0:
-                        p0, p1 = state.last_energy_p, power
-                        avg_pos = (max(p0, 0.0) + max(p1, 0.0)) / 2.0
-                        avg_neg = (min(p0, 0.0) + min(p1, 0.0)) / 2.0
-                        state.energy_wh_drawn += avg_pos * dt / 3600.0
-                        state.energy_wh_charged += -avg_neg * dt / 3600.0
-                state.last_energy_ts = now
-                state.last_energy_p = power
-            # byte 4 = BMS-published State-of-Charge. Calibrated from two
-            # direct screen readings: raw=202 at 80%, raw=227 at 90%;
-            # slope=0.4 intercept=-0.8. Saturates at 250 in soc-100-idle.asc.
-            state.bms_soc_pct.update(data[4] * 0.4 - 0.8, now)
-            # Sliding window of SOC samples for the time-to-full ETA.
-            state.soc_history.append((now, state.bms_soc_pct.value))
+    def emit(name, value, unit):
+        nonlocal did_anything
+        # Hot-path indexed names (per-cell, per-temp, per-fault-byte).
+        m = _CELL_NAME.match(name)
+        if m:
+            idx = int(m.group(1))
+            if idx < NUM_CELLS:
+                # Shared decoder emits volts; stream stores mV ints so the
+                # existing alert thresholds and display formatting work.
+                state.cells[idx].update(int(round(value * 1000)), now)
+                did_anything = True
+            return
+        m = _TEMP_NAME.match(name)
+        if m:
+            idx = int(m.group(1))
+            if idx < NUM_TEMPS:
+                state.temps[idx].update(int(value), now)
+                did_anything = True
+            return
+        m = _FAULT_BYTE_NAME.match(name)
+        if m:
+            state.fault_bytes[int(m.group(1))].update(int(value), now)
+            did_anything = True
+            return
+        # Static mapping covers everything else stream tracks. Unknown
+        # names (analyze-only signals like pack.current_raw, charger.flag.*,
+        # bms.fault.code_NNN) are silently ignored.
+        attr = _NAME_TO_ATTR.get(name)
+        if attr is None:
+            return
+        getattr(state, attr).update(value, now)
+        did_anything = True
+        # Derived state needs the just-updated value.
+        if name == "pack.power_w":
+            state.power_history.append((now, value))
+            p_cutoff = now - POWER_HISTORY_S
+            while (state.power_history
+                   and state.power_history[0][0] < p_cutoff):
+                state.power_history.popleft()
+            # Trapezoidal Wh integration over the gap to the previous
+            # F100F3 frame. Gap > 5 s is treated as a bus dropout and
+            # skipped (we don't know what was happening in between).
+            if (state.last_energy_ts is not None
+                    and state.last_energy_p is not None):
+                dt = now - state.last_energy_ts
+                if 0.0 < dt <= 5.0:
+                    p0, p1 = state.last_energy_p, value
+                    avg_pos = (max(p0, 0.0) + max(p1, 0.0)) / 2.0
+                    avg_neg = (min(p0, 0.0) + min(p1, 0.0)) / 2.0
+                    state.energy_wh_drawn += avg_pos * dt / 3600.0
+                    state.energy_wh_charged += -avg_neg * dt / 3600.0
+            state.last_energy_ts = now
+            state.last_energy_p = value
+        elif name == "pack.soc_pct":
+            state.soc_history.append((now, value))
             cutoff = now - SOC_ETA_HISTORY_S
             while (state.soc_history
                    and state.soc_history[0][0] < cutoff):
                 state.soc_history.popleft()
-            state.decoded += 1
 
-        elif pgn == PGN_F108:
-            # All zeros in healthy idle. Bytes 0..6 carry vendor codes
-            # 100..127 (2 bits per code). Byte 7 carries the system /
-            # maintenance code bitmap (1 bit per code). See
-            # active_bms_faults for the full decode.
-            for i in range(8):
-                state.fault_bytes[i].update(data[i], now)
-            state.decoded += 1
-
-        elif pgn == PGN_F102:
-            # F102 layout (corpus survey, 36,950 active frames):
-            #   bytes 0-1 BE = max cell mV
-            #   bytes 2-3 BE = min cell mV
-            #   byte 4       = max-cell channel (1-based, per BMS GUI)
-            #   byte 5       = min-cell channel (1-based, per BMS GUI)
-            #   byte 6       = 0x00 padding (constant across corpus)
-            #   byte 7       = cell spread mV (max - min, 1 mV/bit; matches
-            #                  the computed (max-min) in 36,950/36,950
-            #                  corpus frames -- previously called 'flags')
-            if all(b == 0 for b in data):
-                return
-            max_mv = be16(data[0], data[1])
-            min_mv = be16(data[2], data[3])
-            if max_mv == 0 or min_mv == 0:
-                return
-            state.max_cell_mv.update(max_mv, now)
-            state.min_cell_mv.update(min_mv, now)
-            state.spread_mv.update(max_mv - min_mv, now)
-            state.max_cell_n.update(data[4], now)
-            state.min_cell_n.update(data[5], now)
-            state.pack_v_est.update(
-                NUM_CELLS * (max_mv + min_mv) / 2.0 / 1000.0, now
-            )
-            state.decoded += 1
-
-        elif pgn == PGN_F104:
-            # Symmetric with F102 but for module temperatures. Layout
-            # cross-validated against per-channel temp.NN.c values from
-            # F155..F15E in every capture (see analyze.py for detail).
-            if all(b == 0 for b in data) or data[0] == 0xFF:
-                return
-            state.temp_max_c.update(data[0] - TEMP_OFFSET_C, now)
-            state.temp_min_c.update(data[1] - TEMP_OFFSET_C, now)
-            state.temp_max_n.update(data[2], now)
-            state.temp_min_n.update(data[3], now)
-            state.temp_spread_c.update(data[4], now)
-            state.decoded += 1
-
-        elif pgn == PGN_F106:
-            # BMS state. Across 36,955 frames in 30 captures only six
-            # (b0, b1) clusters appear (see analyze.py F106 block for
-            # full survey). Byte 0 is a top-level mode bitfield:
-            #   bit 0 = output_enable (drive/charge command active)
-            #   bit 2 = main_contactor closed
-            #   bit 6 = operating (power flowing)
-            #   bit 7 = standby (charger present, no main current)
-            # bits 6 and 7 are perfectly mutually exclusive across the
-            # corpus (operating vs standby).
-            # Byte 1 carries the secondary bitmap (charging / charger
-            # present / drive mode / contactors).
-            if all(b == 0 for b in data):
-                return
-            state.bms_state_byte0.update(data[0], now)
-            state.bms_state_byte1.update(data[1], now)
-            b0 = data[0]
-            state.bms_output_enable.update(1 if b0 & 0x01 else 0, now)
-            state.bms_main_contactor.update(1 if b0 & 0x04 else 0, now)
-            state.bms_operating.update(1 if b0 & 0x40 else 0, now)
-            state.bms_standby.update(1 if b0 & 0x80 else 0, now)
-            b1 = data[1]
-            state.bms_charging.update(1 if b1 & 0x08 else 0, now)
-            state.bms_charger_present.update(1 if b1 & 0x04 else 0, now)
-            state.bms_drive_mode.update(1 if b1 & 0x20 else 0, now)
-            state.bms_contactors.update(1 if b1 & 0x40 else 0, now)
-            state.decoded += 1
-
-        elif pgn == PGN_F107:
-            # BMS current limits, two BE u16 fields at 0.01 A/bit.
-            # Drive captures: 145.0 A discharge / 100.0 A charge.
-            # Charging captures: 100.0 A / 100.0 A.
-            # Byte 4 = mode flag (0=charging, 1=driving).
-            # Byte 5 = coarse-quantized pack-voltage echo. Across 5,326
-            # driving frames it tracks F100F3 V_pack at R^2=0.97 with
-            # V_pack ~= b5 * 0.2212 + 57.01 (~0.22 V/bit step); 0x00
-            # while charging; rare transients 0x4D/0x6B/0xA7 in init/
-            # teardown windows. Not surfaced separately here -- the
-            # full-precision pack voltage is already on state.pack_v.
-            if all(b == 0 for b in data):
-                return
-            i_dis = be16(data[0], data[1]) * LIMIT_CURRENT_LSB_A
-            i_chg = be16(data[2], data[3]) * LIMIT_CURRENT_LSB_A
-            state.limit_discharge_a.update(i_dis, now)
-            state.limit_charge_a.update(i_chg, now)
-            state.limit_mode.update(data[4], now)
-            state.decoded += 1
-
-    elif src == SRC_VEHICLE and pgn == PGN_F100:
-        # Minimal vehicle-controller heartbeat. Across 22,338 frames in
-        # 30 captures, byte 0 only ever takes 0x00 (init/transition,
-        # 19 frames) or 0x0C (ready, 22,319 frames); bytes 1..7 are
-        # always 0xFF (J1939 "not available" sentinel). The 0x00 burst
-        # leads BMS F106 mode transitions by ~0.5-1 s.
-        state.vc_state_raw.update(data[0], now)
-        state.decoded += 1
-
-    elif src == SRC_MOTOR and pgn == PGN_FF21:
-        # Layout (across 45,086 frames in 30 captures):
-        #   byte 0 = throttle pedal (raw 0..0xFF)
-        #   byte 1 = always 0x00 (reserved padding)
-        #   bytes 2-3 = RPM magnitude (LE u16, biased)
-        #   byte 4 = controller temp (J1939 +40 C offset, 0=absent)
-        #   byte 5 = motor temp     (J1939 +40 C offset, 0=absent)
-        #   byte 6 = always 0x00 (reserved padding)
-        #   byte 7 = packed (range_gear << 4) | direction
-        #            high nibble 0x0/0x1/0x2 = Range 1/2/3
-        #            low  nibble 0x0/0x4/0x8 = N / F / R
-        # bytes 2-3 little-endian, biased by 0x0C80, give RPM magnitude.
-        rpm_mag = ((data[3] << 8) | data[2]) - RPM_BIAS
-        # Low nibble of byte 7 = F/N/R lever; verified by drive-r-n-f.asc
-        # walking R->N->F (byte 7: 0x28->0x20->0x24). High nibble = range
-        # gear; verified by range-1-2-3.asc walking 1->2->3.
-        fnr = data[7] & 0x0F
-        if fnr == 0x4:
-            direction = 1            # forward
-        elif fnr == 0x8:
-            direction = -1           # reverse
-        else:
-            direction = 0            # neutral
-        range_gear = ((data[7] >> 4) & 0x0F) + 1
-        state.motor_rpm_mag.update(rpm_mag, now)
-        state.motor_rpm.update(direction * rpm_mag, now)
-        state.motor_direction.update(direction, now)
-        state.motor_range_gear.update(range_gear, now)
-        state.motor_throttle.update(data[0], now)
-        # bytes 4 and 5 are both J1939 +40 C-offset temperatures; byte 4
-        # is the main controller and byte 5 is the motor (per the
-        # cold-start ramp observed in ignition-without-charger-inserted.asc:
-        # byte 4 climbs 0->19 C while byte 5 stays at 13 C). Raw 0 means
-        # "not present" and is suppressed.
-        if data[4]:
-            state.controller_temp_c.update(data[4] - TEMP_OFFSET_C, now)
-        if data[5]:
-            state.motor_temp_c.update(data[5] - TEMP_OFFSET_C, now)
-        state.decoded += 1
-
-    elif src == SRC_DASH and pgn == PGN_FF21:
-        # Dashboard heartbeat from SA 0x12 (same PGN as motor telemetry,
-        # different sender). Byte 0 is a 0=booting / 1=alive flag broadcast
-        # at 10 Hz; bytes 1..7 are always zero.
-        state.dash_alive.update(data[0], now)
-        state.decoded += 1
-
-    elif src == SRC_MOTOR and pgn == PGN_FECA:
-        # SAE J1939-73 DM1: Active Diagnostic Trouble Codes from the
-        # motor ECU. Single-frame layout (no multi-frame BAM observed):
-        #   data[0]   lamp status   (4 lamps x 2 bits)
-        #   data[1]   flash status  (same lamp layout)
-        #   data[2-5] first DTC: SPN (19), FMI (5), CM (1), OC (7)
-        #   data[6-7] padding 0xFF
-        # Idle/healthy convention: 00 00 00 00 00 00 FF FF (every frame
-        # in our captures so far). Clear the channels on idle so the
-        # panel shows "no active fault" rather than the most recent
-        # historical fault.
-        lamp_byte = data[0]
-        flash_byte = data[1]
-        spn = (data[2]
-               | (data[3] << 8)
-               | (((data[4] >> 5) & 0x07) << 16))
-        fmi = data[4] & 0x1F
-        cm = (data[5] >> 7) & 0x01
-        oc = data[5] & 0x7F
-        if lamp_byte == 0 and flash_byte == 0 and spn == 0 and fmi == 0:
-            for ch in (state.dm1_lamp_byte, state.dm1_flash_byte,
-                       state.dm1_spn, state.dm1_fmi,
-                       state.dm1_cm, state.dm1_oc):
-                ch.clear()
-        else:
-            state.dm1_lamp_byte.update(lamp_byte, now)
-            state.dm1_flash_byte.update(flash_byte, now)
-            if spn != 0 or fmi != 0:
-                state.dm1_spn.update(spn, now)
-                state.dm1_fmi.update(fmi, now)
-                state.dm1_cm.update(cm, now)
-                state.dm1_oc.update(oc, now)
-            else:
-                state.dm1_spn.clear()
-                state.dm1_fmi.clear()
-                state.dm1_cm.clear()
-                state.dm1_oc.clear()
-        state.decoded += 1
-
-    elif src == SRC_CHARGER and pgn == PGN_FF50:
-        # FF50E5 (charger telemetry, 3,108 frames across 5 of 30 captures).
-        # Layout established by full-corpus survey:
-        #   byte 0   = status (0x00 idle, 0x01/0x02 handshake, 0x03 active)
-        #   bytes 1-2 LE = pack/output voltage (0.1 V/bit, +0 V offset)
-        #   byte 3   = output current (0.1 A/bit)
-        #   byte 4   = status-flags bitmap (NOT current high byte!):
-        #                bit 2 = output disabled
-        #                bit 3 = AC line OK
-        #                bit 4 = AC line not detected
-        #   bytes 5-7 = 0x00 padding (constant across all observed frames)
-        # Voltage/current are only physically meaningful while
-        # status == 0x03 AND flags == 0x00. Idle / handshake / faulted
-        # frames carry leftover values that decode to nonsense (e.g.
-        # byte 3 = 0x08 in idle would decode to 0.8 A even though no
-        # current flows). Only emit V/I in the clean active state; clear
-        # them otherwise so the TUI shows '---' instead of garbage.
-        if all(b == 0 for b in data):
+    def clear_chan(name):
+        nonlocal did_anything
+        attr = _NAME_TO_ATTR.get(name)
+        if attr is None:
             return
-        status = data[0]
-        flags = data[4]
-        state.chgr_status.update(status, now)
-        state.chgr_flags.update(flags, now)
-        # Mirror the F100F3 variant convention defensively: if status 0x02
-        # is ever observed with a meaningful voltage, decode at the LO base.
-        if status in (0x02, CHGR_STATUS_ACTIVE) and flags == 0x00:
-            v_raw = le16(data[1], data[2])
-            offset = PACK_VOLTAGE_OFFSET_LO_V if status == 0x02 else CHARGER_V_OFFSET_V
-            state.chgr_v.update(v_raw * CHARGER_V_LSB_V + offset, now)
-            state.chgr_i.update(data[3] * CHARGER_I_LSB_A, now)
-        else:
-            state.chgr_v.clear()
-            state.chgr_i.clear()
-        state.decoded += 1
+        getattr(state, attr).clear()
+        did_anything = True
 
-    elif src == SRC_BMS_CHGR_IF and pgn == PGN_PROP_0600:
-        # BMS->Charger command. Bytes 0-1 BE = V setpoint (0.1 V/bit, no
-        # offset, always 84.6 V during active requests), bytes 2-3 BE =
-        # I setpoint (0.1 A/bit), byte 4 = enable (0 = active, 1 = idle),
-        # bytes 5-7 padding 0xFF. Idle frame is 00 00 00 00 01 FF FF FF;
-        # when seen, clear V/I so the panel doesn't freeze on the last
-        # active setpoint.
-        v_set_raw = be16(data[0], data[1])
-        i_set_raw = be16(data[2], data[3])
-        enable = data[4]
-        idle_pattern = (v_set_raw == 0 and i_set_raw == 0
-                        and enable in (0, 1)
-                        and all(b == 0xFF for b in data[5:]))
-        state.chgr_cmd_enable.update(enable, now)
-        if idle_pattern:
-            state.chgr_cmd_v_v.clear()
-            state.chgr_cmd_i_a.clear()
-        else:
-            state.chgr_cmd_v_v.update(round(v_set_raw * 0.1, 1), now)
-            state.chgr_cmd_i_a.update(round(i_set_raw * 0.1, 1), now)
+    category = proto_decode(msg, emit, clear_chan)
+    if category == "parse_error":
+        state.errors += 1
+    elif did_anything:
+        # Counts any frame where we either updated or cleared a Channel.
+        # This covers F108-idle and DM1-idle frames (which the original
+        # incremented because they ran through the F108/DM1 branches) as
+        # well as ordinary signal-bearing frames.
         state.decoded += 1
 
 
