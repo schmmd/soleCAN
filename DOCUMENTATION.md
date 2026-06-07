@@ -458,22 +458,22 @@ Always read both bytes BE with the bias.
 
     SOC % = data[4] × 0.4 − 0.8
 
-Slope 10/25 = 0.4, intercept −0.8; four dashboard-screen anchors are
-exactly collinear:
+Slope 10/25 = 0.4, intercept −0.8; seven dashboard-screen anchors
+spanning 10 %–90 % are exactly collinear:
 
-| Dashboard | raw | Fit predicts |
-|-----------|-----|--------------|
-| 40 %      | 102 | 40.0 %       |
-| 70 %      | 177 | 70.0 %       |
-| 80 %      | 202 | 80.0 %       |
-| 90 %      | 227 | 90.0 %       |
+| Dashboard | raw     | Fit predicts |
+|-----------|---------|--------------|
+| 10 %      | 27 (0x1B)  | 10.0 %    |
+| 20 %      | 52 (0x34)  | 20.0 %    |
+| 30 %      | 77 (0x4D)  | 30.0 %    |
+| 40 %      | 102 (0x66) | 40.0 %    |
+| 70 %      | 177 (0xB1) | 70.0 %    |
+| 80 %      | 202 (0xCA) | 80.0 %    |
+| 90 %      | 227 (0xE3) | 90.0 %    |
 
-Raw saturates at 250 (= 99.2 %) at full charge. The 40 % anchor is
-independently cross-validated by integrating pack power through a
-13-minute heavy-load drive: raw fell 120 → 106 (5.6 % by fit) while
-∫V·I yielded 1180.6 Wh = 5.46 % of the 21.6 kWh nameplate — the SOC
-byte and the integrated energy agree within 0.14 % across a real
-drive cycle, self-consistent at the 40 %–47 % working range.
+Raw saturates at 250 (= 99.2 %) at full charge. Linearity holds
+through the full 10–90 % range — no curvature or breakpoint at the
+low end.
 
 **SOH candidate (data[5])** TENTATIVE. data[5] is 0xFA = 250 across
 every capture (42 captures, all BMS frames swept by
@@ -539,10 +539,10 @@ Layout matches the standard J1939 limits-frame template:
 
 | Bytes | Likely meaning                              | Observed                                                  |
 |-------|---------------------------------------------|-----------------------------------------------------------|
-| 0..1  | Discharge current limit, 0.01 A/bit         | 0x38A4 (145.0 A) driving / 0x2710 (100.0 A) charging      |
+| 0..1  | Discharge current limit, 0.01 A/bit         | 0x38A4 (145.0 A) or 0x2710 (100.0 A) — see below          |
 | 2..3  | Charge current limit, 0.01 A/bit            | 0x2710 (100.0 A) typically; 0x3070 (124.0 A) seen driving |
-| 4     | Mode flag — CONFIRMED                       | 0x00 charging / 0x01 driving                              |
-| 5     | Pack-voltage echo (non-linear, banded)      | 0x00 charging / banded values during driving (see below)  |
+| 4     | Companion flag to bytes 0..1                | 0x01 paired with 145.0 A; 0x00 paired with 100.0 A         |
+| 5     | Pack-voltage echo (non-linear, banded)      | Live banded values when byte 4 = 0x01; 0x00 when byte 4 = 0x00 (see below) |
 | 6..7  | (unknown)                                   | 0x0000                                                    |
 
 Bytes 0..1 stay pinned at 145.0 A throughout drive captures even when
@@ -554,6 +554,40 @@ protection living on separate voltage-sag and temperature thresholds.
 Bytes 2..3 are not always 0x2710 as previously noted; at least one
 driving capture shows 0x3070 (124.0 A), so the slot does carry
 meaningful values rather than being a permanent sentinel.
+
+**Two F107F3 patterns.** The whole frame snaps between exactly two stable
+shapes:
+
+| Pattern                            | Bytes 0..1 | Byte 4 | Byte 5 |
+|------------------------------------|------------|--------|--------|
+| `27 10 27 10 00 00 00 00`          | 100.0 A    | 0x00   | 0x00   |
+| `38 A4 30 70 01 XX 00 YY`          | 145.0 A    | 0x01   | banded |
+
+Byte 4 and byte 5 are not independent state bits — they move in
+lockstep with bytes 0..1. The `27 10` pattern is the BMS's
+default/zeroed broadcast and shows up in several distinct contexts:
+
+- **Key-on boot ramp** (~1.5 s): `27 10 27 10 00 00 00 00` → intermediate
+  steps (`2E E0 27 D8 00 8D 00 0E`, `36 B0 28 A0 01 19 00 1C`) →
+  settled `38 A4 30 70 01 XX 00 YY`.
+- **Key-off / R1 N transition**: snaps back to `27 10` and stays there
+  through shutdown.
+- **Active AC charging**: persistent `27 10` throughout.
+- **Persistent low-SOC limp** when SOC drops below 10 %. Motor RPM
+  clipped at ~1380 (vs ~2800 at full power in high gear) and throttle
+  (FF21CA data[0]) topped out at 0x8B (54 % of full scale) before the
+  pedal stopped delivering more — the Curtis MC obeys the announced
+  discharge ceiling.
+- **Brief mid-drive transients** at low SOC: drives at SOC 10–14 %
+  show sporadic ~2 s excursions to the `27 10` pattern with no
+  abnormal current or voltage in F100F3 at the moment of the dip.
+
+The sustained 100.0 A clamp is a **separate threshold** from the F108
+code 101 (SOC ≤ 15 %) and code 140 fault bits: a continuous ~15-minute
+drive from 14 % down to exactly 10 % held codes 101 + 140 on F108F3
+throughout without F107F3 sustaining the clamp (only the brief
+transients above), while a drive that crossed below 10 % held the
+clamp continuously.
 
 Byte 5 is a pack-voltage echo with a non-linear, banded encoding. Across 5,921
 driving frames in 24 captures, b5 deterministically predicts F100F3 V_pack:
@@ -615,7 +649,7 @@ as the code on).
 | Bit | Mask | Code | Meaning                                       |
 |-----|------|------|-----------------------------------------------|
 | 0   | 0x01 | 140  | System fault level                            |
-| 1   | 0x02 | —    | (silent)                                      |
+| 1   | 0x02 | —    | No dashboard code under injection, but fires organically alongside code 140 during the low-SOC 100.0 A F107F3 state — most likely a hidden "torque-reduced" status flag the dashboard doesn't render |
 | 2   | 0x04 | —    | (silent)                                      |
 | 3   | 0x08 | 142  | BMS fault need maintenance                    |
 | 4   | 0x10 | 143  | Battery fault need maintenance                |
@@ -1201,11 +1235,6 @@ Code 51 is listed out of numeric order in the manual.
   been seen nonzero. Single-code captures would replicate the
   popcount-matches-displayed argument that nailed byte 7
   unambiguously.
-- **SOC linearity below 80 %.** F100F3 data[4] is calibrated against
-  two direct screen readings at 80 % and 90 %, both still in the top
-  ~20 % of the range. A sustained discharge capture down to a lower
-  known SOC would confirm whether the field is truly linear or only
-  locally linear near full.
 - **SOH confirmation.** F100F3 data[5] = 0xFA (250 raw × 0.4 %/bit =
   100 %) is the leading candidate — the only byte across 42 captures
   that is both constant everywhere and decodes to 100 % under a
