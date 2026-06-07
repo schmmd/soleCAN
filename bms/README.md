@@ -191,8 +191,8 @@ column in the iBMS System-state CSV.
 | 9      | u8      | Pack-current state code (mirrors `0x2800` byte 10; 99.9 % match): **50 = discharging, 51 = idle/transient, 52 = active charging** — TENTATIVE |
 | 10     | u8      | `0x00` padding                                        |
 | 11     | u8      | `0x1E` constant (struct version tag)                  |
-| 12..15 | BE u32  | Accumulated charge capacity, **raw u32 = lifetime Ah** (one LSB per Ah delivered) — TENTATIVE. The wire format may nominally be × 0.01 Ah resolution but the firmware updates the counter in whole-Ah steps: integrating signed pack current across a multi-hour L1 charge matches Δraw within <1 % at the × 1 Ah scale, ~100× off at × 0.01 Ah. |
-| 16..19 | BE u32  | Accumulated discharge capacity, same scale convention as bytes 12..15 (TENTATIVE — only cross-checked on the charge side; needs a long drive capture to confirm independently). |
+| 12..15 | BE u32  | Accumulated charge capacity, **raw u32 = lifetime Ah** (one LSB per Ah delivered) — CONFIRMED. Cross-checked across a 13.9 h L1 charge (10 → 99 % SOC): integrating signed pack current from `0x2800` yields 269 Ah delivered; counter advanced raw 7763 → 8032 (+269). Match at × 1 Ah scale is <1 %; the documented × 0.01 Ah scale would have moved ~26,900 LSBs. The wire format may nominally be × 0.01 Ah resolution but the firmware quantizes to whole-Ah steps. |
+| 16..19 | BE u32  | Accumulated discharge capacity, same scale convention as bytes 12..15 — TENTATIVE on the discharge side only (cross-check on the charge side is solid; same field on the discharge counter held flat at 8082 Ah lifetime during the charge session, so a long drive capture is still needed to independently verify the discharge scale). |
 
 ### `0x4000` — active-session status (UDAN `0x87` mapping QUESTIONED)
 
@@ -375,13 +375,47 @@ those as live temps gives plausible-looking but spurious 17–21 °C
 readings even when ambient is 15 °C. The decoder gates on byte 0 and
 returns an empty list when count is zero.
 
+### Battery config — DID `0x0100` (CONFIRMED layout, partial field names)
+
+35-byte static payload, read once per session. Defines the pack's nameplate
+ratings and topology. Sample from `dual-capture-charging-120-10p-to-100p.asc`:
+
+```
+06 0B B8 13 88 02 D0 05 DC 01 A0 00 14 00 14 00 07
+01 F4 03 E8 00 00 00 00 10 CC 0A 8C 00 71 00 00 13 88
+```
+
+Dashboard currently decodes only the first 21 bytes:
+
+| Offset | Type    | Value (this pack) | Field                                        | Status |
+|--------|---------|-------------------|----------------------------------------------|--------|
+| 0      | u8      | `0x06`            | Chemistry enum (LFP candidate)                | TENT   |
+| 1..2   | BE u16  | 3000 → 300.0 Ah   | Rated capacity (× 0.1 Ah)                     | CONFIRMED |
+| 3..4   | BE u16  | 5000 → 500.0 A    | Rated current (× 0.1 A)                       | TENT   |
+| 5..6   | BE u16  | 720 → 72.0 V      | Rated voltage (× 0.1 V) — 20 cells × 3.6 V nominal | CONFIRMED |
+| 7..8   | BE u16  | 1500 → 150.0      | Field@7 (×0.1)                                | TENT   |
+| 9..10  | BE u16  | 416 → 41.6        | Field@9 (×0.1)                                | TENT   |
+| 11..12 | BE u16  | 20                | Series cell count — matches `0x0101` length / 2 | CONFIRMED |
+| 13..14 | BE u16  | 20                | Field@13 — value equals series count, **does not fit "parallel strings"** (capacity math implies parallel = 1; see below) | TENT |
+| 15..16 | BE u16  | 7                 | NTC probe count — matches `0x0102` length and `0x0205` map | CONFIRMED |
+| 17..18 | BE u16  | 500 → 50.0        | Field@17 (×0.1)                               | TENT   |
+| 19..20 | BE u16  | 1000 → 100.0 %    | Initial SOC (× 0.1 %) candidate                | TENT   |
+| 21..34 | 14 B    | (see hex above)   | Unmapped tail; currently ignored by dashboard  | UNKNOWN |
+
+Capacity cross-check: a 13.9 h L1 charge delivered 269 Ah for a 10.2 → 99.0 %
+SOC sweep (88.8 %), implying pack capacity ≈ 303 Ah. That matches 300 Ah rated
+× 1 parallel within 1 %, so the pack is **20S1P** with ~300 Ah cells.
+Consequently the field at bytes 13..14 (reading 20) cannot be a parallel-string
+count — it duplicates the series-count value and the actual field meaning is
+unknown.
+
 ### DIDs observed but not yet identified
 
 These are polled by the iBMS but not yet mapped to a known UDAN message:
 
 | Range                                                  | Notes |
 |--------------------------------------------------------|-------|
-| `0x0100`, `0x0103`–`0x0105`                            | `0x0100` is constant config (thresholds); others mostly empty |
+| `0x0103`–`0x0105`                                      | Mostly empty; `0x0100` decoded above |
 | `0x0200`, `0x0201`, `0x0203`, `0x0204`, `0x0206`–`0x020B` | Mostly empty; `0x0202` and `0x0205` decoded above |
 | `0x0620`, `0x0621`, `0x0648`                           | Mostly-empty sub-block, UNKNOWN |
 | `0x0641`–`0x0647`                                      | Per-channel 1-byte values (7 total), UNKNOWN |

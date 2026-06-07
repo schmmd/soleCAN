@@ -1374,12 +1374,15 @@ function renderCharging(c) {
   let measHtml;
   if (!m || m.length < 28) measHtml = `<div class="sub">${dash}</div>`;
   else {
-    const v1 = beU16(m, 0) / 100;
-    const v2 = beU16(m, 4) / 100;
+    // Bytes 0..1 and 4..5: stable at ~13.2 V across 14 h L1 charge
+    // (r ≈ 0.09 vs pack V), so the ÷100 = 132 V interpretation is wrong.
+    // ÷1000 fits a 12 V rail; specific rail (BMU vs aux) unconfirmed.
+    const v1 = beU16(m, 0) / 1000;
+    const v2 = beU16(m, 4) / 1000;
     const ccSentinel = m.slice(20, 28).toUpperCase() === 'FFFFFFFF';
     measHtml = `<table>
-      ${row('V@0 (÷100) <span class="tent">TENT.</span>', fmtNum(v1, 2, 'V'))}
-      ${row('V@4 (÷100) <span class="tent">TENT.</span>', fmtNum(v2, 2, 'V'))}
+      ${row('Field@0 (÷1000) <span class="tent">TENT.</span>', fmtNum(v1, 3, 'V'))}
+      ${row('Field@4 (÷1000) <span class="tent">TENT.</span>', fmtNum(v2, 3, 'V'))}
       ${row('CC / CC2 Resistance', ccSentinel
           ? '<span class="badge">sentinel (disconnected)</span>'
           : `<span class="hex">${m.slice(20, 28).match(/.{2}/g).join(' ')}</span>`)}
@@ -1522,7 +1525,7 @@ function renderIdentity(id) {
       ${row('Field@7 <span class="tent">TENT.</span>', f7)}
       ${row('Field@9 <span class="tent">TENT.</span>', f9)}
       ${row('Series count', series)}
-      ${row('Parallel <span class="tent">TENT.</span>', par)}
+      ${row('Field@13 <span class="tent">TENT.</span>', par)}
       ${row('NTC count', ntc)}
       ${row('Field@17 <span class="tent">TENT.</span>', f17)}
       ${row('Initial SOC <span class="tent">TENT.</span>', isoc)}
