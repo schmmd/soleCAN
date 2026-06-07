@@ -26,7 +26,7 @@ Usage:
         --channel /dev/tty.usbmodem1101
     ./solectrac-bms-diagnostics.py --replay data/bms/bms-screenshots.asc
     ./solectrac-bms-diagnostics.py --replay data/bms/bms-screenshots.asc \\
-        --replay-speed 5 --no-loop
+        --replay-speed 5 --loop
     ./solectrac-bms-diagnostics.py --output session.asc          # record bus
 
 Then open http://127.0.0.1:8000/ (or pass --open to launch the browser).
@@ -295,11 +295,14 @@ class LiveTransport:
 
 
 class ReplayTransport:
-    """Replays UDS responses extracted from a previously captured log.
+    """Replays UDS responses streamed from a previously captured log.
 
-    Time progresses with wall clock (scaled by ``speed``). Each ``read_did``
-    returns the most recent response for that DID with capture-time
-    ``ts <= now``. The transport never touches a CAN bus.
+    A background thread walks the capture file in order, pacing each frame to
+    its capture timestamp (scaled by ``speed``), reassembles ISO-TP responses
+    on the fly, and keeps the latest payload per DID. ``read_did`` returns
+    whatever has been delivered so far — DIDs that haven't streamed in yet
+    raise ``UdsError`` (handled per-DID by the poller, same as a live bus
+    that hasn't answered yet). The transport never touches a CAN bus.
     """
 
     def __init__(
@@ -311,104 +314,93 @@ class ReplayTransport:
         loop: bool = True,
     ):
         self.path = path
+        self.req_id = req_id
+        self.resp_id = resp_id
         self.speed = speed
         self.loop = loop
-        self.responses, self.first_ts, self.last_ts = self._load(path, req_id, resp_id)
-        if not self.responses:
-            raise SystemExit(
-                f"replay: no UDS responses extracted from {path!r} "
-                f"(expected request id 0x{req_id:03X} / response id 0x{resp_id:03X})"
-            )
-        self.wall_start = time.monotonic()
+        self._latest: dict[int, bytes] = {}
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._first_ts: Optional[float] = None
+        self._last_ts: Optional[float] = None
+        self._eof = False
+        self._thread = threading.Thread(
+            target=self._run, name="bms-replay", daemon=True
+        )
+        self._thread.start()
 
-    @staticmethod
-    def _load(path: str, req_id: int, resp_id: int):
-        try:
-            reader = can.LogReader(path)
-        except Exception as e:
-            raise SystemExit(f"replay: failed to open {path!r}: {e}") from e
-        req_frames = []
-        resp_frames = []
-        for msg in reader:
-            if msg.is_extended_id:
-                continue
-            data = bytes(msg.data)
-            if msg.arbitration_id == req_id:
-                req_frames.append((msg.timestamp, data))
-            elif msg.arbitration_id == resp_id:
-                resp_frames.append((msg.timestamp, data))
+    def _run(self):
+        while not self._stop.is_set():
+            try:
+                reader = can.LogReader(self.path)
+            except Exception as e:
+                print(f"replay: failed to open {self.path!r}: {e}", file=sys.stderr)
+                return
+            wall_start = time.monotonic()
+            cap_start: Optional[float] = None
 
-        reqs = list(iso_tp_assemble(req_frames))
-        resps = list(iso_tp_assemble(resp_frames))
+            def frames():
+                nonlocal cap_start
+                for msg in reader:
+                    if self._stop.is_set():
+                        return
+                    if msg.is_extended_id or msg.arbitration_id != self.resp_id:
+                        continue
+                    ts = msg.timestamp
+                    if cap_start is None:
+                        cap_start = ts
+                        with self._lock:
+                            if self._first_ts is None:
+                                self._first_ts = ts
+                    target = wall_start + (ts - cap_start) / self.speed
+                    now = time.monotonic()
+                    if target > now and self._stop.wait(target - now):
+                        return
+                    with self._lock:
+                        self._last_ts = ts
+                    yield ts, bytes(msg.data)
 
-        # Match each ReadDID request to the next response with ts >= req_ts.
-        responses_by_did: dict = {}
-        rj = 0
-        for ts, req_payload in reqs:
-            if len(req_payload) < 3 or req_payload[0] != 0x22:
-                continue
-            did = (req_payload[1] << 8) | req_payload[2]
-            while rj < len(resps) and resps[rj][0] < ts:
-                rj += 1
-            if rj >= len(resps):
-                break
-            r_ts, r_payload = resps[rj]
-            rj += 1
-            if (
-                len(r_payload) < 3
-                or r_payload[0] != 0x62
-                or ((r_payload[1] << 8) | r_payload[2]) != did
-            ):
-                continue
-            responses_by_did.setdefault(did, []).append((r_ts, r_payload[3:]))
+            for _ts, payload in iso_tp_assemble(frames()):
+                if len(payload) < 3 or payload[0] != 0x62:
+                    continue
+                did = (payload[1] << 8) | payload[2]
+                with self._lock:
+                    self._latest[did] = payload[3:]
 
-        if not responses_by_did:
-            return {}, 0.0, 0.0
-        first = min(lst[0][0] for lst in responses_by_did.values())
-        last = max(lst[-1][0] for lst in responses_by_did.values())
-        return responses_by_did, first, last
-
-    @property
-    def duration(self) -> float:
-        return max(self.last_ts - self.first_ts, 0.001)
-
-    @property
-    def virtual_time(self) -> float:
-        elapsed = (time.monotonic() - self.wall_start) * self.speed
-        if self.loop:
-            elapsed %= self.duration
-        elif elapsed > self.duration:
-            elapsed = self.duration
-        return self.first_ts + elapsed
+            if not self.loop:
+                self._eof = True
+                return
 
     def drain(self):
         pass
 
     def read_did(self, did: int) -> bytes:
-        series = self.responses.get(did)
-        if not series:
-            raise UdsError(f"no captured response for DID 0x{did:04X}")
-        t = self.virtual_time
-        latest = None
-        for ts, data in series:
-            if ts <= t:
-                latest = data
-            else:
-                break
-        return latest if latest is not None else series[0][1]
+        with self._lock:
+            data = self._latest.get(did)
+        if data is None:
+            raise UdsError(f"no captured response yet for DID 0x{did:04X}")
+        return data
 
     def describe(self) -> str:
-        elapsed = self.virtual_time - self.first_ts
-        flag = " loop" if self.loop else ""
+        with self._lock:
+            first = self._first_ts
+            last = self._last_ts
+            n = len(self._latest)
         speed = "" if self.speed == 1.0 else f" ×{self.speed:g}"
+        flag = " loop" if self.loop else ""
+        if self._eof:
+            flag += " eof"
+        if first is None:
+            return f"replay {os.path.basename(self.path)} starting…{speed}{flag}"
+        elapsed = (last if last is not None else first) - first
         return (
             f"replay {os.path.basename(self.path)} "
-            f"t={elapsed:5.1f}/{self.duration:.1f}s{speed}{flag} "
-            f"({len(self.responses)} DIDs)"
+            f"t={elapsed:5.1f}s{speed}{flag} "
+            f"({n} DIDs)"
         )
 
     def close(self):
-        pass
+        self._stop.set()
 
 
 # ---------------------------------------------------------------------------
@@ -923,7 +915,7 @@ def open_transport(args):
         if args.output:
             raise SystemExit("--output cannot be combined with --replay")
         return ReplayTransport(
-            args.replay, speed=args.replay_speed, loop=not args.no_loop
+            args.replay, speed=args.replay_speed, loop=args.loop
         )
     kwargs = dict(interface=args.interface, channel=args.channel, bitrate=BITRATE)
     if args.host:
@@ -1661,8 +1653,9 @@ def main():
                         "(.asc, .blf, .log, .trc, ...) instead of opening a bus")
     p.add_argument("--replay-speed", type=float, default=1.0,
                    help="replay time scale (default: 1.0 = real time)")
-    p.add_argument("--no-loop", action="store_true",
-                   help="stop at end of replay capture instead of looping")
+    p.add_argument("--loop", action="store_true",
+                   help="restart replay from the beginning at EOF "
+                        "(default: stop at end of capture)")
     # HTTP server
     p.add_argument("--bind", default="127.0.0.1",
                    help="HTTP bind address (default: 127.0.0.1)")
