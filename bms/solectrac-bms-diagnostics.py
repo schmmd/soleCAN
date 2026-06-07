@@ -432,7 +432,9 @@ class BmsState:
     pack_v: Optional[float] = None
     pack_a: Optional[float] = None
     cell_spread_mv: Optional[int] = None    # 0x2800 byte 9 — mirrored by 0x2810 byte 8
-    state_extra: tuple = ()                 # 0x2800 bytes 8, 10 (UNKNOWN)
+    state_extra: tuple = ()                 # 0x2800 bytes 8, 10 (byte 8 padding)
+    state_code: Optional[int] = None        # 0x2800 byte 10 raw
+    state_name: Optional[str] = None        # decoded: charging / idle / discharging
 
     # Counters
     lifetime_counter: Optional[int] = None
@@ -536,6 +538,8 @@ class BmsState:
                 "avg_cell_mv": self.avg_cell_mv,
                 "avg_cell_temp_c": self.avg_cell_temp_c,
                 "state_extra": list(self.state_extra),
+                "state_code": self.state_code,
+                "state_name": self.state_name,
                 "cell_count": self.cell_count,
                 "cycle_count": self.cycle_count,
                 "charge_ah": self.charge_ah,
@@ -605,6 +609,9 @@ def _be_u32(data: bytes, off: int) -> int:
     return (data[off] << 24) | (data[off + 1] << 16) | (data[off + 2] << 8) | data[off + 3]
 
 
+STATE_CODE_NAMES = {50: "discharging", 51: "idle", 52: "charging"}
+
+
 def decode_pack_state(data: bytes, st: BmsState):
     # 0x2800 — 12 data bytes:
     #   0..1  BE u16  Real SOC × 10 (%)
@@ -614,10 +621,9 @@ def decode_pack_state(data: bytes, st: BmsState):
     #                 negative = discharging (opposite of F100F3 J1939)
     #   8     u8      0x00 padding
     #   9     u8      cell-mV spread (max − min); r ≈ 0.83 vs 0x2820/0x2828
-    #   10    u8      Pack-current state code (TENTATIVE): 50 = discharge,
-    #                 51 = idle / charging, 52 = brief rare. Mirrored 99.9%
-    #                 by 0x2810 byte 9. NOT WakeupSignal (stays at 51 across
-    #                 an entire 120 V charging session).
+    #   10    u8      Pack-current state code (TENTATIVE): 50 = discharging,
+    #                 51 = idle / brief transient, 52 = actively charging.
+    #                 Mirrored 99.9 % by 0x2810 byte 9.
     #   11    u8      0x06 constant (struct version tag)
     if len(data) < 12:
         return
@@ -627,6 +633,8 @@ def decode_pack_state(data: bytes, st: BmsState):
     st.pack_a = _be_i16(data, 6) / 10.0
     st.cell_spread_mv = data[9]
     st.state_extra = (data[8], data[10])
+    st.state_code = data[10]
+    st.state_name = STATE_CODE_NAMES.get(data[10], f"unknown({data[10]})")
 
 
 def decode_times(data: bytes, st: BmsState):
@@ -647,11 +655,11 @@ def decode_energy(data: bytes, st: BmsState):
     #   6      u8      average cell temperature (°C = raw − 50)
     #   7      u8      0x00 padding
     #   8      u8      cell-mV spread (mirrors 0x2800 byte 9)
-    #   9      u8      UNKNOWN, slow 50..52 (mirrors 0x2800 byte 10)
+    #   9      u8      pack-current state code (mirrors 0x2800 byte 10)
     #   10     u8      0x00 padding
     #   11     u8      0x1E constant (struct version tag)
-    #   12..15 BE u32  accumulated charge × 0.01 Ah
-    #   16..19 BE u32  accumulated discharge × 0.01 Ah
+    #   12..15 BE u32  accumulated charge Ah (lifetime; 1 LSB ≈ 1 Ah)
+    #   16..19 BE u32  accumulated discharge Ah (same scale convention)
     if len(data) < 20:
         return
     st.cell_count = _be_u16(data, 0)
@@ -660,8 +668,8 @@ def decode_energy(data: bytes, st: BmsState):
     st.avg_cell_temp_c = data[6] - 50
     if st.cell_spread_mv is None:
         st.cell_spread_mv = data[8]
-    st.charge_ah = _be_u32(data, 12) * 0.01
-    st.discharge_ah = _be_u32(data, 16) * 0.01
+    st.charge_ah = float(_be_u32(data, 12))
+    st.discharge_ah = float(_be_u32(data, 16))
 
 
 def decode_cells(data: bytes, st: BmsState):
@@ -1108,18 +1116,18 @@ HTML_PAGE = r"""<!DOCTYPE html>
   </section>
 
   <section id="charging">
-    <h2>Charging cluster <span class="tent">TENTATIVE layout</span></h2>
+    <h2>Charging cluster</h2>
     <div class="grid cols-3">
       <div class="panel">
         <h3>0x0900 flags</h3>
         <div id="ch-flags"></div>
       </div>
       <div class="panel">
-        <h3>0x0901 measurements</h3>
+        <h3>0x0901 measurements <span class="tent">head u16s TENT.</span></h3>
         <div id="ch-meas"></div>
       </div>
       <div class="panel">
-        <h3>0x0902 fault / state</h3>
+        <h3>0x0902 unused / zero</h3>
         <div id="ch-state"></div>
       </div>
     </div>
@@ -1238,19 +1246,27 @@ function row(label, value) {
 
 function renderOverview(s) {
   const p = s.pack;
+  // Sign convention: 0x2800 reports positive = charging into pack.
+  // Power: pack_v × pack_a, signed (positive while charging).
+  const powerW = (p.pack_v != null && p.pack_a != null)
+    ? p.pack_v * p.pack_a : null;
+  const stateLabel = p.state_name
+    ? `<span class="badge ${p.state_name === 'charging' ? 'ok'
+          : p.state_name === 'discharging' ? 'warn' : ''}">${p.state_name}</span>`
+    : dash;
   $('ov-bignums').innerHTML = [
-    bigNum('SOC', fmtNum(p.soc_pct, 1), '%'),
+    bigNum('SOC', fmtNum(p.soc_pct, 1), '%', stateLabel),
     bigNum('SOH', fmtNum(p.soh_pct, 1), '%'),
     bigNum('Pack voltage', fmtNum(p.pack_v, 1), 'V'),
     bigNum('Pack current', fmtNum(p.pack_a, 1), 'A',
-           '<span class="tent">TENTATIVE</span>'),
+           powerW != null ? `${(powerW >= 0 ? '+' : '')}${powerW.toFixed(0)} W` : ''),
   ].join('');
 
   $('ov-counters').innerHTML = [
     row('Cells', fmtInt(p.cell_count)),
     row('Cycles', fmtInt(p.cycle_count)),
-    row('Charged', fmtNum(p.charge_ah, 2, 'Ah')),
-    row('Discharged', fmtNum(p.discharge_ah, 2, 'Ah')),
+    row('Charged (lifetime)', fmtNum(p.charge_ah, 0, 'Ah')),
+    row('Discharged (lifetime)', fmtNum(p.discharge_ah, 0, 'Ah')),
     row('Session uptime', fmtDur(p.session_uptime_s)),
     row('Charge time (Σ)', fmtDur(p.charge_time_s)),
     row('Discharge time (Σ)', fmtDur(p.discharge_time_s)),

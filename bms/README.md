@@ -140,7 +140,7 @@ Sample `0x0102` payload: `41 41 41 41 40 41 41` → ~22 °C across 7 probes.
 | 6..7   | BE i16  | Signed pack current × 10 (A). **Positive = charging into pack, negative = discharging** — opposite sign convention from J1939 `F100F3` data[2..3] | `0xFFED` = −1.9 A (idle standby draw); +194 (`0x00C2`) during 120 V charging |
 | 8      | u8      | `0x00` padding                       | constant        |
 | 9      | u8      | Cell-mV spread (max − min)           | 4–15 mV; r ≈ 0.83 vs `0x2820`/`0x2828`; exact match ≈ 76 % of the time (small skew from staggered polls) |
-| 10     | u8      | Pack-current state code — TENTATIVE. Three observed values: **51 = charge / idle**, **50 = discharge**, **52 = brief (rare, idle only)**. Hypothesis: a quantized current-direction state. **Not** `WakeupSignal`: an enum that latches the wake source on sleep→wake transition should be constant for the entire awake session, but byte 10 **varies within single wake sessions** — both observed drive captures (KL15-woken throughout) show byte 10 mixing 50 and 51 (e.g. 108×50 + 36×51 in a 216 s session). Mirrored 99.9 % by `0x2810` byte 9. Also rules out max-temp raw (r = 0.0 vs `0x2830` top-1) | discharge → mostly 50; idle/charge → mostly 51 |
+| 10     | u8      | Pack-current state code — TENTATIVE. Three observed values: **50 = discharging (drive)**, **51 = idle / brief transient**, **52 = actively charging**. Drive captures are dominated by 50 with 51 between current bursts; a multi-hour L1 charge is dominated by 52 (~87 %), 51 the remainder. Mirrored 99.9 % by `0x2810` byte 9. Also rules out max-temp raw (r = 0.0 vs `0x2830` top-1) | charging → mostly 52; discharge → mostly 50; idle → mostly 51 |
 | 11     | u8      | `0x06` constant (struct version tag) | constant        |
 
 ### Peak data — DID cluster `0x2820`/`0x2828`/`0x2830`/`0x2838` (UDAN `0x06`)
@@ -188,11 +188,11 @@ column in the iBMS System-state CSV.
 | 6      | u8      | Average cell temperature (°C = raw − 50) — matches round(mean(`0x0102`)) ≥99 % |
 | 7      | u8      | `0x00` padding                                        |
 | 8      | u8      | Cell-mV spread (mirrors `0x2800` byte 9)              |
-| 9      | u8      | UNKNOWN, slow 50..52 (mirrors `0x2800` byte 10; 99.9 % match) |
+| 9      | u8      | Pack-current state code (mirrors `0x2800` byte 10; 99.9 % match): **50 = discharging, 51 = idle/transient, 52 = active charging** — TENTATIVE |
 | 10     | u8      | `0x00` padding                                        |
 | 11     | u8      | `0x1E` constant (struct version tag)                  |
-| 12..15 | BE u32  | Accumulated charge capacity × 0.01 Ah                 |
-| 16..19 | BE u32  | Accumulated discharge capacity × 0.01 Ah              |
+| 12..15 | BE u32  | Accumulated charge capacity, **raw u32 = lifetime Ah** (one LSB per Ah delivered) — TENTATIVE. The wire format may nominally be × 0.01 Ah resolution but the firmware updates the counter in whole-Ah steps: integrating signed pack current across a multi-hour L1 charge matches Δraw within <1 % at the × 1 Ah scale, ~100× off at × 0.01 Ah. |
+| 16..19 | BE u32  | Accumulated discharge capacity, same scale convention as bytes 12..15 (TENTATIVE — only cross-checked on the charge side; needs a long drive capture to confirm independently). |
 
 ### `0x4000` — active-session status (UDAN `0x87` mapping QUESTIONED)
 
@@ -211,10 +211,8 @@ delivering ~19 A throughout):
 | 1       | `00`               | `03`              | Status bit — set when charging engages   |
 | 2       | `00`               | `01`              | Static `01` once charger present         |
 | 3–5     | `00 00 00`         | `01 01 02`        | Status bits — set when charging engages  |
-| 6       | `00`               | `EE..F1` (=238–241) | **AC mains voltage × 0.5 V/bit** (≈ 119–120.5 V) — mirrors FF50 `data[1]` |
-| 7       | `00`               | `00`              | Padding (high byte of byte 6 if read BE) |
-| 8       | `00`               | `C7` (=199)       | **DC charge current × 0.1 A/bit** (19.9 A) — mirrors FF50 `data[3]` |
-| 9       | `00`               | `00`              | Padding                                  |
+| 6..7    | `00 00`            | `EE..F1, 00`      | **Pack-V LE u16, low byte first** — mirrors FF50 `data[1..2]`. With FF50 status (= mirror byte 5 here) selecting the encoding offset, this is pack terminal V = raw × 0.1 + offset (offset 51.2 V for status 0x02, 76.8 V for 0x03). |
+| 8..9    | `00 00`            | `C7, 00`          | **DC charge current LE u16, low byte first** — mirrors FF50 `data[3..4]`; raw × 0.1 A/bit (19.9 A at `C7 00`). |
 | 10      | `00..D7`           | `00..D7`          | **1-Hz tick counter** (rolls 0x00..0xFF) |
 | 11      | `FF` → `53..56`    | `53..56`          | Slowly-varying u8 (semantics UNKNOWN; possibly time-remaining or temp) |
 | 12      | `FF`               | `00..FF` (varies) | UNKNOWN dynamic u8 (124 unique values in 144 polls) |
@@ -225,12 +223,11 @@ delivering ~19 A throughout):
 | 25      | `FF`               | `FC`              | Status — `FF` no charger, `FC` charging  |
 | 26–30   | `FF`               | `FF`              | True sentinels (constant)                |
 
-**Bytes 5–9 mirror FF50 `data[0..4]`.** At t=83.3 s the diagnostic-port
-DID 0x4000 carries `... 02 EE 00 C7 00 ...` at positions 5–9 and the
-broadcast `18FF50E5` frame carries `02 EE 00 C7 00` at `data[0..4]`. This
-is a confirmed mirror (DID/broadcast pair), and it lets us decode FF50
-variant `02` (L1 charging, see DOCUMENTATION.md FF50 section): `data[1]`
-is AC mains × 0.5 V/bit, `data[3]` is DC charge current × 0.1 A/bit.
+**Bytes 5–9 mirror FF50 `data[0..4]`** — CONFIRMED by simultaneous
+diagnostic-port (0x4000) and broadcast (FF50E5) frame capture. The
+status byte (mirror byte 5) selects the pack-V encoding offset for the
+u16 LE at mirror bytes 6..7 (same low/high variant scheme as F100F3
+byte 0); see DOCUMENTATION.md §FF50E5 for the full table.
 
 **Implication for the UDAN `0x87 = DID 0x4000` mapping.** Byte 0 plausibly
 mirrors the CSV "Alarm number" column (count of active alarms), and the
@@ -259,21 +256,13 @@ its column ordering alone cannot anchor the byte order.
 Three DIDs polled in parallel during the Charge-info / BMS tab. Combined
 35 data bytes covers the 16 non-time CSV columns of `Charging 0x94.csv`
 (Charger conn., elapsed time, req V/A, output V/A, fault stat., S2 state,
-CC/CC2 resistance, CP freq./duty, lock state, 3× port temp). Cross-checked
-against an active-charge capture
-(`data/dual-capture/dual-capture-charging-120.asc`, ~215 s of L1/120 V
-charging at ~19 A; 144 polls of each DID).
+CC/CC2 resistance, CP freq./duty, lock state, 3× port temp).
 
 | DID      | Data (B) | Idle sample                                       | Active-charge behavior                           |
 |----------|----------|---------------------------------------------------|--------------------------------------------------|
-| `0x0900` | 7        | `01 00 01 00 00 00 00`                            | **Invariant** in 144 polls of active charging — same value as charger-disconnected baseline. Byte 0 = `0x01` = "AC Chg" enum (CSV "Charger conn." column). Remaining bytes likely the categorical enums that stay at their pack-default values on this BMS variant (Charger fault stat. = "Status", S2 state = "Open", Elec. lock state = "Unlocked"). |
-| `0x0901` | 14       | `33 0c 00 00 33 0c 00 00 00 00 ff ff ff ff`       | Bytes 0..1 BE and 4..5 BE are **paired dynamic u16 measurements** that move together during charging (range 0x2F39..0x3364 ≈ 12089..13156 raw). Almost certainly the CSV's "Charge Req. Volt." / "Charger Output Volt." pair, but the per-bit scale doesn't land on a clean V at the observed pack voltage (~75 V) — appears to be a charger-internal raw count. Byte 7 alternates `00 ↔ 0B` across the session (semantics UNKNOWN). Trailing 4 bytes (10..13) are **`FF FF FF FF` = CC Resistance + CC2 Resistance "Invalid" sentinels** (CSV value 65535) — CONFIRMED. |
-| `0x0902` | 14       | `00 00 00 00 00 00 00 00 00 00 00 00 00 00`       | **Invariant all-zero** in 144 polls of active charging — refutes the earlier "likely fault / state machine" guess. Consistent with the CSV showing 0 / "Invalid" for CP freq., CP duty, and the three Charger-port-temp columns on this pack variant. Likely just unused fields padded to zero. |
-
-Per-byte ↔ CSV-column mapping of `0x0901`'s dynamic head is still
-TENTATIVE — the contents of the two u16 fields don't decode to volts at
-any common scale, so a contemporaneous iBMS UI screenshot + capture pair
-is needed to anchor units.
+| `0x0900` | 7        | `01 00 01 00 00 00 00`                            | **Invariant** across multi-hour active charging — same value as charger-disconnected baseline. Byte 0 = `0x01` = "AC Chg" enum (CSV "Charger conn." column) — CONFIRMED. Remaining bytes are TENTATIVELY the categorical enums that stay at their pack-default values on this BMS variant (Charger fault stat. = "Status", S2 state = "Open", Elec. lock state = "Unlocked"). |
+| `0x0901` | 14       | `33 0c 00 00 33 0c 00 00 00 00 ff ff ff ff`       | Bytes 0..1 BE and 4..5 BE are **paired dynamic u16 measurements** in a narrow 13100..13250 raw range across a full SOC sweep — they don't track pack V monotonically and the per-bit scale doesn't land on a clean V at observed pack voltages, so the CSV's "Charge Req. Volt." / "Charger Output Volt." mapping is still TENTATIVE. A clean × 0.01 V scale would put them at 131..132 V (close to L1 mains nominal). Byte 7 toggles `00 ↔ 0B` irregularly throughout charging (uncorrelated with status changes; likely a heartbeat — UNKNOWN). Trailing 4 bytes (10..13) are **`FF FF FF FF` = CC Resistance + CC2 Resistance "Invalid" sentinels** (CSV value 65535) — CONFIRMED. |
+| `0x0902` | 14       | `00 00 00 00 00 00 00 00 00 00 00 00 00 00`       | **Invariant all-zero** across multi-hour active charging — CONFIRMED. Consistent with the CSV showing 0 / "Invalid" for CP freq., CP duty, and the three Charger-port-temp columns on this pack variant. Unused fields padded to zero. |
 
 ### X700 IoT subsystem — DIDs `0xA501`, `0xA502`, `0xA506`, `0xA507`, `0xA50E`
 
@@ -430,7 +419,7 @@ capture):
 | `0x2830` top-1 max-temp tuple              | `F104F3` data[0] + data[2]           | Max module °C + 1-based probe number      |
 | `0x2838` top-1 min-temp tuple              | `F104F3` data[1] + data[3]           | Min module °C + 1-based probe number      |
 | `0x4000` byte 0 (active-alarm count, TENTATIVE) | `F108F3` (active fault bitmap)  | `F108F3` is the authoritative broadcast bitmap; `0x4000`'s relationship to alarms is now questioned — see the `0x4000` section above. |
-| `0x4000` bytes 5..9 (charger telemetry block) | `FF50E5` `data[0..4]`         | Variant tag + AC mains × 0.5 V/bit + DC current × 0.1 A/bit (charging) |
+| `0x4000` bytes 5..9 (charger telemetry block) | `FF50E5` `data[0..4]`         | Variant-tagged pack V (LE u16, status-selected offset) + DC current (LE u16 × 0.1 A/bit) |
 
 The diagnostic-port DIDs expose the **full** BMS internal state (cell
 extrema as top-4 sorted tuples, calibration tables, identity blocks,

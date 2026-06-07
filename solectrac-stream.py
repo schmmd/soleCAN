@@ -71,7 +71,7 @@ from solectrac_proto import (
     PACK_CAPACITY_AH, PACK_NOMINAL_V, PACK_CAPACITY_WH,
     PACK_CURRENT_LSB_A, PACK_CURRENT_BIAS_RAW,
     PACK_VOLTAGE_LSB_V, PACK_VOLTAGE_OFFSET_HI_V, PACK_VOLTAGE_OFFSET_LO_V,
-    CHARGER_V_LSB_V, CHARGER_V_OFFSET_V, CHARGER_I_LSB_A,
+    CHARGER_V_LSB_V, CHARGER_V_OFFSET_HI_V, CHARGER_I_LSB_A,
     RPM_BIAS, LIMIT_CURRENT_LSB_A,
     BMS_FAULT_CODES_BYTE7, BMS_FAULT_CODES_BYTES_0_TO_6,
     parse_id, be16, le16, c_to_f,
@@ -227,13 +227,21 @@ KMH_PER_RPM_TURF = {
 }
 KMH_TO_MPH = 0.6213712
 
-# Charger status byte (FF50CA byte 0). Values established empirically:
+# Charger status byte (FF50CA byte 0). It serves a dual purpose:
+# it indicates that the OBC is actively delivering charge AND selects the
+# pack-V encoding offset for FF50 bytes 1-2 (same low/high variant scheme
+# as F100F3 byte 0).
 #   0x00 = idle (charger module powered, not charging)
-#   0x01, 0x02 = transient handshake / pre-charge states (only seen briefly)
-#   0x03 = actively delivering power
+#   0x01 = transient handshake (only seen briefly during wake-up)
+#   0x02 = active charging, LO offset: pack V = raw × 0.1 + 51.2 V
+#          (covers 51.2..76.7 V — most of an L1 / L2 charge sits here)
+#   0x03 = active charging, HI offset: pack V = raw × 0.1 + 76.8 V
+#          (covers 76.8..102.3 V — the top end of charge)
 CHGR_STATUS_IDLE = 0x00
-CHGR_STATUS_ACTIVE = 0x03
-CHGR_HANDSHAKE_STATES = {0x01, 0x02}
+CHGR_STATUS_HANDSHAKE = 0x01
+CHGR_STATUS_LO = 0x02
+CHGR_STATUS_HI = 0x03
+CHGR_ACTIVE_STATES = {CHGR_STATUS_LO, CHGR_STATUS_HI}
 
 STALE_S = 2.0  # mark a channel stale if no update for this long
 
@@ -652,9 +660,10 @@ def evaluate_alerts(state: State, mains_v: float, breaker_a: float,
                            f"temp delta {delta} °C ({delta * 9 / 5:.0f} °F)"
                            f" > 10 °C"))
 
-    # AC-supply budget (only meaningful while actively charging, status 0x03;
-    # handshake states 0x01/0x02 are too transient to draw breaker power).
-    chgr_active = (state.chgr_status.value == CHGR_STATUS_ACTIVE
+    # AC-supply budget (only meaningful while actively charging — both CC
+    # (0x02) and CV (0x03); 0x01 is a transient handshake that doesn't draw
+    # breaker power).
+    chgr_active = (state.chgr_status.value in CHGR_ACTIVE_STATES
                    and not state.chgr_status.is_stale(now))
     pack_v = primary_pack_v(state)
     if (chgr_active and pack_v.value
@@ -817,7 +826,7 @@ def render_pack(state: State, mains_v: float, efficiency: float,
     t.add_row("voltage", fmt(pack_v_ch, "{:.2f}", "V", now))
 
     pi = state.pack_i_a.value
-    chgr_active = (state.chgr_status.value == CHGR_STATUS_ACTIVE
+    chgr_active = (state.chgr_status.value in CHGR_ACTIVE_STATES
                    and not state.chgr_status.is_stale(now))
     if pi is None:
         i_text = Text("---", style="dim")
@@ -1060,18 +1069,21 @@ def render_charger(state: State, now: float) -> Panel:
         st = Text(f"stale  (last 0x{int(cs):02X})", style="yellow dim")
     elif cs == CHGR_STATUS_IDLE:
         st = Text("idle")
-    elif cs in CHGR_HANDSHAKE_STATES:
-        st = Text(f"handshake (status=0x{int(cs):02X})", style="yellow")
-    elif cs == CHGR_STATUS_ACTIVE:
-        st = Text("CHARGING (status=0x03)", style="bold green")
+    elif cs == CHGR_STATUS_HANDSHAKE:
+        st = Text("handshake (status=0x01)", style="yellow")
+    elif cs == CHGR_STATUS_LO:
+        st = Text("CHARGING — pack < 76.8 V (status=0x02)", style="bold green")
+    elif cs == CHGR_STATUS_HI:
+        st = Text("CHARGING — pack ≥ 76.8 V (status=0x03)", style="bold green")
     else:
         st = Text(f"unknown (status=0x{int(cs):02X})", style="magenta")
     t.add_row("State", st)
-    t.add_row("voltage", fmt(state.chgr_v, "{:.1f}", "V", now))
     t.add_row("current", fmt(state.chgr_i, "{:.1f}", "A", now))
-    if state.chgr_v.value is not None and state.chgr_i.value is not None:
-        t.add_row("power",
-                  Text(f"{state.chgr_v.value * state.chgr_i.value:.0f} W"))
+    # DC power = pack V (from F100F3, same source as the pack pane) × charger I.
+    pack_v = primary_pack_v(state).value
+    if pack_v is not None and state.chgr_i.value is not None:
+        t.add_row("DC power",
+                  Text(f"{pack_v * state.chgr_i.value:.0f} W"))
 
     # BMS->Charger setpoints from 1806E5F4. Show V/I requested by the
     # BMS alongside what the charger reports delivering, and surface the
@@ -1096,7 +1108,7 @@ def render_charger(state: State, now: float) -> Panel:
     # Time-to-full estimate, shown only while actively charging. Based
     # on the slope of recent BMS SOC samples; CV taper near full will
     # make the linear extrapolation read low in the last ~10%.
-    if cs == CHGR_STATUS_ACTIVE and not stale:
+    if cs in CHGR_ACTIVE_STATES and not stale:
         t.add_row("", "")
         soc_now = state.bms_soc_pct.value
         if soc_now is not None and soc_now >= 99.5:
@@ -1492,6 +1504,53 @@ def build_layout(state: State, args, now: float, mode: str = "live") -> Layout:
 
 # --- frame source -----------------------------------------------------------
 
+def iter_asc_messages_from(path: str, byte_offset: int):
+    """Yield can.Message from a Vector .asc file starting at byte_offset
+    (advanced past any partial first line). Backs --start P%, which seeks
+    by file position rather than scanning timestamps — line lengths are
+    roughly uniform so byte-% closely tracks time-%. Header lines and the
+    'Start of measurement' marker before the first data line are skipped
+    by the per-line shape check."""
+    f = open(path, "r", errors="replace")
+    try:
+        f.seek(byte_offset)
+        if byte_offset > 0:
+            f.readline()  # discard the partial line at the seek point
+        for line in f:
+            parts = line.split()
+            # Data line: "<ts> <bus> <hex_id[x]> Rx|Tx d <dlc> <byte>..."
+            if len(parts) < 7 or parts[4].lower() != "d":
+                continue
+            try:
+                ts = float(parts[0])
+                dlc = int(parts[5])
+            except ValueError:
+                continue
+            id_str = parts[2]
+            ext = id_str.endswith(("x", "X"))
+            if ext:
+                id_str = id_str[:-1]
+            try:
+                arb_id = int(id_str, 16)
+            except ValueError:
+                continue
+            data_tokens = parts[6:6 + dlc]
+            if len(data_tokens) < dlc:
+                continue
+            try:
+                data = bytes(int(b, 16) for b in data_tokens)
+            except ValueError:
+                continue
+            yield can.Message(
+                timestamp=ts,
+                arbitration_id=arb_id,
+                is_extended_id=ext,
+                data=data,
+            )
+    finally:
+        f.close()
+
+
 def open_source(args):
     """Return either a python-can Bus (live) or LogReader (replay)."""
     if args.replay:
@@ -1821,6 +1880,11 @@ def main() -> int:
                    help="assumed AC->DC charger efficiency (default 0.85)")
     p.add_argument("--refresh-hz", type=float, default=5.0,
                    help="TUI refresh rate (default 5)")
+    p.add_argument("--start", type=float, default=0.0,
+                   help="for --replay (.asc only), seek to this percentage "
+                        "of the file size and start realtime playback from "
+                        "there (0..100, default 0). Cheap O(1) seek; the "
+                        "TUI starts cold and populates as frames arrive.")
     p.add_argument("--timescale", type=float, default=1.0,
                    help="for --replay, multiplier on realtime playback "
                         "(1.0 = recorded speed, 2.0 = 2x faster, "
@@ -1861,10 +1925,24 @@ def main() -> int:
                         raw_logger(msg)
                     decode(msg, state, time.monotonic())
             else:
+                start_pct = max(0.0, min(100.0, args.start))
+                replay_iter = source
+                if start_pct > 0 and args.replay:
+                    if args.replay.lower().endswith(".asc"):
+                        import os
+                        size = os.path.getsize(args.replay)
+                        offset = int(size * start_pct / 100.0)
+                        replay_iter = iter_asc_messages_from(
+                            args.replay, offset)
+                    else:
+                        sys.stderr.write(
+                            "--start: only supported for .asc replays; "
+                            "ignoring\n")
+
                 first_msg_ts: Optional[float] = None
                 replay_start: Optional[float] = None
                 timescale = args.timescale if args.timescale > 0 else 1.0
-                for msg in source:
+                for msg in replay_iter:
                     if stop_evt.is_set():
                         break
                     if raw_logger is not None:

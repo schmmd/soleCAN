@@ -83,7 +83,8 @@ PACK_VOLTAGE_OFFSET_LO_V = 51.2           # F100F3 variant 0x02 (51.2–76.7 V)
 # keep these as their own named bindings so a future divergence has one
 # place to plug in. See feedback-keep-encoding-constants.
 CHARGER_V_LSB_V = PACK_VOLTAGE_LSB_V
-CHARGER_V_OFFSET_V = PACK_VOLTAGE_OFFSET_HI_V
+CHARGER_V_OFFSET_LO_V = PACK_VOLTAGE_OFFSET_LO_V   # status 0x02 (pack < 76.8 V)
+CHARGER_V_OFFSET_HI_V = PACK_VOLTAGE_OFFSET_HI_V   # status 0x03 (pack ≥ 76.8 V)
 CHARGER_I_LSB_A = 0.1
 
 RPM_BIAS = 0x0C80                         # FF21CA bytes 2-3 LE zero-RPM offset
@@ -433,10 +434,14 @@ def decode(msg, emit, clear=_noop_clear):
         emit("charger.flag.output_disabled", 1 if flags & 0x04 else 0, "")
         emit("charger.flag.line_ok", 1 if flags & 0x08 else 0, "")
         emit("charger.flag.no_line", 1 if flags & 0x10 else 0, "")
-        # V/I are only physically meaningful in the clean active state.
+        # Status 0x02 / 0x03 is a pack-V encoding-range selector for
+        # data[1..2] (same scheme as F100F3 byte 0):
+        #   0x02 → LO offset (pack 51.2..76.7 V)
+        #   0x03 → HI offset (pack 76.8..102.3 V)
+        # Current (data[3..4]) decodes identically in both.
         if status in (0x02, 0x03) and flags == 0x00:
-            offset = (PACK_VOLTAGE_OFFSET_LO_V if status == 0x02
-                      else CHARGER_V_OFFSET_V)
+            offset = (CHARGER_V_OFFSET_LO_V if status == 0x02
+                      else CHARGER_V_OFFSET_HI_V)
             emit("charger.voltage_v",
                  v_raw * CHARGER_V_LSB_V + offset, "v")
             emit("charger.current_a", data[3] * CHARGER_I_LSB_A, "a")

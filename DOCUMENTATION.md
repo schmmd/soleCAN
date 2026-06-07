@@ -856,55 +856,46 @@ Proprietary B frame from the on-board charger.
 | 2..3 | data[1..2] LE | Output voltage: V = raw × 0.1 + 76.8 (only valid while status = 0x03) |
 | 4..5 | data[3..4] LE | Output current: A = raw × 0.1     (only valid while status = 0x03) |
 
+**The status byte is dual-purpose: it indicates that the OBC is
+actively delivering charge AND selects the pack-V encoding offset for
+`data[1..2]`** — the same low/high variant scheme as F100F3 byte 0.
+
 Status byte vocabulary:
 
-| Value      | Meaning                                                                       |
-|------------|-------------------------------------------------------------------------------|
-| 0x00       | Idle / not delivering                                                         |
-| 0x01       | Transient handshake (only seen briefly during wake-up / ramp)                 |
-| 0x02       | **Actively delivering charge, CC phase** (steady-state, pack below CV setpoint) |
-| 0x03       | **Actively delivering charge, CV phase** (steady-state, pack at CV setpoint)  |
+| Value      | Meaning                                                                                   |
+|------------|-------------------------------------------------------------------------------------------|
+| 0x00       | Idle / not delivering                                                                     |
+| 0x01       | Transient handshake (only seen briefly during wake-up / ramp)                             |
+| 0x02       | **Actively delivering charge, LO pack-V encoding** — `data[1..2]` = pack V × 0.1 + 51.2 V (covers 51.2..76.7 V)  |
+| 0x03       | **Actively delivering charge, HI pack-V encoding** — `data[1..2]` = pack V × 0.1 + 76.8 V (covers 76.8..102.3 V) |
 
-Status `0x02` was previously believed to be a brief handshake state.
-`data/dual-capture/dual-capture-charging-120.asc` (215 s of L1 charging
-at ~60 % SOC, 120 V AC mains, pack at ~75 V) shows it as the
-steady-state during the constant-current phase: status stayed at `0x02`
-for the entire capture while F100F3 reported a steady −19 A into the
-pack.
+`data[3..4]` LE = DC charger output current × 0.1 A/bit, no offset —
+CONFIRMED in both 0x02 and 0x03.
 
-**`data[3..4]` LE = DC current × 0.1 A/bit applies in both `0x02` and
-`0x03`.** Cross-checked against F100F3 in the CC capture: FF50
-`data[3..4]` LE = `0x00C7` = 199 → 19.9 A; F100F3 `data[2..3]` BE
-decoded to −19.1 A simultaneously.
+The encoding for `data[1..2]` is anchored by linear regression across a
+multi-hour L1 charge in status 0x02: slope 0.099 V/LSB, intercept
+51.6 V (R² > 0.99) — matches the F100F3 byte-0 LO variant within 1 %.
+In status 0x03 the same regression against the end-of-charge taper
+yields slope 0.1024 V/LSB, intercept 77.04 V (R² = 0.9856) — the HI
+variant. The 0x02 → 0x03 transition fires when pack V crosses
+~76.8 V; it is not a CC→CV phase change.
 
-**`data[1..2]` LE encoding differs between phases.**
+The 0x4000 DID mirrors FF50 `data[0..4]` at its bytes 5..9 during
+charging — see `bms/README.md` §`0x4000`.
 
-In status `0x03` (CV phase), `data[1..2]` LE = pack terminal V × 0.1 +
-76.8. Anchored against contemporaneous F100F3 in
-`charging-120V-90ish-to-100.asc` (90→100 % SOC, CC→CV taper at ~83 V):
+**Charge-current profile is constant-power, not constant-current** —
+CONFIRMED, but unrelated to the status byte. Across a full L1 charge
+the OBC holds DC output power at **1475 W ± 3 W (σ/μ = 0.20 %)** while
+pack voltage rises 70 → 83 V and current smoothly tapers 21 → 18 A.
+The regulator is mains-power-limited (≈110 V × 13 A × ~96 %
+efficiency). L2 (220 V) charging is expected to land at ~3 kW DC,
+matching the brochure's 3.3 kW rating. A brief true-CV taper (18 A →
+9.9 A in ~6 min) occurs at the very end of charge before a clean
+`3 → 2 → 1 → 0` shutdown.
 
-- data[1..2] vs Pack_V: slope 0.1024, intercept 77.04, R² = 0.9856 →
-  factor 0.1, offset 76.8 V.
-- data[3..4] vs |Pack_I|: slope 0.0989, intercept −0.07, R² = 0.9985 →
-  0.1 A/bit, no offset.
-
-End-to-end the decoded current showed a textbook CC→CV taper
-(~18.5 A → ~9.9 A → ~2.9 A) at constant ~83 V over the capture.
-
-In status `0x02` (CC phase), `data[1..2]` LE does **not** decode as
-pack V — in `dual-capture-charging-120.asc` the raw u16 stayed at
-`0x00EE..0x00F1` (238..241), which under the CV-phase formula would
-read as an impossible 100.6 V on a 75 V pack. Numerically `raw × 0.5
-≈ 119–120.5 V` matches the 120 V AC mains in the file name, but the
-scale is not anchored to a second measurement so this is SPECULATIVE.
-Best current interpretation: in CC phase the charger reports an
-AC-side or charger-internal voltage in `data[1..2]` rather than the
-DC pack output. The 0x4000 DID mirrors FF50 `data[0..4]` at its bytes
-5..9 during charging — see `bms/README.md` §`0x4000`.
-
-**Don't trust `data[1..2]` as pack V unless status == 0x03.** The
-charger module also beacons self-test artifacts during wake-up and
-when the plug is inserted without AC mains:
+**`data[1..2]` is only a valid pack-V reading while status ∈ {0x02,
+0x03}.** The charger module beacons self-test artifacts during wake-up
+and when the plug is inserted without AC mains:
 
 - Plug inserted, no AC: status = 0x00, v_raw = 2, i_raw = 2048
   (constant). FF50E5 still beacons at ~10 Hz.

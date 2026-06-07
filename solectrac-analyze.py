@@ -90,11 +90,12 @@ Signal names use a `domain.name` (or `domain.NN.name`) convention:
                                on 2026-05-10.
     charger.status             FF50 byte 0
     charger.v_raw              FF50 bytes 1-2 LE (raw, always emitted)
-    charger.voltage_v          FF50 charger output voltage, raw * 0.1 + 76.8 V
-                               (only emitted while status == 0x03)
+    charger.voltage_v          FF50 pack-terminal output voltage, raw * 0.1 + offset
+                               (offset = 51.2 V while status == 0x02, 76.8 V
+                                while status == 0x03; emitted in both states)
     charger.i_raw              FF50 bytes 3-4 LE (raw, always emitted)
-    charger.current_a          FF50 current, A
-                               (only emitted while status == 0x03)
+    charger.current_a          FF50 charger output current, raw * 0.1 A/bit
+                               (emitted in both status 0x02 and 0x03)
     chgr_cmd.voltage_v         0600 bytes 0-1 BE * 0.1: BMS->charger V setpoint
                                (no +76.8 V offset; suppressed when idle)
     chgr_cmd.current_a         0600 bytes 2-3 BE * 0.1: BMS->charger I setpoint
@@ -184,18 +185,24 @@ Decoder assumptions (verify against the BMS spec before trusting numerically):
           was almost certainly a 145 transcription.
         The bytes-0..6 and byte-7 active code sets are merged and
         deduplicated.
-  * PGN 0xFF50 from 0xE5: byte 0 = status (0x00=idle, 0x01/0x02=handshake
-                          [transient], 0x03=active charging),
-                          bytes 1-2 LE = charger output voltage at the pack
-                          terminals, encoded identically to F100 byte 1:
-                          raw * 0.1 + 76.8 V.
+  * PGN 0xFF50 from 0xE5: byte 0 = status (0x00=idle, 0x01=transient
+                          handshake during wake-up, 0x02=active charging
+                          with LO pack-V offset, 0x03=active charging with HI
+                          pack-V offset). The status byte is a dual-purpose
+                          field: it signals active charge AND selects the
+                          pack-V encoding offset for bytes 1-2 — same low/
+                          high variant scheme as F100F3 byte 0.
+                          bytes 1-2 LE = pack terminal voltage, raw * 0.1 V/bit
+                          with status-selected offset:
+                            status 0x02 → +51.2 V (covers 51.2..76.7 V)
+                            status 0x03 → +76.8 V (covers 76.8..102.3 V)
+                          Confirmed by linear regression across a multi-hour
+                          L1 charge (slope 0.099 V/LSB, intercept 51.6 V
+                          while status==0x02; matches the F100 byte 1 LO
+                          variant within 1%).
                           bytes 3-4 LE = charger output current in 0.1 A/bit
-                          (no offset).
-    Voltage and current scales were anchored against asc/charging-120V-90ish-
-    to-100.asc (2863 active-charging frames; regression vs F100F3 gave R^2
-    = 0.986 for V and R^2 = 0.999 for I). V/I bytes only carry meaningful
-    values while status == 0x03; other states leave them at handshake / idle
-    values.
+                          (no offset); meaningful in both 0x02 and 0x03
+                          — CONFIRMED.
   * PGN 0x000600 from 0xF4 to 0xE5 (charger): vendor-proprietary
         BMS->charger command frame. Reverse-engineered by correlating
         58,584 frames in charging-120V-90ish-to-100.asc against
@@ -316,7 +323,7 @@ from solectrac_proto import (
     PACK_CAPACITY_AH, PACK_NOMINAL_V, PACK_CAPACITY_WH,
     PACK_CURRENT_LSB_A, PACK_CURRENT_BIAS_RAW,
     PACK_VOLTAGE_LSB_V, PACK_VOLTAGE_OFFSET_HI_V, PACK_VOLTAGE_OFFSET_LO_V,
-    CHARGER_V_LSB_V, CHARGER_V_OFFSET_V, CHARGER_I_LSB_A,
+    CHARGER_V_LSB_V, CHARGER_V_OFFSET_HI_V, CHARGER_I_LSB_A,
     RPM_BIAS, LIMIT_CURRENT_LSB_A,
     BMS_FAULT_CODES_BYTE7, BMS_FAULT_CODES_BYTES_0_TO_6,
     parse_id, be16, le16, data_bytes, c_to_f,
@@ -678,21 +685,24 @@ DECODERS = [
      "injection-confirmed on 2026-05-10; code 146 does not appear in F108"),
     ("charger.status", "FF50", "E5", "0", "u8 (raw)",
      "", "verified",
-     "0x00=idle, 0x01/0x02=handshake (transient), 0x03=active"),
+     "0x00=idle, 0x01=transient handshake, 0x02=active charging w/ LO "
+     "pack-V offset (pack <76.8V), 0x03=active charging w/ HI offset "
+     "(pack >=76.8V)"),
     ("charger.v_raw", "FF50", "E5", "1-2", "LE u16",
      "", "verified",
      "raw bytes always emitted (handshake/idle constants visible)"),
-    ("charger.voltage_v", "FF50", "E5", "1-2", "LE u16 * 0.1 + 76.8",
+    ("charger.voltage_v", "FF50", "E5", "1-2", "LE u16 * 0.1 + offset",
      "v", "verified",
-     "same encoding as F100 byte 1; emitted only while status==0x03 "
-     "(R^2=0.986 vs F100F3 across 2863 active-charging frames)"),
+     "pack-terminal voltage; same encoding as F100 byte 1. Offset is "
+     "status-selected: 51.2 V for status==0x02, 76.8 V for status==0x03. "
+     "Emitted while status in {0x02, 0x03}"),
     ("charger.i_raw", "FF50", "E5", "3-4", "LE u16",
      "", "verified",
      "raw bytes always emitted; in idle byte 4=0x08 -> i_raw=2048"),
     ("charger.current_a", "FF50", "E5", "3-4", "LE u16 * 0.1",
      "a", "verified",
-     "emitted only while status==0x03 (in idle the raw bytes would "
-     "decode to a spurious 204.8 A)"),
+     "charger DC output current; emitted while status in {0x02, 0x03}. "
+     "In idle the raw bytes would decode to a spurious 204.8 A"),
     ("chgr_cmd.voltage_v", "0600", "F4", "0-1", "BE u16 * 0.1",
      "v", "verified",
      "BMS-commanded charger voltage setpoint; always 84.6 V during "
