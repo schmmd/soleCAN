@@ -168,7 +168,9 @@ function update(d){
   (fts.mc||[]).forEach(function(c){
     al.push('MC '+c+(MC_FAULTS[c]?' ('+MC_FAULTS[c]+')':''));
   });
-  document.getElementById('al').innerHTML=al.map(function(a){return'<div class="alert">⚠ '+a+'</div>';}).join('');
+  document.getElementById('al').innerHTML=al.length
+    ? '<div class="alert">⚠ '+al.join('<br>⚠ ')+'</div>'
+    : '';
   // Tractor on/off: motor.alive is authoritative — true iff FF21CA was
   // broadcast within the last 0.5s. Stream.py and firmware always emit
   // this field, so we never have to guess.
