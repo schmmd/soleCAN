@@ -1656,8 +1656,9 @@ def state_to_json(state: State, now: float, mode: str) -> dict:
     # BMS state pills. Firmware names the b1 bit 6 channel "awake" (matches the
     # dashboard label); stream.py's internal field is bms_contactors but the
     # bit decoded is the same one (see decode() PGN_F106).
+    bms_block: dict = {}
     if state.bms_state_byte0.value is not None:
-        out["bms"] = {"state": {
+        bms_block["state"] = {
             "output_enable":  int(bool(state.bms_output_enable.value)),
             "main_contactor": int(bool(state.bms_main_contactor.value)),
             "operating":      int(bool(state.bms_operating.value)),
@@ -1666,7 +1667,17 @@ def state_to_json(state: State, now: float, mode: str) -> dict:
             "charger_present": int(bool(state.bms_charger_present.value)),
             "drive_mode":     int(bool(state.bms_drive_mode.value)),
             "awake":          int(bool(state.bms_contactors.value)),
-        }}
+        }
+    if (state.limit_discharge_a.value is not None
+            or state.limit_charge_a.value is not None):
+        lim: dict = {}
+        if state.limit_discharge_a.value is not None:
+            lim["discharge_a"] = round(state.limit_discharge_a.value, 1)
+        if state.limit_charge_a.value is not None:
+            lim["charge_a"] = round(state.limit_charge_a.value, 1)
+        bms_block["limit"] = lim
+    if bms_block:
+        out["bms"] = bms_block
 
     bms_codes = [code for code, _ in active_bms_faults(state)]
     mc_codes: list = []

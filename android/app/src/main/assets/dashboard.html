@@ -57,7 +57,7 @@ h3{font-size:.68em;text-transform:uppercase;letter-spacing:.1em;color:#757575;ma
   <line id="pneed" x1="100" y1="100" x2="100" y2="30" stroke="#c62828" stroke-width="3" stroke-linecap="round"/>
   <circle cx="100" cy="100" r="5" fill="#c62828"/>
   <text x="20" y="116" text-anchor="middle" font-size="9" fill="#757575">0</text>
-  <text x="180" y="116" text-anchor="middle" font-size="9" fill="#757575">15 kW</text>
+  <text x="180" y="116" text-anchor="middle" font-size="9" fill="#757575">20 kW</text>
   <text x="100" y="78" text-anchor="middle" font-size="26" font-weight="700" fill="#212121" id="pval">–</text>
   <text x="100" y="92" text-anchor="middle" font-size="9" fill="#9e9e9e" id="punit">kW</text>
 </svg>
@@ -146,11 +146,18 @@ function update(d){
   const pwrCls=pwr!=null&&pwr>5?'ok':'';
   const pwrStr=pwr==null?'–'
     :(pwr>0?'+':'')+(pwr/1000).toFixed(1);
+  // F107F3 BMS limits — direction-matched for the Current sub-line.
+  const lim=(d.bms&&d.bms.limit)||{};
+  const limA=cur==null?null
+    :cur>0.5?lim.charge_a
+    :cur<-0.5?lim.discharge_a
+    :null;
+  const curSub=limA!=null?curLbl+' ('+Math.round(limA)+' A limit)':curLbl;
   document.getElementById('kpi').innerHTML=
     '<div class="card"><h3>SoC</h3><div class="big '+scls+'">'+f(soc,0)+'<span class="unit">%</span></div><div class="sub">'+(s.wh_remaining!=null&&s.wh_capacity?(s.wh_remaining/1000).toFixed(2)+' / '+fwh(s.wh_capacity):'')+'</div></div>'+
     '<div class="card"><h3>Voltage</h3><div class="big">'+f(p.voltage_v,1)+'<span class="unit">V</span></div><div class="sub">60 – 84 V range</div></div>'+
-    '<div class="card"><h3>Current</h3><div class="big '+curCls+'">'+fi(cur)+'<span class="unit">A</span></div><div class="sub">'+curLbl+'</div></div>'+
-    '<div class="card"><h3>Power</h3><div class="big '+pwrCls+'">'+pwrStr+'<span class="unit">kW</span></div><div class="sub">'+(pwr!=null?Math.round(Math.abs(pwr)/150)+'% of 15 kW max':'')+'</div></div>';
+    '<div class="card"><h3>Current</h3><div class="big '+curCls+'">'+fi(cur)+'<span class="unit">A</span></div><div class="sub">'+curSub+'</div></div>'+
+    '<div class="card"><h3>Power</h3><div class="big '+pwrCls+'">'+pwrStr+'<span class="unit">kW</span></div><div class="sub">'+(pwr!=null?Math.round(Math.abs(pwr)/200)+'% of 20 kW max':'')+'</div></div>';
   const netCharging=s.wh_net!=null&&s.wh_net>0;
   const etaLabel=netCharging?'ETA to 100%':'ETA to 0%';
   const etaVal=netCharging?s.eta_to_full_s:s.eta_to_zero_s;
@@ -184,9 +191,9 @@ function update(d){
   document.getElementById('sval').textContent=m.speed_mph!=null?m.speed_mph.toFixed(1):'–';
   document.getElementById('sunit').textContent=m.speed_mph!=null?'mph ('+(m.speed_kmh!=null?m.speed_kmh.toFixed(1):'–')+' km/h)':'mph';
   var pkw=pwr!=null?Math.abs(pwr)/1000:null;
-  setGauge(pkw,15,'pprog','pneed');
+  setGauge(pkw,20,'pprog','pneed');
   document.getElementById('pval').textContent=pkw!=null?pkw.toFixed(1):'–';
-  document.getElementById('punit').textContent=pkw!=null?'kW ('+Math.round(pkw/15*100)+'%)':'kW';
+  document.getElementById('punit').textContent=pkw!=null?'kW ('+Math.round(pkw/20*100)+'%)':'kW';
   document.getElementById('dir').innerHTML=
     [['R',-1],['N',0],['F',1]].map(function(x){
       return'<div class="dirbtn '+(m.direction===x[1]?'on':'')+'">'+x[0]+'</div>';
@@ -262,4 +269,4 @@ if(window.SolectracBridge){
 </script>
 </body>
 </html>
- 
+  

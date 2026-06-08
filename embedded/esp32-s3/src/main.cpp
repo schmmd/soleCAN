@@ -679,12 +679,14 @@ String buildJson(bool pretty = true, bool minimal = false) {
     }
 
     // BMS current limits
-    if (!minimal && g_bms_limit.valid) {
+    if (g_bms_limit.valid) {
         auto lim = doc["bms"]["limit"].to<JsonObject>();
         addFloat(lim, "discharge_a", g_bms_limit.discharge_a, 2);
         addFloat(lim, "charge_a",    g_bms_limit.charge_a,    2);
-        lim["mode"]  = g_bms_limit.mode;
-        lim["byte5"] = g_bms_limit.byte5;
+        if (!minimal) {
+            lim["mode"]  = g_bms_limit.mode;
+            lim["byte5"] = g_bms_limit.byte5;
+        }
     }
 
     // Combined fault codes (BMS + Motor Controller)
