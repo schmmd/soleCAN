@@ -37,25 +37,41 @@ h3{font-size:.68em;text-transform:uppercase;letter-spacing:.1em;color:#757575;ma
 <div class="card" style="margin-bottom:8px">
 <div class="gauges">
 <div>
-<h3>Speed</h3>
+<h3>Tach</h3>
 <svg class="gauge" viewBox="0 0 200 120">
   <path d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="#e0e0e0" stroke-width="14" stroke-linecap="round"/>
-  <path id="sprog" fill="none" stroke="#4caf50" stroke-width="14" stroke-linecap="round"/>
+  <path id="sprog" fill="none" stroke="#212121" stroke-width="14" stroke-linecap="round"/>
   <line id="sneed" x1="100" y1="100" x2="100" y2="30" stroke="#c62828" stroke-width="3" stroke-linecap="round"/>
   <circle cx="100" cy="100" r="5" fill="#c62828"/>
+  <!-- Range RPM caps: L=2000, M=2500, H=2800 -->
+  <line x1="140.0" y1="30.7" x2="143.0" y2="25.5" stroke="#ef6c00" stroke-width="2" stroke-linecap="round"/>
+  <line x1="169.3" y1="60.0" x2="174.5" y2="57.0" stroke="#ef6c00" stroke-width="2" stroke-linecap="round"/>
+  <line x1="178.3" y1="83.4" x2="184.1" y2="82.2" stroke="#ef6c00" stroke-width="2" stroke-linecap="round"/>
+  <text x="147" y="22" text-anchor="middle" font-size="7" font-weight="700" fill="#ef6c00">L</text>
+  <text x="181" y="54" text-anchor="middle" font-size="7" font-weight="700" fill="#ef6c00">M</text>
+  <text x="190" y="80" text-anchor="middle" font-size="7" font-weight="700" fill="#ef6c00">H</text>
   <text x="20" y="116" text-anchor="middle" font-size="9" fill="#757575">0</text>
-  <text x="180" y="116" text-anchor="middle" font-size="9" fill="#757575">11 mph</text>
+  <text x="180" y="116" text-anchor="middle" font-size="9" fill="#757575">3000 RPM</text>
   <text x="100" y="78" text-anchor="middle" font-size="26" font-weight="700" fill="#212121" id="sval">–</text>
-  <text x="100" y="92" text-anchor="middle" font-size="9" fill="#9e9e9e" id="sunit">mph</text>
+  <text x="100" y="92" text-anchor="middle" font-size="9" fill="#9e9e9e" id="sunit">RPM</text>
 </svg>
 </div>
 <div>
 <h3>Power</h3>
 <svg class="gauge" viewBox="0 0 200 120">
   <path d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="#e0e0e0" stroke-width="14" stroke-linecap="round"/>
-  <path id="pprog" fill="none" stroke="#4caf50" stroke-width="14" stroke-linecap="round"/>
+  <path id="pprog" fill="none" stroke="#212121" stroke-width="14" stroke-linecap="round"/>
   <line id="pneed" x1="100" y1="100" x2="100" y2="30" stroke="#c62828" stroke-width="3" stroke-linecap="round"/>
   <circle cx="100" cy="100" r="5" fill="#c62828"/>
+  <!-- Reference graduations: 5/10/15 kW -->
+  <line x1="43.4" y1="43.4" x2="39.2" y2="39.2" stroke="#757575" stroke-width="2" stroke-linecap="round"/>
+  <line x1="100" y1="20" x2="100" y2="14" stroke="#757575" stroke-width="2" stroke-linecap="round"/>
+  <line x1="156.6" y1="43.4" x2="160.8" y2="39.2" stroke="#757575" stroke-width="2" stroke-linecap="round"/>
+  <text x="34" y="34" text-anchor="middle" font-size="7" fill="#757575">5</text>
+  <text x="100" y="10" text-anchor="middle" font-size="7" fill="#757575">10</text>
+  <text x="166" y="34" text-anchor="middle" font-size="7" fill="#757575">15</text>
+  <!-- BMS power limit, direction-matched -->
+  <line id="plim" stroke="#ef6c00" stroke-width="2" stroke-linecap="round" style="display:none"/>
   <text x="20" y="116" text-anchor="middle" font-size="9" fill="#757575">0</text>
   <text x="180" y="116" text-anchor="middle" font-size="9" fill="#757575">20 kW</text>
   <text x="100" y="78" text-anchor="middle" font-size="26" font-weight="700" fill="#212121" id="pval">–</text>
@@ -141,7 +157,6 @@ function update(d){
   const soc=p.soc_pct,scls=soc==null?'':soc<20?'bad':soc<40?'warn':'ok';
   const cur=p.current_a,pwr=p.power_w;
   // Sign convention everywhere: positive = into pack (charging), negative = out.
-  const curLbl=cur==null?'':cur>0.5?'charge':cur<-0.5?'discharge':'idle';
   const curCls=cur!=null&&cur>0.05?'ok':'';
   const pwrCls=pwr!=null&&pwr>5?'ok':'';
   const pwrStr=pwr==null?'–'
@@ -152,7 +167,7 @@ function update(d){
     :cur>0.5?lim.charge_a
     :cur<-0.5?lim.discharge_a
     :null;
-  const curSub=limA!=null?curLbl+' ('+Math.round(limA)+' A limit)':curLbl;
+  const curSub=limA!=null?Math.round(limA)+' A limit':'';
   document.getElementById('kpi').innerHTML=
     '<div class="card"><h3>SoC</h3><div class="big '+scls+'">'+f(soc,0)+'<span class="unit">%</span></div><div class="sub">'+(s.wh_remaining!=null&&s.wh_capacity?(s.wh_remaining/1000).toFixed(2)+' / '+fwh(s.wh_capacity):'')+'</div></div>'+
     '<div class="card"><h3>Voltage</h3><div class="big">'+f(p.voltage_v,1)+'<span class="unit">V</span></div><div class="sub">60 – 84 V range</div></div>'+
@@ -187,11 +202,24 @@ function update(d){
     pr.setAttribute('d',val>0.05?'M '+(cx-r)+' '+cy+' A '+r+' '+r+' 0 0 1 '+ex.toFixed(2)+' '+ey.toFixed(2):'');
     nd.setAttribute('x2',nx.toFixed(2));nd.setAttribute('y2',ny.toFixed(2));
   }
-  setGauge(m.speed_mph,11,'sprog','sneed');
-  document.getElementById('sval').textContent=m.speed_mph!=null?m.speed_mph.toFixed(1):'–';
-  document.getElementById('sunit').textContent=m.speed_mph!=null?'mph ('+(m.speed_kmh!=null?m.speed_kmh.toFixed(1):'–')+' km/h)':'mph';
+  setGauge(m.rpm_magnitude,3000,'sprog','sneed');
+  document.getElementById('sval').textContent=m.rpm_magnitude!=null?m.rpm_magnitude:'–';
+  document.getElementById('sunit').textContent='RPM';
   var pkw=pwr!=null?Math.abs(pwr)/1000:null;
   setGauge(pkw,20,'pprog','pneed');
+  document.getElementById('pprog').setAttribute('stroke',pwr!=null&&pwr>5?'#4caf50':'#212121');
+  var plim=document.getElementById('plim');
+  var limKw=limA!=null&&p.voltage_v!=null?limA*p.voltage_v/1000:null;
+  if(limKw!=null){
+    var pth=Math.PI*(1-Math.max(0,Math.min(limKw/20,1)));
+    plim.setAttribute('x1',(100+80*Math.cos(pth)).toFixed(2));
+    plim.setAttribute('y1',(100-80*Math.sin(pth)).toFixed(2));
+    plim.setAttribute('x2',(100+86*Math.cos(pth)).toFixed(2));
+    plim.setAttribute('y2',(100-86*Math.sin(pth)).toFixed(2));
+    plim.style.display='';
+  }else{
+    plim.style.display='none';
+  }
   document.getElementById('pval').textContent=pkw!=null?pkw.toFixed(1):'–';
   document.getElementById('punit').textContent=pkw!=null?'kW ('+Math.round(pkw/20*100)+'%)':'kW';
   document.getElementById('dir').innerHTML=

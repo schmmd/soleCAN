@@ -220,7 +220,7 @@ THROTTLE_PCT_PER_BIT = 100.0 / (0xFF - THROTTLE_DEAD_LOW)  # raw 0xFF = 100%
 # S/N/F switch is a motor-RPM cap, not a gear stage, and does not affect
 # this calibration. The Agri tire option uses different coefficients
 # (5x12 / 8.0x18) — swap in 4.6/8.8/17.5 if those tires are fitted.
-KMH_PER_RPM_TURF = {
+KMH_PER_RPM_HIGH_TURF = {
     1: 5.7 / 2800,    # Low (range gear "L")
     2: 8.6 / 2800,    # Medium (range gear "M")
     3: 17.0 / 2800,   # High (range gear "H")
@@ -1271,7 +1271,7 @@ def render_motor(state: State, now: float) -> Panel:
     if rpm_signed is None or rg is None:
         gs_text = Text("---", style="dim")
     else:
-        coef = KMH_PER_RPM_TURF.get(int(rg))
+        coef = KMH_PER_RPM_HIGH_TURF.get(int(rg))
         if coef is None:
             gs_text = Text("---", style="dim")
         else:
