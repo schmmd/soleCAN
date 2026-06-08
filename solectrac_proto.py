@@ -89,6 +89,7 @@ CHARGER_I_LSB_A = 0.1
 
 RPM_BIAS = 0x0C80                         # FF21CA bytes 2-3 LE zero-RPM offset
 LIMIT_CURRENT_LSB_A = 0.01                # F107F3 bytes 0-1 / 2-3 BE, 0.01 A/bit
+LIMIT_POWER_EXTRA_LSB_W = 10              # F107F3 bytes 6-7 BE, W above 100A charge baseline
 
 
 # --- F108 fault bit tables -------------------------------------------------
@@ -326,10 +327,12 @@ def decode(msg, emit, clear=_noop_clear):
                 return "skipped_zero"
             i_dis = be16(data[0], data[1]) * LIMIT_CURRENT_LSB_A
             i_chg = be16(data[2], data[3]) * LIMIT_CURRENT_LSB_A
+            p_chg_extra = be16(data[6], data[7]) * LIMIT_POWER_EXTRA_LSB_W
             emit("bms.limit.discharge_a", i_dis, "a")
             emit("bms.limit.charge_a", i_chg, "a")
             emit("bms.limit.mode", data[4], "")
             emit("bms.limit.byte5", data[5], "")
+            emit("bms.limit.charge_power_extra_w", p_chg_extra, "w")
             return "f107"
 
         if pgn == PGN_F108:

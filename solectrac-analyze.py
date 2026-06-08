@@ -70,6 +70,10 @@ Signal names use a `domain.name` (or `domain.NN.name`) convention:
                                (~0.221 V/bit, offset ~57.0 V; R^2=0.97 vs F100F3 V_pack
                                in driving captures); 0x00 in charging mode; rare
                                transient values 0x4D / 0x6B / 0xA5 / 0xA7 in init/teardown
+    bms.limit.charge_power_extra_w
+                               F107 bytes 6-7 BE * 10 W: charge-power allowance
+                               above the 100 A baseline, verified against
+                               (bms.limit.charge_a - 100 A) * pack.voltage_v
     bms.fault.byteN            F108 bytes 0..7 raw (only emitted when frame is non-zero;
                                corresponds to DBC FaultByteN_Raw signals).
                                Bytes 0..6 are a 2-bit-per-code bitmap covering codes
@@ -651,7 +655,7 @@ DECODERS = [
      "100.0 A during charging; matches 200 A peak / 100 A continuous spec"),
     ("bms.limit.charge_a", "F107", "F3", "2-3", "BE u16 * 0.01",
      "a", "verified",
-     "max charge current; 100.0 A in every observed capture"),
+     "max charge current; observed 100.0..130.0 A across current corpus"),
     ("bms.limit.mode", "F107", "F3", "4", "u8 (raw)",
      "", "verified",
      "0x00 in charging captures, 0x01 in drive captures"),
@@ -661,6 +665,11 @@ DECODERS = [
      "drive captures tracks F100F3 V_pack with R^2=0.97 (V_pack ~= "
      "b5*0.2212 + 57.01, ~0.22 V/bit step); 0x00 while charging; "
      "rare transients 0x4D/0x6B/0xA5/0xA7 during ignition/teardown"),
+    ("bms.limit.charge_power_extra_w", "F107", "F3", "6-7", "BE u16 * 10",
+     "w", "verified",
+     "charge-power allowance above the 100 A baseline. Across 54,863 paired "
+     "F107/F100 frames in 65 captures, raw ~= (charge_a - 100 A) * "
+     "pack.voltage_v / 10 with max residual <1 raw count."),
     ("bms.fault.byteN", "F108", "F3", "0..7", "u8 (raw, when nonzero)",
      "", "verified",
      "raw bitmap bytes; bytes 0..6 carry codes 100..127 at 2 bits per "
