@@ -265,8 +265,10 @@ Decoder assumptions (verify against the BMS spec before trusting numerically):
                      below raw ~14 the controller's internal dead-low
                      keeps RPM near 0. See DOCUMENTATION.md §FF21CA for
                      the full interpretation and supporting observations.
-        byte 1     = always 0x00 across 45,086 frames in 30 captures
-                     (reserved padding)
+        byte 1     = normally 0x00, but 0x01 appears in 353 frames across
+                     four driving captures (all forward motion, low torque,
+                     219..1425 RPM). Semantics UNKNOWN; not emitted as a
+                     decoded signal.
         bytes 2-3  = motor RPM magnitude, little-endian uint16, biased by 0x0C80
                      (rpm = ((b3<<8)|b2) - 0x0C80; verified against a
                      0->2500 RPM acceleration trace). Always positive; sign of
