@@ -454,7 +454,8 @@ class BmsState:
     max_temps: list = field(default_factory=list)
     min_temps: list = field(default_factory=list)
 
-    # Alarms (DID 0x4000)
+    # Active-session status (DID 0x4000). Byte 0 is an alarm-count candidate;
+    # bytes 5..9 carry charger telemetry, so this is not a flat alarm array.
     alarms_raw: bytes = b""
 
     # Charging cluster (0x0900 / 0x0901 / 0x0902)
@@ -473,10 +474,10 @@ class BmsState:
     hall_current_a: Optional[float] = None     # bytes 0..1 BE i16 ÷ 10 A/bit
 
     # Wake-source candidates (BMS-tab "On-board volt" sub-tab, TENTATIVE).
-    # 0x0F50 returns a single byte that's the leading WakeupSignal hypothesis
-    # (0x01 in KL15-woken sessions; OBC/RTC values not yet observed). The
-    # others sit alongside it in the same sub-tab and may be related rails
-    # or status — kept raw until a 2nd wake-source capture lands.
+    # 0x0F50 returns a single byte matching the leading WakeupSignal
+    # hypothesis: 0x01 in KL15-woken startup, 0x02 during active OBC charge,
+    # and rare 0x03 transients. The others sit alongside it in the same
+    # sub-tab and may be related rails or status.
     wake_source: Optional[int] = None   # 0x0F50 byte 0 (TENTATIVE WakeupSignal)
     wake_block_f60: bytes = b""         # 0x0F60 — 3 bytes (07 00 80 observed)
     wake_block_f10: bytes = b""         # 0x0F10 — 3 bytes (00 01 00 observed)
@@ -709,22 +710,23 @@ def decode_bmu_temps(data: bytes, st: BmsState):
 
 
 def decode_wake_source(data: bytes, st: BmsState):
-    # 0x0F50 — 1 byte. Leading WakeupSignal candidate. In every KL15-woken
-    # capture observed, returns `0x01`. OBC/RTC values not yet observed.
+    # 0x0F50 — 1 byte. Leading WakeupSignal candidate:
+    # 0x01 in KL15-woken startup, 0x02 during active OBC charge, and rare
+    # 0x03 transients observed in the 14-hour dual charge capture.
     if data:
         st.wake_source = data[0]
 
 
 def decode_shunt_state(data: bytes, st: BmsState):
     # 0x0E40 — 7 bytes. Bytes 0..1 BE i16 ÷ 10 = Hall current in A
-    # (positive = drawing, negative = charging into pack). Scale fit
-    # empirically against 137 paired samples vs 0x2800 pack_a: slope 9.31,
-    # so ÷ 10 is the scale to within ~7%. In steady-state the two agree
-    # within ~1 A; during rapid current transients they diverge
-    # substantially (residual stdev ~6.6 A, R² 0.81), likely because the
-    # Hall and shunt have different bandwidths or measure different points
-    # in the HV path. Use 0x2800 as the authoritative pack current; 0x0E40
-    # is a cross-check / sensor-health indicator.
+    # using the same sign convention as 0x2800 pack_a: positive = charging
+    # into pack, negative = discharge. The 14-hour charge capture has 30,234
+    # paired 0x0E40/0x2800 samples with r=0.9991 and Hall about +1.4 A above
+    # the 0x2800 shunt. During rapid driving transients earlier captures show
+    # larger residuals, likely because the Hall and shunt have different
+    # bandwidths or measure different points in the HV path. Use 0x2800 as
+    # the authoritative pack current; 0x0E40 is a cross-check / sensor-health
+    # indicator.
     # Bytes 2..6 are constant (FD FF F4 00 02) across captures — UNKNOWN.
     st.shunt_state = data
     if len(data) >= 2:
@@ -1082,7 +1084,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         <table id="ov-counters"></table>
       </div>
       <div class="panel">
-        <h3>Alarms (0x4000)</h3>
+        <h3>Status / alarm count (0x4000)</h3>
         <div id="ov-alarms"></div>
       </div>
     </div>
@@ -1214,6 +1216,17 @@ function hexSpaced(hex, max = 32) {
   const trimmed = hex.length > max * 2 ? hex.slice(0, max * 2) + '...' : hex;
   return trimmed.match(/.{1,2}/g).join(' ');
 }
+function parseHexBytes(hex) {
+  const bytes = [];
+  if (!hex) return bytes;
+  for (let i = 0; i + 1 < hex.length; i += 2) {
+    bytes.push(parseInt(hex.slice(i, i + 2), 16));
+  }
+  return bytes;
+}
+function byteHex(b) {
+  return b == null ? dash : '0x' + b.toString(16).padStart(2, '0').toUpperCase();
+}
 function beU16(hex, off) {
   if (!hex || hex.length < (off + 2) * 2) return null;
   return parseInt(hex.slice(off * 2, off * 2 + 4), 16);
@@ -1222,6 +1235,10 @@ function beI16(hex, off) {
   const v = beU16(hex, off);
   if (v == null) return null;
   return v & 0x8000 ? v - 0x10000 : v;
+}
+function leU16Bytes(bytes, off) {
+  if (!bytes || bytes.length < off + 2) return null;
+  return bytes[off] | (bytes[off + 1] << 8);
 }
 function bigNum(label, value, unit, sub) {
   return `<div class="panel">
@@ -1331,27 +1348,36 @@ function renderPeakT(c) {
     peakRow('min T', c.min_temps, '°') + '</tbody>';
 }
 
-// Per BMS.md: 31 B, sentinel 0xFF at fixed positions {11,12,21,24-30}.
-const ALARM_SENTINELS = new Set([11, 12, 21, 24, 25, 26, 27, 28, 29, 30]);
 function renderAlarms(hex) {
   const root = $('ov-alarms');
   if (!hex) { root.innerHTML = `<div class="sub">${dash}</div>`; return; }
-  const bytes = [];
-  for (let i = 0; i < hex.length; i += 2) bytes.push(parseInt(hex.slice(i, i + 2), 16));
-  const faults = [];
-  for (let i = 0; i < bytes.length; i++) {
-    const b = bytes[i];
-    if (b === 0) continue;
-    if (b === 0xFF && ALARM_SENTINELS.has(i)) continue;
-    const sev = b === 1 ? 'L1' : b === 2 ? 'L2' : b === 3 ? 'L3' : `0x${b.toString(16).padStart(2, '0').toUpperCase()}`;
-    faults.push(`<div class="alarm-byte">byte[${i.toString().padStart(2, '0')}] = ${sev}</div>`);
-  }
-  if (!faults.length) {
-    root.innerHTML = `<div class="alarm-ok">✓ OK — no faults active</div>`;
-  } else {
-    root.innerHTML = `<div class="alarm-bad">${faults.length} fault(s) active</div>
-      <div class="alarm-list">${faults.join('')}</div>`;
-  }
+  const bytes = parseHexBytes(hex);
+  if (!bytes.length) { root.innerHTML = `<div class="sub">${dash}</div>`; return; }
+
+  const alarmCount = bytes[0];
+  const countHtml = alarmCount === 0
+    ? '<span class="badge ok">0</span>'
+    : `<span class="badge warn">${alarmCount} tentative</span>`;
+  const chargerStatus = bytes.length > 5 ? bytes[5] : null;
+  const vRaw = leU16Bytes(bytes, 6);
+  const iRaw = leU16Bytes(bytes, 8);
+  const vOffset = chargerStatus === 0x02 ? 51.2 : chargerStatus === 0x03 ? 76.8 : null;
+  const mirrorV = vRaw != null && vOffset != null ? (vRaw / 10) + vOffset : null;
+  const mirrorA = iRaw != null ? iRaw / 10 : null;
+  const statusBlock = bytes.slice(1, 5).map(byteHex).join(' ');
+  const tailSentinel = bytes.length >= 31 && bytes.slice(26, 31).every(b => b === 0xFF);
+
+  root.innerHTML = `<table>
+    ${row('Byte 0 alarm-count candidate', countHtml)}
+    ${row('Bytes 1..4 status', `<span class="hex">${statusBlock || dash}</span>`)}
+    ${row('Charger status mirror (byte 5)', byteHex(chargerStatus))}
+    ${row('Charger voltage mirror', mirrorV == null ? dash : fmtNum(mirrorV, 1, 'V'))}
+    ${row('Charger current mirror', mirrorA == null ? dash : fmtNum(mirrorA, 1, 'A'))}
+    ${row('Byte 10 counter/status', byteHex(bytes.length > 10 ? bytes[10] : null))}
+    ${row('Tail 26..30', tailSentinel ? '<span class="badge ok">0xFF sentinels</span>' : '<span class="badge warn">not all 0xFF</span>')}
+  </table>
+  <div class="sub" style="margin-top:8px;">0x4000 is mixed status/charger telemetry; only byte 0 is an alarm-count candidate.</div>
+  <div class="hex" style="margin-top:8px;">${hexSpaced(hex)}</div>`;
 }
 
 function renderCharging(c) {
@@ -1476,11 +1502,28 @@ function renderCellHealth(c) {
   } else {
     const rows = keys.map(k => {
       const raw = ow[k];
-      const allFF = /^([fF]{2})+$/.test(raw);
-      const tag = allFF ? '<span class="badge ok">idle</span>' : '<span class="badge warn">non-FF</span>';
-      return `<tr><td class="tag">${k}</td><td>${tag}</td><td class="hex">${hexSpaced(raw)}</td></tr>`;
+      const did = parseInt(k, 16);
+      const bytes = parseHexBytes(raw);
+      const allZero = bytes.length && bytes.every(b => b === 0);
+      const allFF = bytes.length && bytes.every(b => b === 0xFF);
+      let tag;
+      let aux = '';
+
+      if ((did === 0x0ED0 || did === 0x0ED1) && bytes.length >= 2) {
+        const maskOk = bytes[0] === 0xFF && bytes[1] === 0xFF;
+        tag = maskOk
+          ? '<span class="badge ok">no-fault mask</span>'
+          : '<span class="badge warn">mask changed</span>';
+        if (bytes.length >= 4) aux = `tail ${beU16(raw, 2)}`;
+      } else if (allZero || allFF) {
+        tag = '<span class="badge ok">clear</span>';
+      } else {
+        tag = '<span class="badge warn">non-clear</span>';
+      }
+
+      return `<tr><td class="tag">${k}</td><td>${tag}</td><td>${aux || dash}</td><td class="hex">${hexSpaced(raw)}</td></tr>`;
     }).join('');
-    $('ch-openwire').innerHTML = `<thead><tr><th>DID</th><th>State</th><th>Raw</th></tr></thead><tbody>${rows}</tbody>`;
+    $('ch-openwire').innerHTML = `<thead><tr><th>DID</th><th>State</th><th>Aux</th><th>Raw</th></tr></thead><tbody>${rows}</tbody>`;
   }
 
   // Cell extremum

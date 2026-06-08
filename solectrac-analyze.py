@@ -675,9 +675,10 @@ DECODERS = [
      "rare transients 0x4D/0x6B/0xA5/0xA7 during ignition/teardown"),
     ("bms.limit.charge_power_extra_w", "F107", "F3", "6-7", "BE u16 * 10",
      "w", "verified",
-     "charge-power allowance above the 100 A baseline. Across 54,863 paired "
-     "F107/F100 frames in 65 captures, raw ~= (charge_a - 100 A) * "
-     "pack.voltage_v / 10 with max residual <1 raw count."),
+     "charge-power allowance above the 100 A baseline. Across 558,309 paired "
+     "F107/F100 frames in 66 captures, including a 14-hour 9.6%-to-99.2% "
+     "charge capture, raw ~= (charge_a - 100 A) * pack.voltage_v / 10; "
+     "all rows within 1 raw count."),
     ("bms.fault.byteN", "F108", "F3", "0..7", "u8 (raw, when nonzero)",
      "", "verified",
      "raw bitmap bytes; bytes 0..6 carry codes 100..127 at 2 bits per "

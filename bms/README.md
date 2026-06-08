@@ -197,13 +197,16 @@ column in the iBMS System-state CSV.
 ### `0x4000` — active-session status (UDAN `0x87` mapping QUESTIONED)
 
 31 data bytes. The original interpretation (31 severity-level enums, one
-per fault category) **does not fit the wire data**: an active-charge
-capture (`data/dual-capture/dual-capture-charging-120.asc`, ~215 s of
-L1/120 V charging at ~19 A) shows several bytes carrying numeric
-measurements and counters, not severity enums.
+per fault category) **does not fit the wire data**: active-charge dual
+captures show several bytes carrying numeric measurements and counters, not
+severity enums. This was first visible in
+`data/dual-capture/dual-capture-charging-120.asc` (~215 s of L1/120 V
+charging at ~19 A), then repeated across 30,235 diagnostic polls in
+`dual-capture-charging-120-10p-to-100p.asc` (9.6% to 99.2% SOC).
 
-Observed structure (144 polls, no broadcast fault on F108F3, charger
-delivering ~19 A throughout):
+Observed structure (144 polls in the short dual capture, no broadcast fault
+on F108F3, charger delivering ~19 A throughout; same byte roles in the long
+dual capture):
 
 | Byte    | Idle (charger off) | Active (charging) | Interpretation                          |
 |---------|--------------------|-------------------|-----------------------------------------|
@@ -343,13 +346,14 @@ byte layouts now:
 
 | Offset | Type   | Field                                | Notes |
 |--------|--------|--------------------------------------|-------|
-| 0..1   | i16 BE | Hall current × 10 (A)                | Steady-state matches 0x2800 pack_a within ~1 A; diverges during transients (slope 9.31, R² 0.81 across 137 paired samples) |
+| 0..1   | i16 BE | Hall current × 10 (A)                | Same sign convention as 0x2800 pack_a: positive = charging into pack, negative = discharge. In the 14-hour charge capture, 30,234 paired 0x0E40/0x2800 samples correlate at r=0.9991 and Hall reads ~+1.4 A above 0x2800. Earlier driving captures show larger transient residuals. |
 | 2..6   | bytes  | Constant `FD FF F4 00 02`            | Likely calibration / status — UNKNOWN |
 
-The Hall current and 0x2800 shunt current are not interchangeable: they
-agree at steady-state but track different waveforms during rapid current
-changes. Use 0x2800 as the authoritative pack current; treat 0x0E40 as a
-cross-check / sensor-health indicator.
+The Hall current and 0x2800 shunt current use the same sign convention but
+are not interchangeable: they agree at steady-state and through the long
+charge, but track different waveforms during rapid driving current changes.
+Use 0x2800 as the authoritative pack current; treat 0x0E40 as a cross-check
+/ sensor-health indicator.
 
 #### `0x1600` — BMU power-supply rail (22 data bytes)
 
@@ -420,12 +424,12 @@ These are polled by the iBMS but not yet mapped to a known UDAN message:
 | `0x0620`, `0x0621`, `0x0648`                           | Mostly-empty sub-block, UNKNOWN |
 | `0x0641`–`0x0647`                                      | Per-channel 1-byte values (7 total), UNKNOWN |
 | `0x0E21`                                               | UNKNOWN small value |
-| `0x0F50`                                               | 1-byte response, `0x01` in every KL15-woken capture — **leading `WakeupSignal` candidate** (BatteryPackMessage protobuf field 3, varint enum with sources KL15 / OBC / RTC). Confirmation needs a future capture in OBC mode that polls this DID. |
+| `0x0F50`                                               | 1-byte response — **leading `WakeupSignal` candidate** (BatteryPackMessage protobuf field 3, varint enum with sources KL15 / OBC / RTC). KL15-woken captures show `0x01`; the 14-hour OBC charge capture is dominated by `0x02` during active charging, with short `0x03` transients. |
 | `0x0F60`, `0x0F10`                                     | 3-byte constants (`07 00 80` and `00 01 00` respectively) in KL15 captures; sit next to `0x0F50` in the "On-board volt" sub-tab — possibly KL15/OBC/RTC rail voltages or wake-related status. |
 | `0x0F30`                                               | 4 bytes, toggles between `00 00 00 00` and `00 0B 00 00` with byte 1 flipping briefly to `0x0B` — signal-detection event flag. |
 | `0x0E70`–`0x0E72`, `0x0EF0`                            | Signal detection / on-board rails — all-zero in observed captures |
 | `0x0EA0`, `0x0EA1`                                     | Cell info tab — balancing. Both all-`0xFF` in observed captures (no balancing active; cell delta < 11 mV) |
-| `0x0ED0`–`0x0ED7`                                      | Open-wire / cell-monitor flags. Of 8 DIDs only `0x0ED0`, `0x0ED1`, `0x0ED2`, `0x0ED5` respond on this pack; `0x0ED3`/`0x0ED4`/`0x0ED6`/`0x0ED7` return no response. `0x0ED0`/`0x0ED1` 4-byte payloads: bytes 0..1 `FF FF` (no-fault sentinel mask), bytes 2..3 BE u16 oscillating in a narrow 4982–4998 range (purpose UNKNOWN — likely a per-DID ADC self-check reading; not a counter, not monotonic). `0x0ED2` and `0x0ED5` are all-zero on this pack |
+| `0x0ED0`–`0x0ED7`                                      | Open-wire / cell-monitor flags. Of 8 DIDs only `0x0ED0`, `0x0ED1`, `0x0ED2`, `0x0ED5` respond on this pack; `0x0ED3`/`0x0ED4`/`0x0ED6`/`0x0ED7` return no response. `0x0ED0`/`0x0ED1` 4-byte payloads: bytes 0..1 `FF FF` (no-fault sentinel mask), bytes 2..3 BE u16 oscillating in a narrow 4982–4998 range, with 30,234 normal `FFFF13xx` responses in the 14-hour charge capture (purpose UNKNOWN — likely a per-DID ADC self-check reading; not a counter, not monotonic). `0x0ED2` and `0x0ED5` are all-zero on this pack |
 | `0x0960`, `0x0961`, `0x0905`, `0x0962`                 | UNKNOWN |
 
 ---
