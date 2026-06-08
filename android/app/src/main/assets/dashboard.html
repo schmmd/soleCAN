@@ -40,7 +40,7 @@ h3{font-size:.68em;text-transform:uppercase;letter-spacing:.1em;color:#757575;ma
 <h3>Tach</h3>
 <svg class="gauge" viewBox="0 0 200 120">
   <path d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="#e0e0e0" stroke-width="14" stroke-linecap="round"/>
-  <path id="sprog" fill="none" stroke="#212121" stroke-width="14" stroke-linecap="round"/>
+  <path id="sprog" fill="none" stroke="#1976d2" stroke-width="14" stroke-linecap="round"/>
   <line id="sneed" x1="100" y1="100" x2="100" y2="30" stroke="#c62828" stroke-width="3" stroke-linecap="round"/>
   <circle cx="100" cy="100" r="5" fill="#c62828"/>
   <!-- Range RPM caps: L=2000, M=2500, H=2800 -->
@@ -60,7 +60,7 @@ h3{font-size:.68em;text-transform:uppercase;letter-spacing:.1em;color:#757575;ma
 <h3>Power</h3>
 <svg class="gauge" viewBox="0 0 200 120">
   <path d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="#e0e0e0" stroke-width="14" stroke-linecap="round"/>
-  <path id="pprog" fill="none" stroke="#212121" stroke-width="14" stroke-linecap="round"/>
+  <path id="pprog" fill="none" stroke="#1976d2" stroke-width="14" stroke-linecap="round"/>
   <line id="pneed" x1="100" y1="100" x2="100" y2="30" stroke="#c62828" stroke-width="3" stroke-linecap="round"/>
   <circle cx="100" cy="100" r="5" fill="#c62828"/>
   <!-- Reference graduations: 5/10/15 kW -->
@@ -70,8 +70,6 @@ h3{font-size:.68em;text-transform:uppercase;letter-spacing:.1em;color:#757575;ma
   <text x="34" y="34" text-anchor="middle" font-size="7" fill="#757575">5</text>
   <text x="100" y="10" text-anchor="middle" font-size="7" fill="#757575">10</text>
   <text x="166" y="34" text-anchor="middle" font-size="7" fill="#757575">15</text>
-  <!-- BMS power limit, direction-matched -->
-  <line id="plim" stroke="#ef6c00" stroke-width="2" stroke-linecap="round" style="display:none"/>
   <text x="20" y="116" text-anchor="middle" font-size="9" fill="#757575">0</text>
   <text x="180" y="116" text-anchor="middle" font-size="9" fill="#757575">20 kW</text>
   <text x="100" y="78" text-anchor="middle" font-size="26" font-weight="700" fill="#212121" id="pval">–</text>
@@ -158,21 +156,14 @@ function update(d){
   const cur=p.current_a,pwr=p.power_w;
   // Sign convention everywhere: positive = into pack (charging), negative = out.
   const curCls=cur!=null&&cur>0.05?'ok':'';
-  const pwrCls=pwr!=null&&pwr>5?'ok':'';
+  const pwrCls=pwr!=null&&pwr>0?'ok':'';
   const pwrStr=pwr==null?'–'
     :(pwr>0?'+':'')+(pwr/1000).toFixed(1);
-  // F107F3 BMS limits — direction-matched for the Current sub-line.
-  const lim=(d.bms&&d.bms.limit)||{};
-  const limA=cur==null?null
-    :cur>0.5?lim.charge_a
-    :cur<-0.5?lim.discharge_a
-    :null;
-  const curSub=limA!=null?Math.round(limA)+' A limit':'';
   document.getElementById('kpi').innerHTML=
     '<div class="card"><h3>SoC</h3><div class="big '+scls+'">'+f(soc,0)+'<span class="unit">%</span></div><div class="sub">'+(s.wh_remaining!=null&&s.wh_capacity?(s.wh_remaining/1000).toFixed(2)+' / '+fwh(s.wh_capacity):'')+'</div></div>'+
     '<div class="card"><h3>Voltage</h3><div class="big">'+f(p.voltage_v,1)+'<span class="unit">V</span></div><div class="sub">60 – 84 V range</div></div>'+
-    '<div class="card"><h3>Current</h3><div class="big '+curCls+'">'+fi(cur)+'<span class="unit">A</span></div><div class="sub">'+curSub+'</div></div>'+
-    '<div class="card"><h3>Power</h3><div class="big '+pwrCls+'">'+pwrStr+'<span class="unit">kW</span></div><div class="sub">'+(pwr!=null?Math.round(Math.abs(pwr)/200)+'% of 20 kW max':'')+'</div></div>';
+    '<div class="card"><h3>Current</h3><div class="big '+curCls+'">'+fi(cur)+'<span class="unit">A</span></div></div>'+
+    '<div class="card"><h3>Power</h3><div class="big '+pwrCls+'">'+pwrStr+'<span class="unit">kW</span></div></div>';
   const netCharging=s.wh_net!=null&&s.wh_net>0;
   const etaLabel=netCharging?'ETA to 100%':'ETA to 0%';
   const etaVal=netCharging?s.eta_to_full_s:s.eta_to_zero_s;
@@ -207,19 +198,7 @@ function update(d){
   document.getElementById('sunit').textContent='RPM';
   var pkw=pwr!=null?Math.abs(pwr)/1000:null;
   setGauge(pkw,20,'pprog','pneed');
-  document.getElementById('pprog').setAttribute('stroke',pwr!=null&&pwr>5?'#4caf50':'#212121');
-  var plim=document.getElementById('plim');
-  var limKw=limA!=null&&p.voltage_v!=null?limA*p.voltage_v/1000:null;
-  if(limKw!=null){
-    var pth=Math.PI*(1-Math.max(0,Math.min(limKw/20,1)));
-    plim.setAttribute('x1',(100+80*Math.cos(pth)).toFixed(2));
-    plim.setAttribute('y1',(100-80*Math.sin(pth)).toFixed(2));
-    plim.setAttribute('x2',(100+86*Math.cos(pth)).toFixed(2));
-    plim.setAttribute('y2',(100-86*Math.sin(pth)).toFixed(2));
-    plim.style.display='';
-  }else{
-    plim.style.display='none';
-  }
+  document.getElementById('pprog').setAttribute('stroke',pwr!=null&&pwr>0?'#4caf50':'#1976d2');
   document.getElementById('pval').textContent=pkw!=null?pkw.toFixed(1):'–';
   document.getElementById('punit').textContent=pkw!=null?'kW ('+Math.round(pkw/20*100)+'%)':'kW';
   document.getElementById('dir').innerHTML=

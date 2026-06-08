@@ -110,10 +110,12 @@ Signal names use a `domain.name` (or `domain.NN.name`) convention:
     motor.rpm_magnitude        FF21CA RPM unsigned
     motor.direction            +1 forward / 0 neutral / -1 reverse (F/N/R lever, byte 7 low nibble)
     motor.range_gear           1..3 range selector (byte 7 high nibble)
-    motor.throttle_raw         FF21CA byte 0 (0..0xCC in F / 0..0x96 in R under real
-                               load; F/R asymmetry suggests controller-side reverse
-                               limiter. Consistent with J1939 SPN 91 at 0.4 %/bit
-                               (raw 250 = 100%). Idle offset ~3, dead-low ~14)
+    motor.throttle_raw         FF21CA byte 0 — unsigned magnitude of the
+                               controller's commanded motor effort (torque /
+                               current command). Rises during both drive and
+                               regen; direction of work comes from
+                               sign(pack.current_a). See DOCUMENTATION.md
+                               §FF21CA.
     motor.controller_temp_c    FF21CA byte 4 (only emitted when nonzero)
     motor.motor_temp_c         FF21CA byte 5 (only emitted when nonzero)
     dash.alive                 FF2112 byte 0 (0=booting, 1=alive; 10 Hz heartbeat from SA 0x12)
@@ -243,27 +245,16 @@ Decoder assumptions (verify against the BMS spec before trusting numerically):
         data; trust the lamp/state decode but treat any future SPN as
         TENTATIVE until cross-checked against vendor documentation.
   * PGN 0xFF21 from 0xCA: motor controller / drive ECU telemetry.
-        byte 0     = throttle pedal position. The 30-capture neutral-only
-                     corpus showed byte 0 in 0..0x69 (0..105), but the
-                     real-world capture real-world-on-driving-mowing-off.asc
-                     extended this to 0..0xCC (204) in forward and 0..0x96
-                     (150) in reverse on the same pedal hardware. The
-                     forward/reverse ceiling asymmetry suggests a
-                     controller-side reverse-speed limiter applied before
-                     the byte goes on the wire. The byte is consistent with
-                     J1939 SPN 91 (Accelerator Pedal Position 1) at
-                     0.4 %/bit (raw 250 = 100%): 105 = 42% (neutral full),
-                     204 = 82% (forward peak), 150 = 60% (reverse peak).
-                     The 250-bit full-scale is a J1939-convention guess
-                     pending a "pedal mashed hard in F under load" capture
-                     for ground truth. Idle resting offset ~3 (sensor noise
-                     floor with foot off pedal); below raw ~14 the motor
-                     controller's internal dead-low keeps RPM near 0
-                     (a TPS_dead_low band is a generic Curtis/Kelly
-                     traction-controller idiom). The previously documented "max
-                     0x34" was a sample-size artifact and the "0..0x69 cap"
-                     was a neutral-mode artifact; neither was a true scale
-                     boundary.
+        byte 0     = throttle. Unsigned magnitude of the controller's
+                     commanded motor effort (torque / current command),
+                     raw 0..0xFF. Symmetric across drive and regen — the
+                     byte rises whether the motor is being driven or used
+                     as a generator. Direction of work comes from
+                     sign(pack.current_a) on F100F3, not from anywhere in
+                     FF21CA. Idle resting offset ~3 (sensor noise floor);
+                     below raw ~14 the controller's internal dead-low
+                     keeps RPM near 0. See DOCUMENTATION.md §FF21CA for
+                     the full interpretation and supporting observations.
         byte 1     = always 0x00 across 45,086 frames in 30 captures
                      (reserved padding)
         bytes 2-3  = motor RPM magnitude, little-endian uint16, biased by 0x0C80
@@ -746,11 +737,10 @@ DECODERS = [
      "range selector 1..3; verified by range-1-2-3.asc walking 1->2->3"),
     ("motor.throttle_raw", "FF21", "CA", "0", "u8 (raw)",
      "", "verified",
-     "0..0xCC (204) in real-world driving (forward); reverse caps at "
-     "0x96 (150) - likely controller-side reverse-speed limiter on the "
-     "same pedal hardware. Consistent with J1939 SPN 91 at 0.4 %/bit "
-     "(raw 250 = 100%); idle offset ~3, controller dead-low ~14. "
-     "Prior 0x69 ceiling was a neutral-mode artifact."),
+     "unsigned magnitude of controller's commanded motor effort "
+     "(torque / current command); symmetric across drive and regen. "
+     "Direction comes from sign(pack.current_a). Idle offset ~3, "
+     "controller dead-low ~14. See DOCUMENTATION.md §FF21CA."),
     ("motor.controller_temp_c", "FF21", "CA", "4", "u8 - 40",
      "c", "tentative",
      "main controller temp; consistently warmer than byte 5 and ramps up "

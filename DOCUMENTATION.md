@@ -45,6 +45,7 @@ off the pack (parts catalog Table 65).
 | Cell P/N                  | —                                     | —                                                  | `SEPNI-8688190P-17.5AH-5P`  | —                       | `SEPNI8688190P-15Ah` (battery faceplate) |
 | Cells in parallel         | —                                     | —                                                  | 4 modules × 5P1S = 20P      | "~20 cells in parallel" | —        |
 | Cells in series           | —                                     | —                                                  | 20 (one per module)         | 20                      | 20 (CAN captures) |
+| Charge rate (L1, 110 V)   | ~1.2 kW AC (implied by 11 hr 20→80 %) | —                                                  | —                           | —                       | 1475 W ± 3 W DC, constant 10–95 % SOC |
 | Charging temp range       | 0–40 °C                               | —                                                  | —                           | —                       | —        |
 | Charging time             | 5.5 hr (Lvl 2, 220 VAC, 20→80%); 11 hr (Lvl 1, 110 VAC) | 8 hr (0→100%, on-board charger)  | —                           | —                       | —        |
 | Charging-target voltage   | 83 V                                  | 82 VDC (§9.1)                                      | —                           | —                       | —        |
@@ -574,10 +575,11 @@ default/zeroed broadcast and shows up in several distinct contexts:
   through shutdown.
 - **Active AC charging**: persistent `27 10` throughout.
 - **Persistent low-SOC limp** when SOC drops below 10 %. Motor RPM
-  clipped at ~1380 (vs ~2800 at full power in high gear) and throttle
-  (FF21CA data[0]) topped out at 0x8B (54 % of full scale) before the
-  pedal stopped delivering more — the Curtis MC obeys the announced
-  discharge ceiling.
+  clipped at ~1380 (vs ~2800 at full power in high gear) and the
+  controller's effort-magnitude byte (FF21CA data[0]) clipped at 0x8B
+  (54 % of full scale) regardless of pedal press — the Curtis MC obeys
+  the announced 100 A discharge ceiling and reports the budget-capped
+  effort it's allowed to issue. See `FF21CA data[0]` below.
 - **Brief mid-drive transients** at low SOC: drives at SOC 10–14 %
   show sporadic ~2 s excursions to the `27 10` pattern with no
   abnormal current or voltage in F100F3 at the moment of the dip.
@@ -708,7 +710,7 @@ real-time inverter feed).
 
 | Byte | data[]        | Meaning                                                          |
 |------|---------------|------------------------------------------------------------------|
-| 1    | data[0]       | Throttle pedal position, raw 0..0xFF                              |
+| 1    | data[0]       | **Throttle** — unsigned magnitude of motor effort, raw 0..0xFF    |
 | 2    | data[1]       | 0x00 constant — fault-bitmap candidate (UNKNOWN)                  |
 | 3..4 | data[2..3] LE | **Motor RPM**: rpm = (le16) − 0x0C80                       |
 | 5    | data[4]       | **Controller temperature**: °C = raw − 40                          |
@@ -722,20 +724,38 @@ Reverse is signaled separately by data[7]. Physical source is the
 2-channel A/B quadrature encoder on the motor shaft — see "Motor
 speed encoder" below for the MC-side pinout.
 
-**Throttle pedal position (data[0]).** Raw 0..0xFF spanning the pedal
-range, no SPN-91 0.4 %/bit scaling applied. Observed ceilings:
+**Throttle (data[0]).** This field is **not pedal position** but
+rather the controller's unsigned magnitude of commanded motor torque /
+current — what fraction of motor max effort the controller is asking
+the inverter to apply. Symmetric across drive and regen: the byte
+rises whether the motor is being driven *or* being used as a
+generator. The direction of work (drive vs regen) is **not encoded
+anywhere in FF21CA** — derive it from the sign of `F100F3` pack
+current. Raw 0..0xFF; idle resting offset ~3 (sensor noise); below
+raw ~14 the controller's dead band keeps motor RPM near 0. CONFIRMED.
 
-    0x69 = 105 (throttle in neutral)
-    0x96 = 150 (reverse, real load)
-    0xFF = 255 (forward, real load, top speed in high gear)
+Three observations that establish the "effort, not pedal" reading:
 
-The 0xFF ceiling under forward load rules out the earlier "raw 250 =
-100 %" guess — full-scale is 0xFF, and the byte is a raw ADC-style
-reading rather than the J1939 SPN 91 encoding. The forward/reverse
-ceiling asymmetry (0xFF vs 0x96) points to a controller-side
-reverse-speed limiter applied before the byte goes on the wire. Idle
-resting offset ~3 (sensor noise); below raw ~14 the controller's dead
-band keeps RPM near 0.
+- **Stationary tests with the pedal floored and the brake set** top out
+  in the 0x20..0x48 range (= 13–28 % of raw scale). A pedal-position
+  field would read near full-scale regardless of load; an effort-demand
+  field stays low because the controller doesn't need to issue much
+  torque against a held vehicle.
+- **Heavy regen with the pedal fully released** drives the byte to
+  0x99..0xAE (≈ 60–70 %) while pack current swings to −133 A (into the
+  pack). Pedal-position cannot explain a high reading with the pedal
+  off; effort-demand can.
+- **Limp engagement** clips the byte at ~0x8B regardless of pedal
+  press, in lockstep with the BMS-broadcast 100 A discharge limit. The
+  controller is reporting the effort it's allowed to issue under the
+  active power budget, not the operator's request.
+
+The forward/reverse ceiling asymmetry noted historically (raw ceilings
+of 0xFF vs ~0x96) is a controller-side reverse-effort limiter applied
+before the byte goes on the wire. Values in the 0xFB–0xFF range
+occasionally appear during sustained heavy real-world driving and may
+represent a controller-internal saturation marker rather than a real
+effort level — SPECULATIVE.
 
 **Controller and motor temperatures (data[4], data[5]) — CONFIRMED.** Both u8 with
 the J1939 −40 °C offset. Raw 0 = not present (suppressed). data[4] is
