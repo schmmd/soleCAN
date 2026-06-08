@@ -112,7 +112,7 @@ Signal names use a `domain.name` (or `domain.NN.name`) convention:
     motor.range                R1/R2/R3 range-switch selector, value 1..3
                                (byte 7 high nibble; RPM cap selector — NOT the
                                mechanical L/M/H gear, which is sensor-less)
-    motor.throttle_raw         FF21CA byte 0 — unsigned magnitude of the
+    motor.torque_raw           FF21CA byte 0 — unsigned magnitude of the
                                controller's commanded motor effort (torque /
                                current command). Rises during both drive and
                                regen; direction of work comes from
@@ -247,7 +247,7 @@ Decoder assumptions (verify against the BMS spec before trusting numerically):
         data; trust the lamp/state decode but treat any future SPN as
         TENTATIVE until cross-checked against vendor documentation.
   * PGN 0xFF21 from 0xCA: motor controller / drive ECU telemetry.
-        byte 0     = throttle. Unsigned magnitude of the controller's
+        byte 0     = torque. Unsigned magnitude of the controller's
                      commanded motor effort (torque / current command),
                      raw 0..0xFF. Symmetric across drive and regen — the
                      byte rises whether the motor is being driven or used
@@ -396,7 +396,7 @@ PGN_NAMES = {
     0x00F107: "BMS current/voltage limits",
     0x00F108: "BMS active fault bitmap",
     0x00FF50: "Charger telemetry (V, A)",
-    0x00FF21: "Motor telemetry (RPM, throttle, state)",
+    0x00FF21: "Motor telemetry (RPM, torque, state)",
     0x000600: "BMS->Charger command (V/I setpoint, enable)",
 }
 
@@ -737,7 +737,7 @@ DECODERS = [
     ("motor.range", "FF21", "CA", "7",
      "(b7 >> 4) + 1", "", "verified",
      "range switch R1/R2/R3 (RPM cap selector); verified by range-1-2-3.asc walking 1->2->3"),
-    ("motor.throttle_raw", "FF21", "CA", "0", "u8 (raw)",
+    ("motor.torque_raw", "FF21", "CA", "0", "u8 (raw)",
      "", "verified",
      "unsigned magnitude of controller's commanded motor effort "
      "(torque / current command); symmetric across drive and regen. "
@@ -942,14 +942,14 @@ def summarize(counts: dict, rows: list):
         rpms_signed = values_for(rows, scenario, "motor.rpm_signed")
         rpms_mag = values_for(rows, scenario, "motor.rpm_magnitude")
         dirs = values_for(rows, scenario, "motor.direction")
-        thr = values_for(rows, scenario, "motor.throttle_raw")
+        tq = values_for(rows, scenario, "motor.torque_raw")
         if rpms_signed:
             n_fwd = sum(1 for d in dirs if d == 1)
             n_rev = sum(1 for d in dirs if d == -1)
             n_neu = sum(1 for d in dirs if d == 0)
             print(f"    motor RPM : {min(rpms_signed)}..{max(rpms_signed)} (signed)")
             print(f"    |RPM|     : {min(rpms_mag)}..{max(rpms_mag)}")
-            print(f"    throttle  : {min(thr)}..{max(thr)} (raw)")
+            print(f"    torque    : {min(tq)}..{max(tq)} (raw)")
             print(f"    F/N/R     : F={n_fwd}  R={n_rev}  N={n_neu}")
             ranges = values_for(rows, scenario, "motor.range")
             if ranges:

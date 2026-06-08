@@ -181,7 +181,7 @@ struct MotorState {
     uint16_t rpm_magnitude = 0;
     int8_t   direction     = 0;
     uint8_t  range    = 1;
-    uint8_t  throttle_raw  = 0;
+    uint8_t  torque_raw  = 0;
     int8_t   controller_temp_c = INT8_MIN;
     int8_t   motor_temp_c      = INT8_MIN;
     bool     valid             = false;
@@ -477,7 +477,7 @@ void decodeCAN(uint32_t can_id, const uint8_t* raw, uint8_t len) {
         g_motor.rpm_signed         = dir * rpm_mag;
         g_motor.direction          = dir;
         g_motor.range         = ((d[7] >> 4) & 0x0F) + 1;
-        g_motor.throttle_raw       = d[0];
+        g_motor.torque_raw       = d[0];
         if (d[4]) g_motor.controller_temp_c = (int8_t)(d[4] - TEMP_OFFSET_C);
         if (d[5]) g_motor.motor_temp_c      = (int8_t)(d[5] - TEMP_OFFSET_C);
         g_motor.valid = true;
@@ -709,7 +709,7 @@ String buildJson(bool pretty = true, bool minimal = false) {
         mot["rpm_magnitude"] = g_motor.rpm_magnitude;
         mot["direction"]     = g_motor.direction;
         mot["range"]    = g_motor.range;
-        mot["throttle_raw"] = g_motor.throttle_raw;
+        mot["torque_raw"] = g_motor.torque_raw;
         // Ground speed from RPM × range (Turf/Industrial tire calibration,
         // per Operator Manual p34; Agri tires would need different coeffs).
         if (g_motor.range >= 1 && g_motor.range <= 3) {

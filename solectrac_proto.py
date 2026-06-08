@@ -36,7 +36,7 @@ PGN_F107 = 0xF107   # BMS current limits (charge/discharge)
 PGN_F108 = 0xF108   # BMS active fault bitmap (byte 7 = dashboard codes)
 
 PGN_FF50 = 0xFF50   # charger telemetry (V, A, status)
-PGN_FF21 = 0xFF21   # motor telemetry (RPM, throttle, state) / dash heartbeat
+PGN_FF21 = 0xFF21   # motor telemetry (RPM, torque, state) / dash heartbeat
 PGN_FECA = 0xFECA   # SAE J1939-73 DM1 (Active Diagnostic Trouble Codes)
 PGN_PROP_0600 = 0x0600   # PDU1, src 0xF4 -> dest 0xE5: BMS charger setpoint
 
@@ -365,7 +365,7 @@ def decode(msg, emit, clear=_noop_clear):
         emit("motor.rpm_magnitude", rpm_mag, "rpm")
         emit("motor.direction", direction, "")
         emit("motor.range", range_, "")
-        emit("motor.throttle_raw", data[0], "")
+        emit("motor.torque_raw", data[0], "")
         if data[4]:
             emit("motor.controller_temp_c", data[4] - TEMP_OFFSET_C, "c")
         if data[5]:

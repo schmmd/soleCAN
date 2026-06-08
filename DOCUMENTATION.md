@@ -702,7 +702,7 @@ telemetry) and FECA (DM1, fault codes). FF21CA is suppressed entirely
 while charging — the controller goes silent when traction contactors
 (Albright SW200) are open.
 
-#### FF21CA — Motor telemetry — CONFIRMED (RPM, throttle, temps, state)
+#### FF21CA — Motor telemetry — CONFIRMED (RPM, torque, temps, state)
 
 Broadcast at ~85 Hz. Full 29-bit ID is `0x0CFF21CA` (priority 3, not
 the default 6 — higher priority than BMS broadcasts, consistent with a
@@ -710,7 +710,7 @@ real-time inverter feed).
 
 | Byte | data[]        | Meaning                                                          |
 |------|---------------|------------------------------------------------------------------|
-| 1    | data[0]       | **Throttle** — unsigned magnitude of motor effort, raw 0..0xFF    |
+| 1    | data[0]       | **Torque** — unsigned magnitude of motor effort, raw 0..0xFF      |
 | 2    | data[1]       | 0x00 constant — fault-bitmap candidate (UNKNOWN)                  |
 | 3..4 | data[2..3] LE | **Motor RPM**: rpm = (le16) − 0x0C80                       |
 | 5    | data[4]       | **Controller temperature**: °C = raw − 40                          |
@@ -724,7 +724,7 @@ Reverse is signaled separately by data[7]. Physical source is the
 2-channel A/B quadrature encoder on the motor shaft — see "Motor
 speed encoder" below for the MC-side pinout.
 
-**Throttle (data[0]).** This field is **not pedal position** but
+**Torque (data[0]).** This field is **not pedal position** but
 rather the controller's unsigned magnitude of commanded motor torque /
 current — what fraction of motor max effort the controller is asking
 the inverter to apply. Symmetric across drive and regen: the byte
@@ -806,7 +806,7 @@ the operator's range-switch selection from the dashboard control
 rabbit at R3; referred to as R1/R2/R3 throughout this documentation).
 It selects a motor-RPM cap (2000 / 2500 / 2800) and is **not** a
 mechanical gear stage — it does not change any drivetrain ratio. The
-cap is throttle-side only: it limits inverter-commanded RPM but not
+cap is drive-side only: it limits inverter-commanded RPM but not
 coast/regen overspeed. Motor RPM > 3000 has been observed in R3 while
 regen is active.
 
@@ -816,9 +816,9 @@ bus — only the operator knows it. A controlled rev-test capture
 (R3-mode pinned, F/N/R lever in Forward, pedal floored to 2800 motor
 RPM in each of L, M, H, and Neutral on the mechanical lever) showed the
 high nibble stayed at 0x2 across all four mechanical positions, while
-the FF21CA "throttle" effort byte tracked the drivetrain load and
+the FF21CA "torque" effort byte tracked the drivetrain load and
 ramped from ~0x22 (mechanical N, drivetrain disengaged) to ~0x84
-(mechanical H) — see the Throttle subsection above.
+(mechanical H) — see the Torque subsection above.
 
 **Ground speed is NOT derivable from CAN.** Wheel-speed computation
 requires knowing which mechanical gear is engaged, which the bus does

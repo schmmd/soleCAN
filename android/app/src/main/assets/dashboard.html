@@ -209,7 +209,7 @@ function update(d){
   setGauge(m.rpm_magnitude,3000,'sprog','sneed');
   document.getElementById('sval').textContent=m.rpm_magnitude!=null?m.rpm_magnitude:'–';
   document.getElementById('sunit').textContent='RPM';
-  var eff=m.throttle_raw;
+  var eff=m.torque_raw;
   var ebar=document.getElementById('ebar');
   if(eff!=null){
     var efrac=Math.max(0,Math.min(eff/255,1));

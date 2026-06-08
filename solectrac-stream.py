@@ -196,21 +196,22 @@ def describe_mc_code(code: int) -> str:
 #
 # Descriptions are looked up from BMS_FAULT_DESCRIPTIONS at render time
 # so the operator-manual text remains the single source of truth.
-# Throttle pedal scaling for FF21CA byte 0. Raw 0..0xFF; the byte is a
-# raw ADC-style reading, not the J1939 SPN 91 0.4 %/bit encoding the
-# earlier hypothesis assumed. Maxima observed in the corpus:
-#   - asc/full-throttle-*.asc (neutral, no load): raw 0x69 = 105
+# Torque (effort) scaling for FF21CA byte 0. Raw 0..0xFF; the byte is
+# the controller's commanded motor-effort magnitude (torque / current
+# command), NOT pedal position — see DOCUMENTATION.md §FF21CA byte 0.
+# Maxima observed in the corpus:
+#   - asc/full-throttle-*.asc (pedal floored, no load): raw 0x69 = 105
 #   - real-world-on-driving-mowing-off.asc (forward, real load): 0xCC = 204
 #   - real-world-on-driving-mowing-off.asc (reverse, real load): 0x96 = 150
 #   - driving-2800rpm-highgear-loader.asc (forward, top speed in high
 #     gear, real load): 0xFF = 255  (full-scale ground truth)
-# The forward/reverse asymmetry on the same pedal hardware (0xFF vs
-# 0x96) points to a controller-side reverse-speed limiter applied
-# before the byte goes on the wire. Idle offset ~3 (sensor noise with
-# foot off); controller dead-low ~14 (below this, motor RPM stays at 0;
-# matches the Kelly TPS_dead_low concept from the hydraulic pump doc).
-THROTTLE_DEAD_LOW = 3                          # idle resting offset (subtracted from raw)
-THROTTLE_PCT_PER_BIT = 100.0 / (0xFF - THROTTLE_DEAD_LOW)  # raw 0xFF = 100%
+# The forward/reverse asymmetry (0xFF vs 0x96) points to a
+# controller-side reverse-effort limiter applied before the byte goes
+# on the wire. Idle offset ~3 (sensor noise with foot off); controller
+# dead-low ~14 (below this, motor RPM stays at 0; matches the Kelly
+# TPS_dead_low concept from the hydraulic pump doc).
+TORQUE_DEAD_LOW = 3                          # idle resting offset (subtracted from raw)
+TORQUE_PCT_PER_BIT = 100.0 / (0xFF - TORQUE_DEAD_LOW)  # raw 0xFF = 100%
 # Motor RPM -> ground speed coefficients per range, calibrated for the
 # Turf/Industrial tire option (23x8.5-12 front, 33x13.5-16.5 rear).
 # Source: CET Operator Manual page 34 travel-speed table
@@ -330,7 +331,7 @@ class State:
     # motor controller (FF21CA)
     motor_rpm: Channel = field(default_factory=Channel)        # signed (dir * |rpm|)
     motor_rpm_mag: Channel = field(default_factory=Channel)    # |rpm| magnitude
-    motor_throttle: Channel = field(default_factory=Channel)
+    motor_torque: Channel = field(default_factory=Channel)
     motor_direction: Channel = field(default_factory=Channel)  # -1 R / 0 N / +1 F (byte 7 low nibble)
     motor_range: Channel = field(default_factory=Channel)      # R1/R2/R3 (byte 7 high nibble; RPM cap selector)
     # FF21CA bytes 4 and 5 are both J1939 +40 C-offset temps; byte 4 is
@@ -492,7 +493,7 @@ _NAME_TO_ATTR = {
     "motor.rpm_magnitude": "motor_rpm_mag",
     "motor.direction": "motor_direction",
     "motor.range": "motor_range",
-    "motor.throttle_raw": "motor_throttle",
+    "motor.torque_raw": "motor_torque",
     "motor.controller_temp_c": "controller_temp_c",
     "motor.motor_temp_c": "motor_temp_c",
     # FF21 dashboard heartbeat
@@ -1242,19 +1243,19 @@ def render_motor(state: State, now: float) -> Panel:
             rpm_text = Text(f"{sign}{mag:>5d}  (stale)", style="yellow dim")
     t.add_row("RPM", rpm_text)
 
-    thr = state.motor_throttle.value
-    if thr is None:
-        t.add_row("throttle", Text("---", style="dim"))
+    tq = state.motor_torque.value
+    if tq is None:
+        t.add_row("torque", Text("---", style="dim"))
     else:
         # Raw 0..0xFF mapped to 0..100% with a 3-unit idle dead-low
         # subtracted (sensor noise with foot off). No upper clamp: a raw
         # value above 0xFF (shouldn't happen) would render as >100%.
-        pct = max(0.0, (int(round(thr)) - THROTTLE_DEAD_LOW) * THROTTLE_PCT_PER_BIT)
+        pct = max(0.0, (int(round(tq)) - TORQUE_DEAD_LOW) * TORQUE_PCT_PER_BIT)
         bar_w = 20
         filled = max(0, min(bar_w, int(round(pct * bar_w / 100))))
         bar = Text("█" * filled + "░" * (bar_w - filled))
-        t.add_row("throttle",
-                  Text.assemble(bar, Text(f"  {pct:>5.1f}%  (raw {int(thr)})")))
+        t.add_row("torque",
+                  Text.assemble(bar, Text(f"  {pct:>5.1f}%  (raw {int(tq)})")))
 
     di = state.motor_direction.value
     if di is None:
@@ -1696,8 +1697,8 @@ def state_to_json(state: State, now: float, mode: str) -> dict:
         mot: dict = {"rpm_magnitude": int(state.motor_rpm_mag.value)}
         if state.motor_direction.value is not None:
             mot["direction"] = int(state.motor_direction.value)
-        if state.motor_throttle.value is not None:
-            mot["throttle_raw"] = int(state.motor_throttle.value)
+        if state.motor_torque.value is not None:
+            mot["torque_raw"] = int(state.motor_torque.value)
         if state.motor_range.value is not None:
             rg = int(state.motor_range.value)
             mot["range"] = rg
