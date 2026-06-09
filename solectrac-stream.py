@@ -763,19 +763,18 @@ def power_sparkline(state: State, width: int = POWER_SPARK_WIDTH) -> Text:
 # get plain green for "yes, this is on". Ordered to keep mutually
 # exclusive primary-mode pills (op / stby / chg) adjacent.
 _BMS_FLAGS: List[Tuple[str, str, str]] = [
-    ("bms_main_contactor", "MC",     "bold green"),
-    ("bms_contactors",     "ctct",   "green"),
-    ("bms_output_enable",  "out",    "green"),
-    ("bms_operating",      "OPER",   "bold green"),
-    ("bms_standby",        "STBY",   "bold cyan"),
-    ("bms_charging",       "CHG",    "bold green"),
-    ("bms_drive_mode",     "DRIVE",  "bold green"),
-    ("bms_charger_present", "chgr",  "green"),
+    ("bms_main_contactor", "MC",    "bold green"),
+    ("bms_contactors",     "ctct",  "green"),
+    ("bms_output_enable",  "out",   "green"),
+    ("bms_operating",      "OPER",  "bold green"),
+    ("bms_standby",        "PLUG",  "bold cyan"),
+    ("bms_charging",       "CHG",   "bold green"),
+    ("bms_drive_mode",     "DRIVE", "bold green"),
 ]
 
 
 def bms_flags_pills(state: State) -> Text:
-    """Compact pill row for the eight F106 BMS state flags.
+    """Compact pill row for the F106 BMS state flags.
 
     Each pill is the abbreviated flag name; bright when the flag is set,
     dim when clear. Pills are separated by a thin '·' so the row reads
@@ -1682,9 +1681,8 @@ def state_to_json(state: State, now: float, mode: str) -> dict:
             "output_enable":  int(bool(state.bms_output_enable.value)),
             "main_contactor": int(bool(state.bms_main_contactor.value)),
             "operating":      int(bool(state.bms_operating.value)),
-            "standby":        int(bool(state.bms_standby.value)),
+            "plug":           int(bool(state.bms_standby.value)),
             "charging":       int(bool(state.bms_charging.value)),
-            "charger_present": int(bool(state.bms_charger_present.value)),
             "drive_mode":     int(bool(state.bms_drive_mode.value)),
             "awake":          int(bool(state.bms_contactors.value)),
         }

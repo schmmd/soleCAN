@@ -262,8 +262,8 @@ function update(d){
     '</div>';
   var flagDefs=[
     ['Awake',bst.awake],['Drive Mode',bst.drive_mode],
-    ['Operating',bst.operating],['Standby',bst.standby],
-    ['Charging',bst.charging],['Charger Present',bst.charger_present],
+    ['Operating',bst.operating],['Plug',bst.plug],
+    ['Charging',bst.charging],
     ['Output Enabled',bst.output_enable],['Main Contactor',bst.main_contactor]
   ];
   document.getElementById('flags').innerHTML=flagDefs.map(function(x){
