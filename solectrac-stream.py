@@ -421,15 +421,6 @@ class State:
     # time.monotonic() of the most recent frame seen by decode(). Powers
     # the dashboard's "last frame age" footer in --ui web.
     last_frame_ts: Optional[float] = None
-    # time.monotonic() of the most recent BMS wake-up edge (first F107F3
-    # after a silent gap of >2 s or never-seen). Fires on full key cycles
-    # where the BMS goes offline.
-    bms_woke_at: Optional[float] = None
-    # time.monotonic() of the most recent motor-controller wake-up edge
-    # (first FF21CA after a silent gap of >0.5 s). Fires on partial key
-    # cycles (operator-presence-cutoff) where only the MC drops out while
-    # the BMS stays awake. Not set on the very first frame in a session.
-    mc_woke_at: Optional[float] = None
 
 
 # --- helpers ----------------------------------------------------------------
@@ -563,22 +554,6 @@ def decode(msg: "can.Message", state: State, now: float) -> None:
         attr = _NAME_TO_ATTR.get(name)
         if attr is None:
             return
-        # Detect a BMS wake-up edge on F107F3 (the limit_mode channel): a
-        # gap >2 s before this frame, or never-seen, marks the BMS coming
-        # back online after a full power-cycle.
-        if attr == "limit_mode":
-            prev_ts = state.limit_mode.ts
-            if prev_ts is None or (now - prev_ts) > 2.0:
-                state.bms_woke_at = now
-        # Detect a motor-controller wake-up edge on FF21CA: a gap > 0.5 s
-        # before this frame marks the MC coming back online after a key
-        # cycle. We do NOT trigger on the very first frame in a session
-        # (prev_ts is None) so that mid-operation replays don't spuriously
-        # show "starting" at startup.
-        elif attr == "motor_rpm_mag":
-            prev_ts = state.motor_rpm_mag.ts
-            if prev_ts is not None and (now - prev_ts) > 0.5:
-                state.mc_woke_at = now
         getattr(state, attr).update(value, now)
         # Derived state needs the just-updated value.
         if name == "pack.power_w":
@@ -1758,24 +1733,7 @@ def state_to_json(state: State, now: float, mode: str) -> dict:
             mot["motor_temp_c"] = int(state.motor_temp_c.value)
     out["motor"] = mot
 
-    # Tractor status: "on" / "starting" / "off". Starting fires for ~3 s
-    # after EITHER a BMS wake edge (full power cycle: F107F3 returns after
-    # silence and mode is still 0) OR a motor-controller wake edge (partial
-    # cycle: FF21CA returns after >0.5 s silence even though BMS stayed
-    # awake). Both edges are required to cover full and partial key cycles.
-    START_S = 3.0
-    mc_alive = mc_age < 0.5
-    booting_bms = (state.bms_woke_at is not None
-                   and (now - state.bms_woke_at) < START_S
-                   and state.limit_mode.value == 0)
-    booting_mc = (state.mc_woke_at is not None
-                  and (now - state.mc_woke_at) < START_S)
-    if booting_bms or booting_mc:
-        out["tractor"] = "starting"
-    elif mc_alive:
-        out["tractor"] = "on"
-    else:
-        out["tractor"] = "off"
+    out["tractor"] = "on" if mc_age < 0.5 else "off"
 
     if state.chgr_status.value is not None:
         chg: dict = {"status": int(state.chgr_status.value)}

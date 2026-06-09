@@ -171,10 +171,6 @@ struct BmsLimits {
     uint8_t  byte5         = 0;
     bool     valid         = false;
     uint32_t last_seen_ms  = 0;
-    // Wake-edge timestamp: set on the first F107F3 after a >2s silence
-    // (or after firmware boot). Fires on every key cycle that takes the
-    // BMS fully offline; used by the tractor-status "starting" detector.
-    uint32_t wake_ms       = 0;
 };
 
 struct BmsFaults {
@@ -193,10 +189,6 @@ struct MotorState {
     int8_t   motor_temp_c      = INT8_MIN;
     bool     valid             = false;
     uint32_t last_seen_ms      = 0;
-    // Wake-edge timestamp: set on the first FF21CA after a >0.5s silence.
-    // Fires on every key cycle that drops the MC, even partial cycles
-    // where the BMS stays awake. Not set on the very first frame.
-    uint32_t wake_ms           = 0;
 };
 
 struct ChargerState {
@@ -452,14 +444,7 @@ void decodeCAN(uint32_t can_id, const uint8_t* raw, uint8_t len) {
 
         } else if (pgn == PGN_F107) {
             if (allZero(d)) return;
-            {
-                uint32_t nowms = millis();
-                if (g_bms_limit.last_seen_ms == 0
-                    || (nowms - g_bms_limit.last_seen_ms) > 2000) {
-                    g_bms_limit.wake_ms = nowms;
-                }
-                g_bms_limit.last_seen_ms = nowms;
-            }
+            g_bms_limit.last_seen_ms = millis();
             g_bms_limit.discharge_a = be16(d[0], d[1]) * LIMIT_CURRENT_LSB_A;
             g_bms_limit.charge_a    = be16(d[2], d[3]) * LIMIT_CURRENT_LSB_A;
             g_bms_limit.charge_power_extra_w = be16(d[6], d[7]) * LIMIT_POWER_EXTRA_LSB_W;
@@ -502,14 +487,7 @@ void decodeCAN(uint32_t can_id, const uint8_t* raw, uint8_t len) {
         if (d[4]) g_motor.controller_temp_c = (int8_t)(d[4] - TEMP_OFFSET_C);
         if (d[5]) g_motor.motor_temp_c      = (int8_t)(d[5] - TEMP_OFFSET_C);
         g_motor.valid = true;
-        {
-            uint32_t nowms = millis();
-            if (g_motor.last_seen_ms != 0
-                && (nowms - g_motor.last_seen_ms) > 500) {
-                g_motor.wake_ms = nowms;
-            }
-            g_motor.last_seen_ms = nowms;
-        }
+        g_motor.last_seen_ms = millis();
 
     } else if (src == SRC_DASH && pgn == PGN_FF21) {
         g_dash_alive = d[0];
@@ -765,23 +743,11 @@ String buildJson(bool pretty = true, bool minimal = false) {
         }
     }
 
-    // Tractor status: "on" / "starting" / "off". Starting fires for ~3 s
-    // after EITHER a BMS wake edge (full power cycle) OR a motor-controller
-    // wake edge (partial cycle: FF21CA returns after >0.5s while BMS stays
-    // awake). Both edges are needed to cover full and partial key cycles.
     {
         uint32_t nowms = millis();
-        const uint32_t START_MS = 3000;
         bool mc_alive = g_motor.last_seen_ms != 0
                         && (nowms - g_motor.last_seen_ms) < 500;
-        bool booting_bms = g_bms_limit.wake_ms != 0
-                           && (nowms - g_bms_limit.wake_ms) < START_MS
-                           && g_bms_limit.mode == 0;
-        bool booting_mc = g_motor.wake_ms != 0
-                          && (nowms - g_motor.wake_ms) < START_MS;
-        const char* status = (booting_bms || booting_mc) ? "starting"
-            : (mc_alive ? "on" : "off");
-        doc["tractor"] = status;
+        doc["tractor"] = mc_alive ? "on" : "off";
     }
 
     // Charger
