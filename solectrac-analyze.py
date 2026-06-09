@@ -118,10 +118,10 @@ Signal names use a `domain.name` (or `domain.NN.name`) convention:
     motor.range                R1/R2/R3 range-switch selector, value 1..3
                                (byte 7 high nibble; RPM cap selector — NOT the
                                mechanical L/M/H gear, which is sensor-less)
-    motor.torque_raw           FF21CA byte 0 — unsigned magnitude of the
-                               controller's commanded motor effort (torque /
-                               current command). Rises during both drive and
-                               regen; direction of work comes from
+    motor.torque_raw           FF21CA bytes 0-1 (LE u16) — unsigned magnitude
+                               of the controller's commanded motor effort
+                               (torque / current command). Rises during both
+                               drive and regen; direction of work comes from
                                sign(pack.current_a). See DOCUMENTATION.md
                                §FF21CA.
     motor.controller_temp_c    FF21CA byte 4 (only emitted when nonzero)
@@ -255,20 +255,18 @@ Decoder assumptions (verify against the BMS spec before trusting numerically):
         data; trust the lamp/state decode but treat any future SPN as
         TENTATIVE until cross-checked against vendor documentation.
   * PGN 0xFF21 from 0xCA: motor controller / drive ECU telemetry.
-        byte 0     = torque. Unsigned magnitude of the controller's
-                     commanded motor effort (torque / current command),
-                     raw 0..0xFF. Symmetric across drive and regen — the
-                     byte rises whether the motor is being driven or used
-                     as a generator. Direction of work comes from
-                     sign(pack.current_a) on F100F3, not from anywhere in
-                     FF21CA. Idle resting offset ~3 (sensor noise floor);
-                     below raw ~14 the controller's internal dead-low
-                     keeps RPM near 0. See DOCUMENTATION.md §FF21CA for
-                     the full interpretation and supporting observations.
-        byte 1     = normally 0x00, but 0x01 appears in 353 frames across
-                     four driving captures (all forward motion, low torque,
-                     219..1425 RPM). Semantics UNKNOWN; not emitted as a
-                     decoded signal.
+        bytes 0-1  = torque, little-endian uint16. Unsigned magnitude of
+                     the controller's commanded motor effort (torque /
+                     current command), observed 0..262 — peak forward
+                     acceleration pushes past 255, which is why byte 1
+                     occasionally reads 0x01. Symmetric across drive and
+                     regen — the value rises whether the motor is being
+                     driven or used as a generator. Direction of work
+                     comes from sign(pack.current_a) on F100F3, not from
+                     anywhere in FF21CA. Idle resting offset ~3 (sensor
+                     noise floor); below raw ~14 the controller's internal
+                     dead-low keeps RPM near 0. See DOCUMENTATION.md
+                     §FF21CA for the full interpretation.
         bytes 2-3  = motor RPM magnitude, little-endian uint16, biased by 0x0C80
                      (rpm = ((b3<<8)|b2) - 0x0C80; verified against a
                      0->2500 RPM acceleration trace). Always positive; sign of
@@ -755,12 +753,12 @@ DECODERS = [
     ("motor.range", "FF21", "CA", "7",
      "(b7 >> 4) + 1", "", "verified",
      "range switch R1/R2/R3 (RPM cap selector); verified by range-1-2-3.asc walking 1->2->3"),
-    ("motor.torque_raw", "FF21", "CA", "0", "u8 (raw)",
+    ("motor.torque_raw", "FF21", "CA", "0-1", "u16 LE (raw)",
      "", "verified",
      "unsigned magnitude of controller's commanded motor effort "
-     "(torque / current command); symmetric across drive and regen. "
-     "Direction comes from sign(pack.current_a). Idle offset ~3, "
-     "controller dead-low ~14. See DOCUMENTATION.md §FF21CA."),
+     "(torque / current command), observed 0..262; symmetric across "
+     "drive and regen. Direction comes from sign(pack.current_a). Idle "
+     "offset ~3, controller dead-low ~14. See DOCUMENTATION.md §FF21CA."),
     ("motor.controller_temp_c", "FF21", "CA", "4", "u8 - 40",
      "c", "tentative",
      "main controller temp; consistently warmer than byte 5 and ramps up "

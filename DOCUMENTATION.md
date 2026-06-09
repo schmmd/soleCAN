@@ -523,7 +523,7 @@ Layout matches the standard J1939 limits-frame template:
 | 0..1  | Discharge current limit, 0.01 A/bit         | 0x38A4 (145.0 A) dominant (~92 % of frames); 0x2710 (100.0 A) at boot/idle/active charging/low-SOC limp; 0x2EE0 (120.0 A) and 0x36B0 (140.0 A) as brief boot-ramp intermediates |
 | 2..3  | Max current-into-pack acceptance (regen during drive, AC charger during charging), 0.01 A/bit | SOC-dependent taper: 130 A at 10–14 %, 124 A at 20–75 %, 110.5 A at 80 %, 100 A at ≥90 % (and during active AC charging). Boot ramps through 0x27D8…0x2FA8 in 2-A steps (102→122 A) before settling. See SOC-taper table below. |
 | 4     | Companion flag to bytes 0..1                | 0x01 when bytes 0..1 ∈ {0x36B0, 0x38A4} (≥140 A discharge limit); 0x00 when bytes 0..1 ∈ {0x2710, 0x2EE0} (≤120 A) — transition is between the 120 A and 140 A rungs of the boot ramp |
-| 5     | Pack-voltage echo (non-linear, banded)      | Live banded values when byte 4 = 0x01; 0x00 when byte 4 = 0x00             |
+| 5     | Pack-voltage echo, **linear** (`V ≈ 0.222 × b5 + 56.9`) | Live value when byte 4 = 0x01; 0x00 when byte 4 = 0x00             |
 | 6..7  | Charge-power allowance above 100 A baseline, BE u16 × 10 W | 0x0000 when charge limit is 100 A; otherwise tracks `(charge_limit_a - 100 A) × pack_voltage_v` |
 
 Bytes 0..1 stay pinned at 145.0 A throughout drive captures even when actual
@@ -567,9 +567,9 @@ startup/transition values:
 
 | Pattern                            | Bytes 0..1 | Bytes 2..3 | Byte 4 | Byte 5 | Context                              |
 |------------------------------------|------------|------------|--------|--------|--------------------------------------|
-| `38 A4 30 70 01 XX 00 YY`          | 145.0 A    | 124.0 A    | 0x01   | banded | Sustained drive default              |
-| `38 A4 32 C8 01 XX 00 YY`          | 145.0 A    | 130.0 A    | 0x01   | banded | Sustained low-SOC drive (10–14 %)    |
-| `38 A4 27 10 01 XX 00 YY`          | 145.0 A    | 100.0 A    | 0x01   | banded | High-SOC idle / brief drive transients |
+| `38 A4 30 70 01 XX 00 YY`          | 145.0 A    | 124.0 A    | 0x01   | V_pack | Sustained drive default              |
+| `38 A4 32 C8 01 XX 00 YY`          | 145.0 A    | 130.0 A    | 0x01   | V_pack | Sustained low-SOC drive (10–14 %)    |
+| `38 A4 27 10 01 XX 00 YY`          | 145.0 A    | 100.0 A    | 0x01   | V_pack | High-SOC idle / brief drive transients |
 | `27 10 27 10 00 00 00 00`          | 100.0 A    | 100.0 A    | 0x00   | 0x00   | Boot / key-off / active charging / low-SOC limp |
 
 Byte 4 and byte 5 are not independent state bits — they move in lockstep with
@@ -595,34 +595,30 @@ throughout without F107F3 sustaining the clamp (only the brief
 transients above), while a drive that crossed below 10 % held the
 clamp continuously.
 
-Byte 5 is a pack-voltage echo with a non-linear, banded encoding. Across 5,921
-driving frames in 24 captures, b5 deterministically predicts F100F3 V_pack:
-within-bucket V_pack standard deviation is 0.00–0.20 V, and treating b5 as a
-categorical predictor yields R² = 0.9994 (η²). The discharge-voltage-limit and
-contactor-diagnostic theories are ruled out: a static limit would not
-tick-by-tick track instantaneous V_pack, and contactor state is discrete rather
-than admitting a near-perfect functional dependence.
+Byte 5 is a pack-voltage echo with a **single linear encoding** — the
+previously-reported "banded, non-linear" behaviour was an analysis artifact:
 
-The mapping is not a single linear curve, however. Four observed bands:
+> **V_pack ≈ 0.222 × b5 + 56.9**, valid whenever byte 4 = 0x01.
 
-| b5 range  | V_pack         | Regime                                  |
-|-----------|----------------|-----------------------------------------|
-| 0x42–0x48 | 71.6–72.8 V    | Low-SOC sustained drive (variant 0x02)  |
-| 0x5A–0x61 | 76.9–78.5 V    | Heavy-load sag                          |
-| 0x6F–0x77 | 81.6–83.3 V    | Sustained drive                         |
-| 0x56–0x59 | 101.7–102.2 V  | Idle / pre-current-draw                 |
+Fit across 1,994 load samples from six driving captures (regen, high-gear,
+full-throttle reverse, braking, accelerate-decelerate): **R² = 0.9961, max
+residual 0.14 V, mean residual 0.075 V**. The fit holds across *both* F100F3
+voltage-range variants and at idle — `idle-n.asc`/`idle-f.asc` show b5 = 0x61,
+which the formula maps to 78.4 V against an F100F3 reading of 78.5 V. So byte 5
+is the same kind of low-bit voltage field as F100F3 data[1], with byte 4 acting
+as its enable.
 
-All four bands share a ~0.2 V/bit slope but each has its own intercept. A
-single linear formula `V_pack ≈ b5 × 0.2212 + 57.01` fits only the 0x6F–0x77
-band; pooled across all driving samples its R² collapses to 0.04. The
-0x42–0x48 band is the first observation in the low-voltage variant
-(F100F3 data[0]=0x02) regime and reinforces the banded picture with a fourth
-distinct intercept rather than closing in on a single curve. The values 0x4A
-and 0x4D, previously listed as init/teardown transients, actually slot into
-the heavy-load band at plausible V_pack and are not anomalous. The encoding
-scheme that produces the banded behaviour isn't pinned down. Not surfaced as
-a separate channel — the full-precision pack voltage is already on
-`state.pack_v`.
+The discharge-voltage-limit and contactor-diagnostic theories remain ruled out
+(a static limit would not tick-by-tick track instantaneous V_pack; contactor
+state is discrete), but the "four bands with distinct intercepts" picture is
+withdrawn. The apparent bands were a single continuous line: the doc's
+"heavy-load sag" (0x5A–0x61) and "sustained drive" (0x6F–0x77) regions lie on
+one slope, and the pooled-R²=0.04 collapse was caused entirely by the cited
+"idle 0x56–0x59 → 101.7–102.2 V" band, which **does not exist in the real idle
+captures** (they read b5 = 0x61 → 78.5 V, on the line). 102 V is the top of
+F100F3's variant-0x03 encodable range; those samples were stale boot/transition
+frames, not a fourth band. Not surfaced as a separate channel — the
+full-precision pack voltage is already on `state.pack_v`.
 
 #### F108F3 — BMS active fault bitmap — CONFIRMED via injection
 
@@ -714,8 +710,7 @@ real-time inverter feed).
 
 | Byte | data[]        | Meaning                                                          |
 |------|---------------|------------------------------------------------------------------|
-| 1    | data[0]       | **Torque** — unsigned magnitude of motor effort, raw 0..0xFF      |
-| 2    | data[1]       | Usually 0x00; brief 0x01 excursions during low-torque forward motion (UNKNOWN) |
+| 1..2 | data[0..1] LE | **Torque** — unsigned magnitude of motor effort, little-endian u16, observed 0..262 |
 | 3..4 | data[2..3] LE | **Motor RPM**: rpm = (le16) − 0x0C80                       |
 | 5    | data[4]       | **Controller temperature**: °C = raw − 40                          |
 | 6    | data[5]       | **Motor temperature**: °C = raw − 40                               |
@@ -728,14 +723,15 @@ Reverse is signaled separately by data[7]. Physical source is the
 2-channel A/B quadrature encoder on the motor shaft — see "Motor
 speed encoder" below for the MC-side pinout.
 
-**Torque (data[0]).** This field is **not pedal position** but
-rather the controller's unsigned magnitude of commanded motor torque /
-current — what fraction of motor max effort the controller is asking
-the inverter to apply. Symmetric across drive and regen: the byte
+**Torque (data[0..1], little-endian u16).** This field is **not pedal
+position** but rather the controller's unsigned magnitude of commanded motor
+torque / current — what fraction of motor max effort the controller is asking
+the inverter to apply. Symmetric across drive and regen: the value
 rises whether the motor is being driven *or* being used as a
 generator. The direction of work (drive vs regen) is **not encoded
 anywhere in FF21CA** — derive it from the sign of `F100F3` pack
-current. Raw 0..0xFF; idle resting offset ~3 (sensor noise); below
+current. Observed range 0..262 (peak forward acceleration pushes past
+the 8-bit boundary — see below); idle resting offset ~3 (sensor noise); below
 raw ~14 the controller's dead band keeps motor RPM near 0. CONFIRMED.
 
 Two observations that establish the "effort, not pedal" reading:
@@ -750,27 +746,26 @@ Two observations that establish the "effort, not pedal" reading:
   pack). Pedal-position cannot explain a high reading with the pedal
   off; effort-demand can.
 
-The forward/reverse ceiling asymmetry noted historically (raw ceilings of 0xFF
-vs ~0x96) is a controller-side reverse-effort limiter applied before the byte
+The forward/reverse ceiling asymmetry noted historically (raw ceilings of ~262
+vs ~0x96) is a controller-side reverse-effort limiter applied before the value
 goes on the wire.
 
-**Byte 1 (data[1]) remains UNKNOWN.** Across 425,941 FF21CA frames in 68
-captures, data[1] is `0x00` in 425,588 frames and `0x01` in 353 frames. The
-nonzero samples appear only in four driving captures, all during low-torque
-forward motion (torque raw 0..6, RPM 219..1425, range-state bytes 0x14 or
-0x24). It is not a steady fault bitmap: it does not co-fire with DM1, and it
-appears in normal driving without any displayed MC code.
-
-**Brief 0x00 transients under heavy load — CONFIRMED.** During heavy
-acceleration bursts where the byte is otherwise pinned at 0xFE/0xFF, the value
-occasionally drops to 0x00 for 1–3 frames (~30 ms) before snapping back to
-≥0xFE. These transients only appear at non-zero motor RPM in the middle of a
-sustained-high cluster (immediately preceding and following frames both ≥
-0xF0), so they cannot be real zero-effort readings. The mechanism is most
-plausibly an 8-bit wraparound or overflow artifact in the controller's internal
-effort calculation — TENTATIVE. Consumers should hold the previous reading
-across any 0x00 sample whose neighbours are near full-scale; treating the 0x00
-literally will produce dashboard flicker at peak load.
+**data[1] is the torque high byte — CONFIRMED.** Two phenomena that were
+documented separately turned out to be the same thing viewed through an 8-bit
+lens: (a) data[1]'s rare `0x01` excursions, briefly mis-read as a coast /
+freewheel flag, and (b) "brief 0x00 transients in data[0] under heavy load,"
+flagged as a probable wraparound artifact. Decoding data[0..1] as a
+little-endian u16 resolves both. Across all 353 nonzero-data[1] frames in the
+corpus (12 runs in 4 driving captures), every run enters and exits through
+data[0] = 0xFD–0xFF, and the 16-bit value is perfectly continuous across the
+boundary (…253, 254, 256, 257, 258… up to a corpus max of 262) while RPM climbs
+under hard forward acceleration — peak load, the opposite of coasting. The
+converse also holds: the corpus contains **zero** frames where data[0] = 0x00
+with full-scale neighbours and data[1] = 0x00, so the "transients" were never
+glitches — just the low byte of a value ≥ 256. No hold-previous workaround is
+needed; consumers should simply decode the u16. (The earlier "coast flag"
+signature — "torque ≈ 0, forward, RPM ~510–660" — was an artifact of reading
+data[0] alone: actual torque in those frames was 256–262.)
 
 **Controller and motor temperatures (data[4], data[5]) — CONFIRMED.** Both u8
 with the J1939 −40 °C offset. Raw 0 = not present (suppressed). data[4] is the
@@ -874,8 +869,9 @@ unlatch when DM1 returns to empty. Standard J1939 prescribes DTCs going
 "previously active" after 3 s of frame absence; this cluster keeps them on
 screen until a key cycle.
 
-FF21CA data[1] and data[6] remain unknown non-DM1 status candidates. data[6]
-is `0x00` in every one of 425,941 corpus frames; data[1] is described above.
+FF21CA data[6] remains an unknown non-DM1 status candidate — it is `0x00` in
+every one of 425,941 corpus frames. data[1] is the torque high byte, not a
+status field; see above.
 Injection of non-zero values into FF21CA byte 7 flashed dashboard lamps but
 never produced a numeric code.
 
@@ -1262,61 +1258,23 @@ order in the manual.
 
 ## Open questions
 
-- **SOH confirmation.** F100F3 data[5] = 0xFA (250 raw × 0.4 %/bit =
-  100 %) is the leading candidate — the only byte across 73 captures
-  that is both constant everywhere and decodes to 100 % under a
-  plausible scaling. UDAN's host-side export confirms the BMS does
-  publish a labeled `SOH(%)` field (= 100.0 on this pack), so the
-  thing exists; what remains open is whether F100F3 data[5] is the
-  byte that carries it. See the F100F3 section. Promoting to
-  CONFIRMED needs a capture where SOH differs from 100 %.
-- **Wake-up signal source — partially answered.** UDAN exports a
-  labeled "Wake-up signal" field whose value is a categorical enum
-  (not a single status bit). Two values observed directly in UDAN
-  exports: **`KL15`** (idle, key-on, no charger) and **`OBC`**
-  (plugged into the AC charger). Implication: the BMS broadcasts
-  must encode the wake source as a multi-value field somewhere — not
-  yet located in our decoded CAN traffic. Open question reframed:
-  *which BMS broadcast byte carries this enum*, given that we now
-  know it isn't a single bit. **F106F3 byte 0 is ruled out** — it
-  tracks current operating state (active/standby/boot) and changes
-  mid-session, whereas a wake-source enum should be set at boot and
-  persist.
-- **F106 / F107 byte-level decode.** F107 current limits and bytes 6..7 are
-  now decoded; byte 5 remains a banded pack-voltage echo with an unknown
-  encoding formula. F106 running-mode vocabulary is still only partially
-  mapped — `0x45` covers both driving and active charging, `0x80` only
-  applies when the charger is plugged in but not delivering, and a brief
-  `0x44` transition has been seen; vendor GUI implies more states.
-- **Full running-mode enumeration.** Vendor GUI implies at least
-  Calibrating, Charging, Discharging, Fault, Sleep beyond the
-  init/standby/ready states observed.
+- **SOH confirmation.** F100F3 data[5] (0xFA = 100 %) is the leading
+  candidate, but every capture is at SOH 100 % — confirming needs a
+  pack whose SOH differs. See the F100F3 section.
+- **F106F3 running-mode vocabulary.** Only 0x00 / 0x44 / 0x45 / 0x80
+  observed; vendor GUI implies more states (Calibrating, Charging,
+  Discharging, Fault, Sleep). See the F106F3 section.
 - **0x7FD wake frame on the BMS diagnostics bus.** One 8-byte all-zero
-  frame at CAN ID `0x7FD` appears on the diagnostics pair within ~10 ms
-  of each key-on (not at key-off). Origin and purpose UNKNOWN. It is an
-  11-bit standard CAN frame, not a J1939 frame.
-- **FF21CA data[1] and data[6] semantics.** Across 425,941 FF21CA
-  frames in 68 captures, data[6] is `0x00` in every frame; data[1] is
-  `0x00` in 425,588 frames and `0x01` in 353 brief excursions. The
-  data[1] nonzero samples appear only in four driving captures, all
-  during low-torque forward motion (torque raw 0..6, RPM 219..1425,
-  range-state bytes 0x14 or 0x24). Neither field co-fires with DM1,
-  but their exact status meanings remain unknown.
-- **SA 0xD0 physical home.** Schematic 5.10 only documents four CAN
-  nodes (MC, BMS, Charger, Cluster), and the OPC module shown on
-  schematic 5.9 is wired entirely discretely (no CAN). SA 0xD0 is
-  therefore likely a logical SA emitted by one of the four documented
-  ECUs, with the cluster the natural candidate, but capture evidence
-  alone cannot rule out a BMS bridge or undocumented accessory
+  11-bit frame ~10 ms after each key-on. Origin and purpose unknown.
+- **FF21CA data[6].** `0x00` in every one of 425,941 corpus frames;
+  meaning unknown.
+- **SA 0xD0 physical home.** Likely a logical SA emitted by one of the
+  four documented ECUs (cluster the natural candidate), but captures
+  alone can't rule out a BMS bridge or undocumented accessory
   controller.
-- **Motor encoder PPR.** Not documented in any manual (service manual,
-  CET operator manual, parts catalog, Curtis 1238 manual). The encoder
-  connector pinout is now known — signal on pins 2 & 3, supply on
-  pins 1 & 4 (see "Motor speed encoder" in the MC section) — so
-  tapping the pigtail is straightforward. The Curtis parameter name
-  for PPR is **"Encoder Steps"** (from the code-88 DTC description);
-  readable directly with a Curtis 1313 programmer. Alternatively,
-  spin the motor at a known RPM and count pulses on pins 2 and 3.
+- **Motor encoder PPR.** Not in any manual. Readable as the Curtis
+  "Encoder Steps" parameter via a 1313 programmer, or by counting
+  pulses on encoder pins 2/3 at a known RPM. See "Motor speed encoder".
 
 
 ## Sources

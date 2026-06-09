@@ -368,7 +368,7 @@ def decode(msg, emit, clear=_noop_clear):
         emit("motor.rpm_magnitude", rpm_mag, "rpm")
         emit("motor.direction", direction, "")
         emit("motor.range", range_, "")
-        emit("motor.torque_raw", data[0], "")
+        emit("motor.torque_raw", data[0] | (data[1] << 8), "")
         if data[4]:
             emit("motor.controller_temp_c", data[4] - TEMP_OFFSET_C, "c")
         if data[5]:

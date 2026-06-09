@@ -196,16 +196,17 @@ def describe_mc_code(code: int) -> str:
 #
 # Descriptions are looked up from BMS_FAULT_DESCRIPTIONS at render time
 # so the operator-manual text remains the single source of truth.
-# Torque (effort) scaling for FF21CA byte 0. Raw 0..0xFF; the byte is
-# the controller's commanded motor-effort magnitude (torque / current
-# command), NOT pedal position — see DOCUMENTATION.md §FF21CA byte 0.
+# Torque (effort) scaling for FF21CA bytes 0-1 (little-endian u16; the
+# value is the controller's commanded motor-effort magnitude (torque /
+# current command), NOT pedal position — see DOCUMENTATION.md §FF21CA.
 # Maxima observed in the corpus:
 #   - asc/full-throttle-*.asc (pedal floored, no load): raw 0x69 = 105
 #   - real-world-on-driving-mowing-off.asc (forward, real load): 0xCC = 204
 #   - real-world-on-driving-mowing-off.asc (reverse, real load): 0x96 = 150
-#   - driving-2800rpm-highgear-loader.asc (forward, top speed in high
-#     gear, real load): 0xFF = 255  (full-scale ground truth)
-# The forward/reverse asymmetry (0xFF vs 0x96) points to a
+#   - driving-2800rpm-highgear-loader.asc (forward, hard acceleration,
+#     real load): 262 — peak load runs past the 8-bit boundary, so the
+#     u16 decode matters; 255 is kept as the 100% reference point
+# The forward/reverse asymmetry (262 vs 0x96) points to a
 # controller-side reverse-effort limiter applied before the byte goes
 # on the wire. Idle offset ~3 (sensor noise with foot off); controller
 # dead-low ~14 (below this, motor RPM stays at 0; matches the Kelly
@@ -1259,8 +1260,8 @@ def render_motor(state: State, now: float) -> Panel:
         t.add_row("torque", Text("---", style="dim"))
     else:
         # Raw 0..0xFF mapped to 0..100% with a 3-unit idle dead-low
-        # subtracted (sensor noise with foot off). No upper clamp: a raw
-        # value above 0xFF (shouldn't happen) would render as >100%.
+        # subtracted (sensor noise with foot off). No upper clamp: peak
+        # forward acceleration reaches raw ~262 and renders as ~103%.
         pct = max(0.0, (int(round(tq)) - TORQUE_DEAD_LOW) * TORQUE_PCT_PER_BIT)
         bar_w = 20
         filled = max(0, min(bar_w, int(round(pct * bar_w / 100))))
