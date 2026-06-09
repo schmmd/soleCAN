@@ -121,12 +121,18 @@ table" in the iBMS-software-notes appendix.
 | DID    | UDAN tag           | Format                                       | Confidence |
 |--------|--------------------|----------------------------------------------|------------|
 | `0x0101` | `0x08` Voltages  | 20 × BE u16, mV                              | CONFIRMED  |
-| `0x0102` | `0x09` Temperatures | 7 × u8, `°C = raw − 40` (offset TENTATIVE) | CONFIRMED  |
+| `0x0102` | `0x09` Temperatures | 7 × u8, `°C = raw − 50` | CONFIRMED  |
 
 Sample `0x0101` payload (76.8 % SOC, idle):
 `3925 3925 3926 3926 3925 3924 3928 3927 3925 3925 3925 3923 3928 3926 3929 3929 3925 3927 3930 3929` mV.
 
-Sample `0x0102` payload: `41 41 41 41 40 41 41` → ~22 °C across 7 probes.
+Sample `0x0102` payload: `41 41 41 41 40 41 41` → 14–15 °C across 7 probes
+(matches the ~15 °C ambient in that capture). The UDS DIDs use a +50
+offset (UDAN-internal), **not** the SAE J1939 +40 used by the broadcast
+module-temperature PGNs — confirmed by disassembling
+`main.U600TemperatureType.MarshalJSON` in the iBMS PC Utility
+(`add eax, 0xffffffce` = −50). The two buses carry different raw values
+for the same physical probe.
 
 ### Pack-level state — DID `0x2800` (UDAN `0x93`)
 
@@ -930,12 +936,6 @@ Cell volt / Temp) that wasn't screenshotted.
   requires a *new* fault firing (byte 0 incrementing past `0x02`) — the
   on-pack historical CSV only records `ChgOV` + `ChgPackOV` across all
   240 rows, so its column ordering alone cannot anchor the byte order.
-- **Thermal offset.** `0x0102` is currently TENTATIVE `°C = raw − 40`.
-  Wire-vs-UI alignment in `bms-screenshots.asc` (raw `41 41 41 41 40 41 41`)
-  against Screenshots (2)/(3)/(4) shows all 7 probes displayed as 1°C,
-  which is inconsistent with both `raw − 40` and `raw − 64` — the single
-  `0x40` outlier should produce a distinct °C value but doesn't. Needs a
-  capture with non-uniform probe temperatures to disambiguate.
 - **Bootstrap RequestDownload payload.** Confirmed static across sessions
   (see above); remaining open question is what the blob *is*.
 - **Late-session routine burst trigger.** See above.
