@@ -29,6 +29,7 @@ h3{font-size:.68em;text-transform:uppercase;letter-spacing:.1em;color:#757575;ma
 .bithex{font-family:monospace;flex:0 0 52px;color:#616161}
 .bitcell{flex:1 1 0;text-align:center;padding:3px 0;border-radius:4px;background:#eee;color:#9e9e9e;white-space:nowrap;overflow:hidden}
 .bitcell.on{background:#c8e6c9;color:#1b5e20}
+.bitcell.flt.on{background:#ffcdd2;color:#b71c1c}
 .bitcell.unk{color:#bdbdbd}
 .bitcell.unk.on{background:#ffe0b2;color:#e65100}
 .alert{background:#ffcdd2;color:#b71c1c;border-radius:8px;padding:10px 12px;margin-bottom:8px;font-size:.9em;font-weight:600}
@@ -269,13 +270,14 @@ function update(d){
     null,null,null,['Run','Run Context'],['Prechg','Precharge']];
   var B1_NAMES=[null,null,['NoDrive','Drive Disabled'],['Charge','Charging'],
     null,['Drive','Drive Mode'],['Awake','Awake'],null];
-  function bitRow(label,val,names){
+  // onCls: extra class for set cells ('flt' renders faults red).
+  function bitRow(label,val,names,onCls){
     if(val==null)return'';
     var h='<div class="bitrow"><div class="bithex">'+label+' '+
       (val<16?'0':'')+val.toString(16).toUpperCase()+'</div>';
     for(var b=7;b>=0;b--){
       var on=(val>>b)&1,nm=names[b];
-      h+='<div class="bitcell'+(nm?'':' unk')+(on?' on':'')+
+      h+='<div class="bitcell'+(nm?'':' unk')+(on?' on'+(onCls?' '+onCls:''):'')+
         '" title="bit '+b+' (0x'+(1<<b).toString(16).toUpperCase()+')'+
         (nm?' '+nm[1]:'')+'">'+(nm?nm[0]:b)+'</div>';
     }
@@ -286,22 +288,13 @@ function update(d){
   var bot='';
   if(d.charger){
     // chg.flags: Elcon fault flags (FF50E5 byte 4); 0x00 = actively delivering.
-    var cf=chg.flags;
-    var CHGR_FLAGS=[[0x01,'hardware fault'],[0x02,'over-temperature'],
-      [0x04,'no AC input'],[0x08,'output not connected'],[0x10,'no BMS command']];
-    var stTxt;
-    if(cf==null)stTxt='–';
-    else if(cf===0)stTxt='CHARGING';
-    else{
-      var rs=CHGR_FLAGS.filter(function(x){return cf&x[0];}).map(function(x){return x[1];});
-      var unk=cf&~0x1F;
-      if(unk)rs.push('unknown bits 0x'+unk.toString(16).toUpperCase());
-      stTxt='not charging — '+rs.join(', ');
-    }
+    var CF_NAMES=[['HW','Hardware Fault'],['Temp','Over-Temperature'],
+      ['NoAC','No AC Input'],['NoOut','Output Not Connected'],
+      ['NoCmd','No BMS Command'],null,null,null];
     var dcw=(p.voltage_v!=null&&chg.current_a!=null)
       ? Math.round(p.voltage_v*chg.current_a)+' W' : '–';
     bot+='<div class="card" style="grid-column:1/-1"><h3>Charger</h3>'+
-      kv('State',stTxt)+
+      '<div class="bits">'+bitRow('fl',chg.flags,CF_NAMES,'flt')+'</div>'+
       kv('Charger voltage',chg.voltage_v!=null?chg.voltage_v.toFixed(1)+' V':'–')+
       kv('Charger current',chg.current_a!=null?chg.current_a.toFixed(1)+' A':'–')+
       kv('Charger power',dcw)+

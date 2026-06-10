@@ -1738,12 +1738,15 @@ def state_to_json(state: State, now: float, mode: str) -> dict:
         out["charger"] = chg
 
     if (state.chgr_cmd_v_v.value is not None
-            or state.chgr_cmd_i_a.value is not None):
+            or state.chgr_cmd_i_a.value is not None
+            or state.chgr_cmd_enable.value is not None):
         cmd: dict = {}
         if state.chgr_cmd_v_v.value is not None:
             cmd["voltage_v"] = round(state.chgr_cmd_v_v.value, 1)
         if state.chgr_cmd_i_a.value is not None:
             cmd["current_a"] = round(state.chgr_cmd_i_a.value, 1)
+        if state.chgr_cmd_enable.value is not None:
+            cmd["enable"] = int(state.chgr_cmd_enable.value)
         out["chgr_cmd"] = cmd
 
     return out
