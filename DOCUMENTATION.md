@@ -267,8 +267,9 @@ as additional data storage:
 ```
 
 In J1939 data collected for the Solectrac, > 99% of frames are PDU2
-broadcasts. The only recurring PDU1 exception is `1806E5F4`: a proprietary
-charger-command request from SA 0xF4 to the on-board charger at 0xE5.
+broadcasts. The only recurring PDU1 exception is `1806E5F4`: the standard
+Elcon/TC-protocol charger command from SA 0xF4 to the on-board charger at
+0xE5 (see the 1806E5F4 section).
 
 ### Source-address map
 
@@ -286,7 +287,7 @@ document.
 | 0xD0 | Vehicle / accessory controller (physical home unresolved) | Periodic F100D0 heartbeat; byte-0 0x00 → 0x0C at wake-up     |
 | 0xCA | Motor controller / drive ECU          | DM1 (FECA) + FF21 motor telemetry (~85 Hz); silent while charging |
 | 0x12 | Dashboard / instrument cluster        | FF21 heartbeat at ~10 Hz; byte 0 = 0x00 during boot, 0x01 once alive |
-| 0x041 (11-bit) | Ignition event marker (non-J1939) | Standard CAN 2.0A, not J1939. Constant payload `20 12 01 00 00 00 01 11`. Observed exactly twice per full ignition cycle (one frame at key-on, one at key-off); absent from captures that don't span a power transition. Source ECU unconfirmed. |
+| 0x041 (11-bit) | Instrument-cluster power-transition marker (non-J1939) | Standard CAN 2.0A, not J1939. Constant payload `20 12 01 00 00 00 01 11`. One frame at cluster power-up and one at power-down: key-on/key-off in drive sessions, and equally the operator-confirmed mid-charge key cycles used to check SOC on the dash, where the markers bracket windows with the dash heartbeat running while VC and MC stay silent. The cluster is the only node transitioning at every observed firing (BMS and charger broadcast straight through them), making it the near-certain sender. |
 
 #### FF2112 — Dashboard heartbeat — CONFIRMED
 
@@ -343,7 +344,7 @@ present).
 | 3..4 BE | min cell mV                                        |
 | 5       | max-cell **number, 1-based**                       |
 | 6       | min-cell **number, 1-based**                       |
-| 8       | status/flag bits (semantics TENTATIVE)             |
+| 8       | **cell-voltage spread, mV** (= bytes 1..2 − bytes 3..4) |
 
 **Indexing convention:** byte 5/6 use 1-based cell numbers as the BMS GUI
 displays them ("Max cell #19"). The parser's `cell_index` in `cells.csv` is
@@ -357,49 +358,51 @@ voltage in the per-cell snapshot taken alongside it — likely a timing-skew or
 filtering artifact in the BMS. The *index* still correctly identifies the right
 cell.
 
-Smallest spread observed across all captures: 3 mV (124 frames in
-`recorded-data/charging.csv`).
+**Byte 8 is the cell-voltage spread** — `max − min` of this frame's own
+bytes 1..2 and 3..4, in mV. Confirmed by exhaustive identity check:
+**522,027 / 522,027 frames match exactly** (zero residuals) across the
+capture corpus, spanning drive, idle, and a full 14-hour 10→100 %
+charge. Across the charge it behaves like a real physical quantity:
+15,138 value changes, every one a ±1 mV step, ranging 2–11 mV. This
+makes F102 fully symmetric with F104, whose byte 5 is the analogous
+temperature spread.
+
+Smallest spread observed across all captures: 2 mV.
 
 #### F100F3 — Pack status — CONFIRMED (voltage, current, SOC)
 
 | Byte | data[]  | Meaning                                                     |
 |------|---------|-------------------------------------------------------------|
-| 1    | data[0] | **Voltage-range selector**: 0x03 = high range, 0x02 = low range (see below) |
-| 2    | data[1] | **Pack terminal voltage**: V = raw × 0.1 + (76.8 if data[0]=0x03 else 51.2) |
+| 1..2 | data[0..1] BE | **Pack terminal voltage**: V = raw × 0.1              |
 | 3..4 | data[2..3] BE | **Signed pack current**: A = (be16 − 0x7D00) × 0.1    |
 | 5    | data[4] | **BMS-published SOC**: % = raw × 0.4 − 0.8                  |
 | 6    | data[5] | 0xFA constant — **leading SOH candidate** (250 raw × 0.4 %/bit = 100 %) |
 | 7    | data[6] | 0x14 (= 20) — series cell count                             |
 | 8    | data[7] | 0x00 constant                                               |
 
-**Voltage-range selector (data[0]).** The variant byte selects one of
-two adjacent 25.5 V bands for the 8-bit `data[1]` field. Same 0.1 V
-LSB in both:
+**Pack terminal voltage (data[0..1])** is a single big-endian 16-bit
+field at 0.1 V/bit — the same encoding as the charger's FF50E5 output
+voltage. The pack's 60–84 V operating window keeps the high byte at
+0x02 or 0x03 (51.2–102.3 V), which can make the field masquerade as a
+"range-selector byte plus 8-bit voltage"; the high byte carries no
+information beyond being the top of the voltage value, and ticks
+between 0x02 and 0x03 simply as pack V crosses 76.8 V (at lower SOC,
+under heavy-load sag, and during active charging).
 
-| data[0] | Formula | Encodable range |
-|---------|---------|-----------------|
-| 0x03 (high) | V = data[1] × 0.1 + 76.8 | 76.8 – 102.3 V |
-| 0x02 (low)  | V = data[1] × 0.1 + 51.2 | 51.2 – 76.7 V |
+Anchored by linear regression of the field against 20 × mean(cell mV)
+across all 70 captures, fitted separately on each side of the 76.8 V
+(raw 0x0300) boundary:
 
-`76.8 − 51.2 = 25.6 = 256 × 0.1`, so the variant byte effectively acts as a 9th
-high-order bit on `data[1]`, giving a combined dynamic range of 51.2 – 102.3 V.
-The BMS switches variants automatically as pack V crosses the 76.8 V threshold
-— observed at lower SOC (every soc-50, soc-60, and load-sagged soc-70 capture
-is variant 0x02; soc-70-idle is still variant 0x03; soc-80+ are all variant
-0x03), and transiently during heavy-load sag or active charging even at higher
-SOC.
+| High byte | Fit (raw8 = low byte) | n | RMSE |
+|------|-----|---|------|
+| 0x03 | V = 0.0998 × raw8 + 76.82 | 13,370 | 0.028 V |
+| 0x02 | V = 0.1003 × raw8 + 51.13 | 14,127 | 0.033 V |
 
-**Pack terminal voltage** anchored by linear regression of data[1] versus 20 ×
-mean(cell mV) across all 70 captures, separately for each variant:
-
-| Variant | Fit | n | RMSE |
-|---------|-----|---|------|
-| 0x03 | V = 0.0998 × raw + 76.82 | 13,370 | 0.028 V |
-| 0x02 | V = 0.1003 × raw + 51.13 | 14,127 | 0.033 V |
-
-Max residual under 1 V in both, attributable to high-current transients where
-pack V swings faster than the BMS broadcasts. Cross-checked against the FF50
-charger frame which uses the variant-0x03 encoding (R² = 0.986 across 2863
+Both fits are the BE-16 × 0.1 decode restated per high-byte band
+(0x0300 × 0.1 = 76.8, 0x0200 × 0.1 = 51.2). Max residual under 1 V in
+both, attributable to high-current transients where pack V swings
+faster than the BMS broadcasts. Cross-checked against the FF50 charger
+frame, which carries the same BE-16 encoding (R² = 0.986 across 2863
 active-charging frames).
 
 **Pack current** is signed BE-16 with a fixed bias of 0x7D00 (raw 32000 = 0 A)
@@ -491,28 +494,61 @@ Cross-validated two ways:
 
 #### F106F3 — BMS state — PARTIALLY CONFIRMED
 
-Periodic frame; byte 0 carries a state-machine vocabulary:
+Periodic frame. Byte 0 is **two bitfields, not a flat enum** — a context
+bit plus a three-step activity ladder:
 
-| byte 0 | Inferred meaning                                  |
-|--------|---------------------------------------------------|
-| 0x00   | init / boot                                       |
-| 0x44   | brief transition (seen once between 0x80 and 0x45) |
-| 0x45   | active operation — driving OR actively delivering AC charge (2163/2169 frames in the 14-hour L1 charge are 0x45, not 0x80) |
-| 0x80   | **J1772 plug present, charger not yet delivering** — covers plug-no-AC and plug-AC-handshake-pending alike |
+| Bits | Meaning                                                       |
+|------|---------------------------------------------------------------|
+| bit 6 (0x40) | **Run context** — normal key-on operation             |
+| bit 7 (0x80) | **Plug context** — J1772 present, charge not active   |
+| low bits     | **Activity ladder**: 0x00 init → 0x04 ready → 0x05 active |
 
-A controlled plug-cycle (key on throughout) showed byte 0 stepping 0x45 → 0x80
-at the instant the J1772 connector was inserted into the tractor, and back to
-0x45 the instant active charging began (concurrent with FF50E5 status → 0x03).
-0x80 is therefore a **pre-charge** plug-present indicator only — it clears
-once charging is active. Three other bytes flip in lockstep at the same plug-in
-moment: F108F3 byte 5 = 0x01, F108F3 byte 7 = 0xBB (= 140 + 142 + 143 + 144 +
-145, the maintenance cluster), and 1806E5F4 bytes 0..4 = `00 00 00 00 01` (vs.
-the steady `03 4E 01 86 00` when no plug). Behavior on mid-charge unplug is
-not yet observed (the controlled capture ran at near-full SOC and the BMS
-went to sleep before the unplug step).
+Every observed value is a product of the two parts: 0x00 (boot),
+0x40 / 0x44 / 0x45 (run context climbing the ladder), and
+0x80 / 0x84 / 0x85 (plug context, same ladder). The ladder moves one
+step at a time: key-on boot runs 0x00 → 0x44 → 0x45; end of charge
+steps down 0x45 → 0x85 → 0x84 → 0x80 over ~3 s as delivery stops.
+0x84/0x85 also appear transiently around OPC shutdown, so they are
+ordinary ladder steps, not charge-specific states.
 
-Vendor GUI implies more states exist (Calibrating, Charging, Discharging,
-Fault, Sleep); not observed in captured data.
+**0x45 ("run, active") covers driving and actively delivering AC charge
+alike** — during a full L1 charge essentially every frame is 0x45, not
+0x80.
+
+**0x80 = plug present, charging not active.** A controlled plug-cycle
+(key on throughout) showed byte 0 stepping 0x45 → 0x80 at the instant
+the J1772 connector was inserted into the tractor, and back to 0x45 the
+instant active charging began. It also *returns* to 0x80 after a charge
+completes and persists until the BMS sleeps — so it is not limited to
+the pre-charge handshake. Nor is it guaranteed during one: a plug-in
+with AC ready went from 0x45 straight into active charging (~7 s
+handshake) without ever showing 0x80. Three other bytes flip in
+lockstep at the plug-in moment: F108F3 byte 5 = 0x01, F108F3 byte 7 =
+0xBB (= 140 + 142 + 143 + 144 + 145, the maintenance cluster), and
+1806E5F4 switches to the 0 V / 0 A stop command `00 00 00 00 01` (vs.
+the steady 84.6 V / 39 A enable command `03 4E 01 86 00` when no plug —
+see the 1806E5F4 section).
+
+**End-of-charge shutdown sequence** (observed once, AC removed at
+~100 % SOC): byte 0 steps 0x45 → 0x85 → 0x84 → 0x80 while the charger's
+output voltage decays toward zero and its flag byte cascades
+0x08 → 0x0C → 0x1C (see FF50E5); the BMS keeps broadcasting in the 0x80
+state for ~30 s and then sleeps. An unplug that interrupts an active
+mid-SOC charge remains unobserved.
+
+**Byte 1 — companion status byte (TENTATIVE).** Five values observed:
+0x80 (boot, alongside byte 0 = 0x00), 0x84 (boot transition), 0xE0 (no
+plug), 0xC4 (plug present), 0xCC (actively charging). It flips at the
+exact plug-in and charge-start instants and is *more* specific than
+byte 0 during charging: it distinguishes plug-present (0xC4) from
+actively-charging (0xCC) while byte 0 sits at 0x45 for both. Reads
+naturally as J1939 2-bit status pairs (bits 3..2: 0 = no plug, 1 = plug
+present, 3 = charging; bits 7..6: 3 = running, 2 = init). Bytes 2..7
+are constant `FC FF FF FF FF FF` across the entire corpus.
+
+Vendor GUI implies more states exist (Calibrating, Charging,
+Discharging, Fault, Sleep); whether they map onto further byte-0 /
+byte-1 codes is not observed in captured data.
 
 #### F107F3 — BMS limits — PARTIALLY CONFIRMED
 
@@ -520,27 +556,47 @@ Layout matches the standard J1939 limits-frame template:
 
 | Bytes | Likely meaning                              | Observed                                                  |
 |-------|---------------------------------------------|-----------------------------------------------------------|
-| 0..1  | Discharge current limit, 0.01 A/bit         | 0x38A4 (145.0 A) dominant (~92 % of frames); 0x2710 (100.0 A) at boot/idle/active charging/low-SOC limp; 0x2EE0 (120.0 A) and 0x36B0 (140.0 A) as brief boot-ramp intermediates |
-| 2..3  | Max current-into-pack acceptance (regen during drive, AC charger during charging), 0.01 A/bit | SOC-dependent taper: 130 A at 10–14 %, 124 A at 20–75 %, 110.5 A at 80 %, 100 A at ≥90 % (and during active AC charging). Boot ramps through 0x27D8…0x2FA8 in 2-A steps (102→122 A) before settling. See SOC-taper table below. |
+| 0..1  | Discharge current limit, 0.01 A/bit         | 0x38A4 (145.0 A) dominant (~92 % of frames); 0x2710 (100.0 A) in the default pattern (boot/idle/active charging/low-SOC limp); 0x2EE0 (120.0 A) and 0x36B0 (140.0 A) as brief boot-ramp intermediates |
+| 2..3  | Max current-into-pack acceptance (regen) while in drive, 0.01 A/bit — never published during AC charging | SOC-dependent taper: 130 A at 10–14 %, 124 A at 20–75 %, 110.5 A at 80 %, 100 A at ≥90 % (and whenever the frame sits in its default pattern). Boot ramps through 0x27D8…0x2FA8 in 2-A steps (102→122 A) before settling. See SOC-taper table below. |
 | 4     | Companion flag to bytes 0..1                | 0x01 when bytes 0..1 ∈ {0x36B0, 0x38A4} (≥140 A discharge limit); 0x00 when bytes 0..1 ∈ {0x2710, 0x2EE0} (≤120 A) — transition is between the 120 A and 140 A rungs of the boot ramp |
 | 5     | Pack-voltage echo, **linear** (`V ≈ 0.222 × b5 + 56.9`) | Live value when byte 4 = 0x01; 0x00 when byte 4 = 0x00             |
 | 6..7  | Charge-power allowance above 100 A baseline, BE u16 × 10 W | 0x0000 when charge limit is 100 A; otherwise tracks `(charge_limit_a - 100 A) × pack_voltage_v` |
 
-Bytes 0..1 stay pinned at 145.0 A throughout drive captures even when actual
-pack current on F100F3 peaks above 230 A during high-gear acceleration (one
-capture peaked at 233.9 A while F107 never widened). So this field is not an
-enforced instantaneous ceiling — most plausibly a continuous/nameplate rating
-broadcast as an advisory, with real protection living on separate voltage-sag
-and temperature thresholds.
+**The frame is mode-gated.** Bytes 0..1 and 2..3 never move
+independently: outside the boot slew-ramp, every observed change is a
+whole-frame switch between an ACTIVE shape (b0..1 = 145.0 A, b2..3 =
+SOC-band value, byte 4 = 0x01, byte 5 = live V echo) and the DEFAULT
+shape `27 10 27 10 00 00 00 00`. Boot, key-off, active AC charging, the
+sustained sub-10 %-SOC clamp, and the brief mid-drive transients are
+all the same default broadcast — one inactive mode, not separately
+computed limit reductions.
+
+Bytes 0..1 stay pinned at 145.0 A throughout drive captures even when
+instantaneous pack current on F100F3 peaks far above it (246 A
+observed). It is therefore not an instantaneous ceiling — but it may
+still be an enforced **continuous** limit rather than an advisory: in
+the most aggressive long drives the worst-case 30 s and 60 s
+rolling-average currents are 143 A and 140 A, just under the published
+145 A, with only sub-30-s bursts exceeding it. Separately, the value
+itself never responds to load, temperature, or SOC in any capture (the
+only dynamics are the boot slew and the mode switch), so a static
+configured rating is as consistent with the data as a computed limit.
+An inverted reading also fits: 100 A — the default-mode value — as the
+continuous rating, with 145 A a short-term boost allowance granted
+while the pack is healthy. Real instantaneous protection, if any, lives
+on separate voltage-sag and temperature thresholds.
 
 Bytes 6..7 are confirmed as a charge-power allowance above the 100 A baseline.
 Across all paired F107/F100 frames the raw value matches `(charge_limit_a - 100
 A) × pack_voltage_v / 10` within 1 raw count — so b2..3 and b6..7 are a
 redundant A-and-W encoding of the same allowance.
 
-**Bytes 2..3 are the max current the BMS will accept *into* the pack** from
-whatever source is pushing — regen during driving, the OBC during AC charging.
-The value follows a clean monotonic taper with SOC:
+**Bytes 2..3 are the max current the BMS will accept *into* the pack
+while in drive** — in practice a regen acceptance. The taper below is
+never broadcast during AC charging (a full 10→100 % charge stayed in
+the default pattern throughout), so the field does not serve as
+guidance to the OBC; the BMS's actual charger command is the separate
+1806E5F4 frame. The value follows a clean monotonic taper with SOC:
 
 | SOC band  | b2..3   | Acceptance |
 |-----------|---------|------------|
@@ -551,16 +607,24 @@ The value follows a clean monotonic taper with SOC:
 
 This is a textbook battery-acceptance curve: the empty pack can sink more
 current safely, and the BMS narrows the budget as SOC climbs to avoid
-overcharge. The same taper applies to AC charging (the OBC sees the same
-guidance), but the OBC only delivers ~21 A DC anyway, so the number doesn't
-constrain it in practice. During active AC charging the whole frame collapses
-to `27 10 27 10 00 00 00 00` regardless of SOC — see the "Active AC charging"
-bullet below.
+overcharge. Two caveats on interpretation. First, the BMS GUI's rated
+charge current is **78 A DC — below every value in the taper** — which
+suggests b2..3 is a short-duration (pulse) allowance rather than a
+continuous charge rating. Second, every taper rung was observed in a
+*different* session: no capture shows a live band-edge step mid-drive,
+so a value latched per SOC at frame activation is so far
+indistinguishable from a continuously tracked one. (SOC and open-circuit
+cell voltage are also nearly collinear in this data, and all drive
+captures sit at 15–17 °C, so cell-Vmax or temperature as the real
+driver is not yet excluded either.)
 
-Like b0..1, **b2..3 is advisory, not an enforced ceiling**:
-`driving-2800rpm-highgear-regen.asc` shows instantaneous regen hitting
-−133.8 A while b2..3 was publishing 124 A. Real protection lives on the same
-voltage/temperature thresholds noted for b0..1.
+Like b0..1, **b2..3 is not an instantaneous ceiling**: regen bursts
+reach −185 A against a published 124 A. But the bursts are short —
+worst-case 5 s average regen stays near −73 A and 10 s near −52 A — so,
+as on the discharge side, a pulse-window or filtered-current
+enforcement fits the data as well as "advisory" does. Real
+instantaneous protection lives on the same voltage/temperature
+thresholds noted for b0..1.
 
 **Common F107F3 patterns.** The frame has four dominant steady-state shapes plus
 startup/transition values:
@@ -586,7 +650,10 @@ up in several distinct contexts:
   throughout normal charge.
 - **Brief mid-drive transients** at low SOC: drives at SOC 10–14 % show
   sporadic ~2 s excursions to the `27 10` pattern with no abnormal current or
-  voltage in F100F3 at the moment of the dip.
+  voltage in F100F3 at the moment of the dip. Cell voltages, temperatures,
+  and the F106 state byte are all unremarkable at the dip instants too —
+  these read as whole-frame resets to the default broadcast, not limit
+  recalculations.
 
 The sustained 100.0 A clamp is a **separate threshold** from the F108
 code 101 (SOC ≤ 15 %) and code 140 fault bits: a continuous ~15-minute
@@ -602,10 +669,10 @@ previously-reported "banded, non-linear" behaviour was an analysis artifact:
 
 Fit across 1,994 load samples from six driving captures (regen, high-gear,
 full-throttle reverse, braking, accelerate-decelerate): **R² = 0.9961, max
-residual 0.14 V, mean residual 0.075 V**. The fit holds across *both* F100F3
-voltage-range variants and at idle — `idle-n.asc`/`idle-f.asc` show b5 = 0x61,
+residual 0.14 V, mean residual 0.075 V**. The fit holds across the full
+pack-voltage range and at idle — idle captures show b5 = 0x61,
 which the formula maps to 78.4 V against an F100F3 reading of 78.5 V. So byte 5
-is the same kind of low-bit voltage field as F100F3 data[1], with byte 4 acting
+is a coarser companion to the F100F3 pack-voltage field, with byte 4 acting
 as its enable.
 
 The discharge-voltage-limit and contactor-diagnostic theories remain ruled out
@@ -615,9 +682,8 @@ withdrawn. The apparent bands were a single continuous line: the doc's
 "heavy-load sag" (0x5A–0x61) and "sustained drive" (0x6F–0x77) regions lie on
 one slope, and the pooled-R²=0.04 collapse was caused entirely by the cited
 "idle 0x56–0x59 → 101.7–102.2 V" band, which **does not exist in the real idle
-captures** (they read b5 = 0x61 → 78.5 V, on the line). 102 V is the top of
-F100F3's variant-0x03 encodable range; those samples were stale boot/transition
-frames, not a fourth band. Not surfaced as a separate channel — the
+captures** (they read b5 = 0x61 → 78.5 V, on the line). Those 102 V samples
+were stale boot/transition frames, not a fourth band. Not surfaced as a separate channel — the
 full-precision pack voltage is already on `state.pack_v`.
 
 #### F108F3 — BMS active fault bitmap — CONFIRMED via injection
@@ -651,7 +717,7 @@ as the code on).
 | Bit | Mask | Code | Meaning                                       |
 |-----|------|------|-----------------------------------------------|
 | 0   | 0x01 | 140  | System fault level                            |
-| 1   | 0x02 | —    | Status flag, no dashboard code. Co-fires with bit 0 (140) and qualifies it — see byte-7 bit-1 note below. TENTATIVE |
+| 1   | 0x02 | —    | Status flag, no dashboard code. Co-fires with bit 0 (140) and qualifies it — see byte-7 bit-1 note below. PARTIALLY CONFIRMED |
 | 2   | 0x04 | —    | (silent)                                      |
 | 3   | 0x08 | 142  | BMS fault need maintenance                    |
 | 4   | 0x10 | 143  | Battery fault need maintenance                |
@@ -668,14 +734,18 @@ Notable:
   identically.
 - Bit 2 has never been observed asserted; semantics UNKNOWN.
 
-**Byte-7 bit 1 (0x02) — qualifier on code 140** (TENTATIVE).
+**Byte-7 bit 1 (0x02) — qualifier on code 140** (PARTIALLY CONFIRMED).
 Across the capture corpus, bit 1 has only two observed byte-7
 contexts: `0x03` (= 140 + bit 1, dominant) and `0xBB` (= 140 + bit 1 +
-142 + 143 + 144 + 145). It **never fires without bit 0 (code 140)**.
-But the reverse is not true: code 140 can fire with bit 1 *clear*,
-and that case shows up only in charging-context captures with byte 7
-= `0xB9` (140 + 142 + 143 + 144 + 145; the "full-charge maintenance"
-pattern with bit 1 deliberately suppressed).
+142 + 143 + 144 + 145). It **never fires without bit 0 (code 140)** —
+a rule that now also holds across the 500k+ frames of a full 10→100 %
+charge. But the reverse is not true: code 140 can fire with bit 1
+*clear*, and that case shows up only in charging contexts: byte 7 =
+`0x01` (140 alone, sustained through hours of active charging
+alongside the full-charge codes 102 + 109 elsewhere in the frame) and
+`0xB9` (140 + 142 + 143 + 144 + 145; the "full-charge maintenance"
+pattern). In both, bit 1 is suppressed exactly as the
+charging-qualifier semantic predicts.
 
 That gives a tight semantic: **bit 1 ≈ "code 140 is asserted and the
 BMS is not in the charging-maintenance state"** — a discharge-side
@@ -895,38 +965,51 @@ questions.
 
 #### FF50E5 — Charger telemetry — CONFIRMED (V, A, status)
 
-Proprietary B frame from the on-board charger.
+Charger→BMS status broadcast. The on-board charger speaks the standard,
+publicly documented **Elcon/TC charger CAN protocol**: `18FF50E5` status
+out of the charger, `1806E5F4` command into it (next section). All
+multi-byte fields are big-endian, 0.1 unit/bit.
 
 | Byte | data[]  | Meaning                                                |
 |------|---------|--------------------------------------------------------|
-| 1    | data[0] | **Status / mode**                                      |
-| 2..3 | data[1..2] LE | Output voltage: V = raw × 0.1 + status-selected offset (valid while status is 0x02 or 0x03) |
-| 4..5 | data[3..4] LE | Output-current raw. In active charging `data[4] = 0`, so current = `data[3] × 0.1 A`; nonzero `data[4]` marks idle/self-test artifacts |
+| 1..2 | data[0..1] BE | **Output voltage**: V = raw × 0.1                |
+| 3..4 | data[2..3] BE | **Output current**: A = raw × 0.1                |
+| 5    | data[4] | **Status flags** (see below)                           |
 
-**The status byte is dual-purpose: it indicates that the OBC is actively
-delivering charge AND selects the pack-V encoding offset for `data[1..2]`** —
-the same low/high variant scheme as F100F3 byte 0.
+The voltage is one 16-bit field spanning the full 0–102.3 V range —
+there is no mode/range byte. During active charging it tracks pack
+voltage (linear regression against F100F3 across a multi-hour L1
+charge: slope 0.099–0.102 V/LSB, R² > 0.99 below 76.8 V, R² = 0.986
+across the end-of-charge taper above it). Outside active charging it
+reads the charger's own output terminals, not the pack: ~0.2 V with the
+plug inserted but no charge running, a slow rise toward pack voltage
+during key-on wake-up, and a smooth exponential decay (59 → 11 V over
+~30 s) after charging stops. That continuous decay walks the high byte
+0x02 → 0x01 → 0x00, which is what definitively pins the field as a
+single BE-16 value.
 
-Status byte vocabulary:
+Output current has only been observed below 25.6 A (L1 charging tops
+out at ~21.5 A), so the high byte `data[2]` has read 0x00 in every
+capture; an L2 (220 V) charge should push it to 0x01.
 
-| Value      | Meaning                                                                                   |
-|------------|-------------------------------------------------------------------------------------------|
-| 0x00       | Idle / not delivering                                                                     |
-| 0x01       | Transient handshake (only seen briefly during wake-up / ramp)                             |
-| 0x02       | **Actively delivering charge, LO pack-V encoding** — `data[1..2]` = pack V × 0.1 + 51.2 V (covers 51.2..76.7 V)  |
-| 0x03       | **Actively delivering charge, HI pack-V encoding** — `data[1..2]` = pack V × 0.1 + 76.8 V (covers 76.8..102.3 V) |
+Status flags (`data[4]`) follow the Elcon convention:
 
-`data[3]` = DC charger output current × 0.1 A/bit, no offset, while status is
-0x02/0x03 and `data[4] = 0x00` — CONFIRMED in both 0x02 and 0x03. The combined
-`data[3..4]` LE value is still kept as a raw diagnostic field because `data[4]`
-carries nonzero sentinel/status values outside active charging.
+| Bit | Mask | Elcon meaning                                        | Observed |
+|-----|------|------------------------------------------------------|----------|
+| 0   | 0x01 | Hardware failure                                     | never    |
+| 1   | 0x02 | Charger over-temperature                             | never    |
+| 2   | 0x04 | Input (AC) voltage abnormal / absent                 | yes      |
+| 3   | 0x08 | Battery voltage not detected (output not connected)  | yes      |
+| 4   | 0x10 | Communication timeout (no 1806 command received)     | yes      |
 
-The encoding for `data[1..2]` is anchored by linear regression across a
-multi-hour L1 charge in status 0x02: slope 0.099 V/LSB, intercept 51.6 V (R² >
-0.99) — matches the F100F3 byte-0 LO variant within 1 %. In status 0x03 the
-same regression against the end-of-charge taper yields slope 0.1024 V/LSB,
-intercept 77.04 V (R² = 0.9856) — the HI variant. The 0x02 → 0x03 transition
-fires when pack V crosses ~76.8 V; it is not a CC→CV phase change.
+Observed flag-byte values and contexts:
+
+| data[4] | Context                                                          |
+|---------|------------------------------------------------------------------|
+| 0x00    | Actively delivering charge — the only context where it reads 0  |
+| 0x08    | Plug inserted, not delivering                                    |
+| 0x14, 0x1C | Key-on wake-up with no AC source                              |
+| 0x08 → 0x0C → 0x1C | Shutdown cascade after charging ends: output disconnects, then AC input drops, then the command stream stops |
 
 The 0x4000 DID mirrors FF50 `data[0..3]` at its bytes 5..8 during charging;
 0x4000 byte 9 is a separate unknown dynamic/status byte — see `bms/README.md`
@@ -941,23 +1024,51 @@ expected to land at ~3 kW DC, matching the brochure's 3.3 kW rating. A brief
 true-CV taper (18 A → 9.9 A in ~6 min) occurs at the very end of charge before
 a clean `3 → 2 → 1 → 0` shutdown.
 
-**`data[1..2]` is only a valid pack-V reading while status ∈ {0x02, 0x03}.**
-The charger module beacons self-test artifacts during wake-up and when the plug
-is inserted without AC mains:
+**The voltage field is only a pack-V reading while flags = 0x00** (output
+connected, charge flowing). With the plug inserted but no charge running
+the frame still beacons, reading ~0.2 V / 0 A / flags 0x08; during
+key-on wake-up with no AC it reads its own rising output voltage with
+flags 0x14/0x1C.
 
-- Plug inserted, no AC: status = 0x00, v_raw = 2, i_raw = 2048
-  (constant). FF50E5 still beacons at ~10 Hz.
-- No charger connected: status briefly cycles 0x00 → 0x01 → 0x02
-  during wake-up with nonsensical v/i values for a few frames.
-
-Status = 0x00 means "not actively delivering" — it does **not** distinguish
-charger absent / charger present but unpowered / charger present but
+FF50E5 alone does **not** distinguish charger absent / present-but-idle /
 BMS-inhibited. Plug-presence detection lives on the BMS side: F106F3 byte 0 =
 0x80 asserts at the instant the J1772 is inserted (with F108F3 byte 5 = 0x01
 and byte 7 = 0xBB co-asserting), and clears once active charging begins. A
 robust plug-present signal across all states is therefore
-`(F106F3 b0 == 0x80) OR (FF50E5 status ∈ {0x02, 0x03})` — pre-charge handshake
+`(F106F3 b0 == 0x80) OR (FF50E5 flags == 0x00)` — pre-charge handshake
 plus active charging. Mid-charge unplug behavior remains uncharacterized.
+
+#### 1806E5F4 — BMS charging command — CONFIRMED (max V, max A, enable)
+
+The BMS→charger half of the Elcon/TC protocol, sent from the BMS's
+charger-interface SA 0xF4 to the charger at 0xE5 — the bus's only
+recurring PDU1 frame. Bytes 6..8 are 0xFF padding.
+
+| Byte | data[]  | Meaning                                            |
+|------|---------|----------------------------------------------------|
+| 1..2 | data[0..1] BE | **Max allowed charging voltage**, 0.1 V/bit  |
+| 3..4 | data[2..3] BE | **Max allowed charging current**, 0.1 A/bit  |
+| 5    | data[4] | **0x00 = charge enable, 0x01 = stop**              |
+
+Two steady command patterns observed:
+
+| Pattern          | Decode                  | Context                                        |
+|------------------|-------------------------|------------------------------------------------|
+| `03 4E 01 86 00` | 84.6 V / 39.0 A, enable | Default request whenever the BMS wants charge available |
+| `00 00 00 00 01` | 0 V / 0 A, stop         | Plug present but BMS not requesting charge (near-full pack, post-charge) |
+
+The 39.0 A ceiling matches the BMS GUI's rated AC charge current
+exactly, and 84.6 V = 20 × 4.23 V/cell sits just above the 83 V
+charging-target voltage. When the request activates, the current
+command slews 0 → 39.0 A in 10.0 A steps rather than stepping directly
+— the same slew-limited style as the F107 limits ramp. Note the command
+is an upper bound, not a setpoint: the L1 OBC is mains-power-limited
+and delivers only ~21 A against the 39 A allowance.
+
+Transmission gating is not fully characterized: the frame beacons
+continuously while the J1772 is inserted, appears as a brief
+ramp-and-stop burst around some key-ons without a plug, and is absent
+entirely in other no-plug stretches.
 
 
 ### Vehicle controller (SA 0xD0)
@@ -1261,9 +1372,19 @@ order in the manual.
 - **SOH confirmation.** F100F3 data[5] (0xFA = 100 %) is the leading
   candidate, but every capture is at SOH 100 % — confirming needs a
   pack whose SOH differs. See the F100F3 section.
-- **F106F3 running-mode vocabulary.** Only 0x00 / 0x44 / 0x45 / 0x80
-  observed; vendor GUI implies more states (Calibrating, Charging,
-  Discharging, Fault, Sleep). See the F106F3 section.
+- **F106F3 vocabulary.** Byte 0's bitfield ladder (0x00 / 0x40 / 0x44 /
+  0x45 / 0x80 / 0x84 / 0x85) and byte 1's five status values are mapped,
+  but the vendor GUI implies more states (Calibrating, Fault, Sleep) —
+  whether those get their own codes is unobserved. See the F106F3
+  section.
+- **F107F3 limit semantics.** Static configured ratings vs computed
+  limits; pulse vs continuous (the BMS GUI rates charge at 78 A DC,
+  below every broadcast 100–130 A value); SOC taper latched at frame
+  activation vs live-tracked; SOC vs cell-Vmax vs temperature as the
+  taper's driver. Discriminators: read the stored current thresholds
+  off the UDAN config page; capture a drive crossing a SOC band edge;
+  capture a sustained >60 s heavy pull; capture a cold-pack drive. See
+  the F107F3 section.
 - **0x7FD wake frame on the BMS diagnostics bus.** One 8-byte all-zero
   11-bit frame ~10 ms after each key-on. Origin and purpose unknown.
 - **FF21CA data[6].** `0x00` in every one of 425,941 corpus frames;
