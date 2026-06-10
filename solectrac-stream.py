@@ -1729,24 +1729,28 @@ def state_to_json(state: State, now: float, mode: str) -> dict:
 
     out["tractor"] = "on" if mc_age < 0.5 else "off"
 
-    if state.chgr_flags.value is not None:
-        chg: dict = {"flags": int(state.chgr_flags.value)}
-        if state.chgr_v.value is not None:
-            chg["voltage_v"] = round(state.chgr_v.value, 2)
-        if state.chgr_i.value is not None:
-            chg["current_a"] = round(state.chgr_i.value, 1)
+    # Charger (FF50E5, 1 Hz) and BMS command (1806E5F4, ~19 Hz) values are
+    # only published while fresh: the charger is silent without AC and the
+    # command gating is uncharacterized, so a stale value would render as
+    # live state. The dashboard shows '–' for absent fields.
+    chg: dict = {}
+    if not state.chgr_flags.is_stale(now):
+        chg["flags"] = int(state.chgr_flags.value)
+    if not state.chgr_v.is_stale(now):
+        chg["voltage_v"] = round(state.chgr_v.value, 2)
+    if not state.chgr_i.is_stale(now):
+        chg["current_a"] = round(state.chgr_i.value, 1)
+    if chg:
         out["charger"] = chg
 
-    if (state.chgr_cmd_v_v.value is not None
-            or state.chgr_cmd_i_a.value is not None
-            or state.chgr_cmd_enable.value is not None):
-        cmd: dict = {}
-        if state.chgr_cmd_v_v.value is not None:
-            cmd["voltage_v"] = round(state.chgr_cmd_v_v.value, 1)
-        if state.chgr_cmd_i_a.value is not None:
-            cmd["current_a"] = round(state.chgr_cmd_i_a.value, 1)
-        if state.chgr_cmd_enable.value is not None:
-            cmd["enable"] = int(state.chgr_cmd_enable.value)
+    cmd: dict = {}
+    if not state.chgr_cmd_v_v.is_stale(now):
+        cmd["voltage_v"] = round(state.chgr_cmd_v_v.value, 1)
+    if not state.chgr_cmd_i_a.is_stale(now):
+        cmd["current_a"] = round(state.chgr_cmd_i_a.value, 1)
+    if not state.chgr_cmd_enable.is_stale(now):
+        cmd["enable"] = int(state.chgr_cmd_enable.value)
+    if cmd:
         out["chgr_cmd"] = cmd
 
     return out

@@ -286,20 +286,22 @@ function update(d){
   document.getElementById('flags').innerHTML=
     bitRow('b0',bst.byte0,B0_NAMES)+bitRow('b1',bst.byte1,B1_NAMES);
   var bot='';
-  if(d.charger){
-    // chg.flags: Elcon fault flags (FF50E5 byte 4); 0x00 = actively delivering.
-    var CF_NAMES=[['HW','Hardware Fault'],['Temp','Over-Temperature'],
-      ['NoAC','No AC Input'],['NoOut','Output Not Connected'],
-      ['NoCmd','No BMS Command'],null,null,null];
-    var dcw=(p.voltage_v!=null&&chg.current_a!=null)
-      ? Math.round(p.voltage_v*chg.current_a)+' W' : '–';
-    bot+='<div class="card" style="grid-column:1/-1"><h3>Charger</h3>'+
-      '<div class="bits">'+bitRow('fl',chg.flags,CF_NAMES,'flt')+'</div>'+
-      kv('Charger voltage',chg.voltage_v!=null?chg.voltage_v.toFixed(1)+' V':'–')+
-      kv('Charger current',chg.current_a!=null?chg.current_a.toFixed(1)+' A':'–')+
-      kv('Charger power',dcw)+
-      kv('BMS setpoint V / A',f(cmd.voltage_v)+' / '+f(cmd.current_a))+'</div>';
-  }
+  // Charger card always renders; fields show '–' while the charger
+  // (FF50E5) or BMS command (1806E5F4) is silent or stale.
+  // chg.flags: Elcon fault flags (FF50E5 byte 4); 0x00 = actively delivering.
+  var CF_NAMES=[['HW','Hardware Fault'],['Temp','Over-Temperature'],
+    ['NoAC','No AC Input'],['NoOut','Output Not Connected'],
+    ['NoCmd','No BMS Command'],null,null,null];
+  var dcw=(p.voltage_v!=null&&chg.current_a!=null)
+    ? Math.round(p.voltage_v*chg.current_a)+' W' : '–';
+  bot+='<div class="card" style="grid-column:1/-1"><h3>Charger</h3>'+
+    (chg.flags!=null
+      ?'<div class="bits">'+bitRow('fl',chg.flags,CF_NAMES,'flt')+'</div>'
+      :kv('Flags','–'))+
+    kv('Charger voltage',chg.voltage_v!=null?chg.voltage_v.toFixed(1)+' V':'–')+
+    kv('Charger current',chg.current_a!=null?chg.current_a.toFixed(1)+' A':'–')+
+    kv('Charger power',dcw)+
+    kv('BMS setpoint V / A',f(cmd.voltage_v)+' / '+f(cmd.current_a))+'</div>';
   document.getElementById('bot').innerHTML=bot;
   var age=can.last_frame_age_s;
   var dot=can.state==='running'?'<span class="ok">●</span>':'<span class="bad">●</span>';
