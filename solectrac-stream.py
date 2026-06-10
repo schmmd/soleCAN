@@ -71,7 +71,7 @@ from solectrac_proto import (
     PACK_CAPACITY_AH, PACK_NOMINAL_V, PACK_CAPACITY_WH,
     PACK_CURRENT_LSB_A, PACK_CURRENT_BIAS_RAW,
     PACK_VOLTAGE_LSB_V, PACK_VOLTAGE_OFFSET_HI_V, PACK_VOLTAGE_OFFSET_LO_V,
-    CHARGER_V_LSB_V, CHARGER_V_OFFSET_HI_V, CHARGER_I_LSB_A,
+    CHARGER_V_LSB_V, CHARGER_I_LSB_A, CHGR_FLAG_NAMES,
     RPM_BIAS, LIMIT_CURRENT_LSB_A,
     BMS_FAULT_CODES_BYTE7, BMS_FAULT_CODES_BYTES_0_TO_6,
     parse_id, be16, le16, c_to_f,
@@ -236,21 +236,10 @@ KMH_PER_RPM_HIGH_TURF = {
 }
 KMH_TO_MPH = 0.6213712
 
-# Charger status byte (FF50CA byte 0). It serves a dual purpose:
-# it indicates that the OBC is actively delivering charge AND selects the
-# pack-V encoding offset for FF50 bytes 1-2 (same low/high variant scheme
-# as F100F3 byte 0).
-#   0x00 = idle (charger module powered, not charging)
-#   0x01 = transient handshake (only seen briefly during wake-up)
-#   0x02 = active charging, LO offset: pack V = raw × 0.1 + 51.2 V
-#          (covers 51.2..76.7 V — most of an L1 / L2 charge sits here)
-#   0x03 = active charging, HI offset: pack V = raw × 0.1 + 76.8 V
-#          (covers 76.8..102.3 V — the top end of charge)
-CHGR_STATUS_IDLE = 0x00
-CHGR_STATUS_HANDSHAKE = 0x01
-CHGR_STATUS_LO = 0x02
-CHGR_STATUS_HI = 0x03
-CHGR_ACTIVE_STATES = {CHGR_STATUS_LO, CHGR_STATUS_HI}
+# Charger fault flags (FF50E5 byte 4, Elcon/TC protocol). 0x00 means the
+# OBC is actively delivering charge; any set bit names why it isn't.
+# Per-bit names live in solectrac_proto.CHGR_FLAG_NAMES.
+CHGR_FLAGS_DELIVERING = 0x00
 
 STALE_S = 2.0  # mark a channel stale if no update for this long
 
@@ -326,7 +315,7 @@ class State:
     # charger
     chgr_v: Channel = field(default_factory=Channel)
     chgr_i: Channel = field(default_factory=Channel)
-    chgr_status: Channel = field(default_factory=Channel)
+    chgr_flags: Channel = field(default_factory=Channel)
     # vehicle controller
     vc_state_raw: Channel = field(default_factory=Channel)
     # motor controller (FF21CA)
@@ -482,7 +471,7 @@ _NAME_TO_ATTR = {
     "bms.limit.charge_power_extra_w": "limit_charge_power_extra_w",
     "bms.limit.mode": "limit_mode",
     # FF50 charger
-    "charger.status": "chgr_status",
+    "charger.flags": "chgr_flags",
     "charger.voltage_v": "chgr_v",
     "charger.current_a": "chgr_i",
     # 0600 BMS→Charger command
@@ -667,11 +656,10 @@ def evaluate_alerts(state: State, mains_v: float, breaker_a: float,
                            f"temp delta {delta} °C ({delta * 9 / 5:.0f} °F)"
                            f" > 10 °C"))
 
-    # AC-supply budget (only meaningful while actively charging — both CC
-    # (0x02) and CV (0x03); 0x01 is a transient handshake that doesn't draw
-    # breaker power).
-    chgr_active = (state.chgr_status.value in CHGR_ACTIVE_STATES
-                   and not state.chgr_status.is_stale(now))
+    # AC-supply budget (only meaningful while the charger is actively
+    # delivering, i.e. the FF50 fault-flag byte is clear).
+    chgr_active = (state.chgr_flags.value == CHGR_FLAGS_DELIVERING
+                   and not state.chgr_flags.is_stale(now))
     pack_v = primary_pack_v(state)
     if (chgr_active and pack_v.value
             and state.pack_i_a.value is not None
@@ -834,8 +822,8 @@ def render_pack(state: State, mains_v: float, efficiency: float,
     t.add_row("voltage", fmt(pack_v_ch, "{:.2f}", "V", now))
 
     pi = state.pack_i_a.value
-    chgr_active = (state.chgr_status.value in CHGR_ACTIVE_STATES
-                   and not state.chgr_status.is_stale(now))
+    chgr_active = (state.chgr_flags.value == CHGR_FLAGS_DELIVERING
+                   and not state.chgr_flags.is_stale(now))
     if pi is None:
         i_text = Text("---", style="dim")
     else:
@@ -1084,23 +1072,28 @@ def render_charger(state: State, now: float) -> Panel:
     t.add_column(justify="left")
     t.add_column(justify="left")
 
-    cs = state.chgr_status.value
-    stale = state.chgr_status.is_stale(now)
+    cs = state.chgr_flags.value
+    stale = state.chgr_flags.is_stale(now)
     if cs is None:
         st = Text("---", style="dim")
     elif stale:
-        st = Text(f"stale  (last 0x{int(cs):02X})", style="yellow dim")
-    elif cs == CHGR_STATUS_IDLE:
-        st = Text("idle")
-    elif cs == CHGR_STATUS_HANDSHAKE:
-        st = Text("handshake (status=0x01)", style="yellow")
-    elif cs == CHGR_STATUS_LO:
-        st = Text("CHARGING — pack < 76.8 V (status=0x02)", style="bold green")
-    elif cs == CHGR_STATUS_HI:
-        st = Text("CHARGING — pack ≥ 76.8 V (status=0x03)", style="bold green")
+        st = Text(f"stale  (last flags 0x{int(cs):02X})", style="yellow dim")
+    elif cs == CHGR_FLAGS_DELIVERING:
+        st = Text("CHARGING", style="bold green")
     else:
-        st = Text(f"unknown (status=0x{int(cs):02X})", style="magenta")
+        reasons = [name for mask, name in CHGR_FLAG_NAMES.items()
+                   if int(cs) & mask]
+        unknown = int(cs) & ~sum(CHGR_FLAG_NAMES)
+        if unknown:
+            reasons.append(f"unknown bits 0x{unknown:02X}")
+        # Real charger faults in red; the not-charging housekeeping flags
+        # (no AC / output not connected / no BMS command) are normal
+        # whenever the plug is idle, so they render unstyled.
+        fault = bool(int(cs) & 0x03) or bool(unknown)
+        st = Text("not charging — " + ", ".join(reasons),
+                  style="bold red" if fault else None)
     t.add_row("State", st)
+    t.add_row("output V", fmt(state.chgr_v, "{:.1f}", "V", now))
     t.add_row("current", fmt(state.chgr_i, "{:.1f}", "A", now))
     # DC power = pack V (from F100F3, same source as the pack pane) × charger I.
     pack_v = primary_pack_v(state).value
@@ -1131,7 +1124,7 @@ def render_charger(state: State, now: float) -> Panel:
     # Time-to-full estimate, shown only while actively charging. Based
     # on the slope of recent BMS SOC samples; CV taper near full will
     # make the linear extrapolation read low in the last ~10%.
-    if cs in CHGR_ACTIVE_STATES and not stale:
+    if cs == CHGR_FLAGS_DELIVERING and not stale:
         t.add_row("", "")
         soc_now = state.bms_soc_pct.value
         if soc_now is not None and soc_now >= 99.5:
@@ -1734,8 +1727,8 @@ def state_to_json(state: State, now: float, mode: str) -> dict:
 
     out["tractor"] = "on" if mc_age < 0.5 else "off"
 
-    if state.chgr_status.value is not None:
-        chg: dict = {"status": int(state.chgr_status.value)}
+    if state.chgr_flags.value is not None:
+        chg: dict = {"flags": int(state.chgr_flags.value)}
         if state.chgr_v.value is not None:
             chg["voltage_v"] = round(state.chgr_v.value, 2)
         if state.chgr_i.value is not None:

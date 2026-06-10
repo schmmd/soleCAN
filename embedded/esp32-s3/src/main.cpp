@@ -100,6 +100,13 @@
 #define LIMIT_CURRENT_LSB_A     0.01f    // A per bit for F107 limits
 #define LIMIT_POWER_EXTRA_LSB_W 10.0f    // W per bit for F107 charge allowance above 100 A baseline
 #define CHARGER_I_LSB_A         0.1f     // A per bit for charger current
+
+// FF50E5 byte 4: Elcon/TC charger fault flags. 0x00 = actively delivering.
+#define CHGR_FLAG_HW_FAIL       0x01     // hardware failure
+#define CHGR_FLAG_OVER_TEMP     0x02     // charger over-temperature
+#define CHGR_FLAG_NO_AC         0x04     // input (AC) voltage abnormal / absent
+#define CHGR_FLAG_NO_BATTERY    0x08     // battery voltage not detected at output
+#define CHGR_FLAG_COMM_TIMEOUT  0x10     // no 1806E5F4 command received
 #define PACK_CAPACITY_WH        25000.0f // nominal usable pack energy (Solectrac e25 spec)
 
 // ── BMS fault code tables ─────────────────────────────────────────────────────
@@ -192,7 +199,7 @@ struct MotorState {
 };
 
 struct ChargerState {
-    uint8_t  status   = 0;
+    uint8_t  flags    = 0;
     uint16_t v_raw    = 0;
     uint16_t i_raw    = 0;
     float    voltage_v = NAN;
@@ -508,24 +515,16 @@ void decodeCAN(uint32_t can_id, const uint8_t* raw, uint8_t len) {
 
     } else if (src == SRC_CHARGER && pgn == PGN_FF50) {
         if (allZero(d)) return;
-        g_charger.status         = d[0];
-        g_charger.v_raw          = le16(d[1], d[2]);
-        g_charger.i_raw          = le16(d[3], d[4]);  // legacy combined u16
-        // Status 0x02 / 0x03 is a pack-V encoding-range selector for d[1..2]
-        // (same scheme as F100F3 byte 0):
-        //   0x02 → LO offset (pack 51.2..76.7 V)
-        //   0x03 → HI offset (pack 76.8..102.3 V)
-        // Current (d[3..4]) decodes identically in both. The d[4] == 0 guard
-        // skips the idle disconnect sentinel (i_raw = 0x0800) and any other
-        // out-of-band readings — actual charging current stays in 0..25.5 A.
-        if ((d[0] == 0x02 || d[0] == 0x03) && d[4] == 0x00) {
-            float offset = (d[0] == 0x02) ? PACK_VOLTAGE_OFFSET_LO_V : PACK_VOLTAGE_OFFSET_HI_V;
-            g_charger.voltage_v = g_charger.v_raw * PACK_VOLTAGE_LSB_V + offset;
-            g_charger.current_a = d[3] * CHARGER_I_LSB_A;
-        } else {
-            g_charger.voltage_v = NAN;
-            g_charger.current_a = NAN;
-        }
+        // Standard Elcon/TC charger status frame: BE-16 output voltage and
+        // BE-16 output current (0.1/bit each), then a fault-flag byte
+        // (CHGR_FLAG_*; 0x00 = actively delivering). Voltage reads the
+        // charger's own output terminals — it equals pack V only while
+        // delivering, so consumers gate any pack-V use on flags == 0.
+        g_charger.v_raw     = be16(d[0], d[1]);
+        g_charger.i_raw     = be16(d[2], d[3]);
+        g_charger.flags     = d[4];
+        g_charger.voltage_v = g_charger.v_raw * PACK_VOLTAGE_LSB_V;
+        g_charger.current_a = g_charger.i_raw * CHARGER_I_LSB_A;
         g_charger.valid = true;
 
     } else if (src == SRC_BMS_CHGR_IF && pgn == PGN_PROP_0600) {
@@ -753,7 +752,7 @@ String buildJson(bool pretty = true, bool minimal = false) {
     // Charger
     if (g_charger.valid) {
         auto chg = doc["charger"].to<JsonObject>();
-        chg["status"] = g_charger.status;
+        chg["flags"] = g_charger.flags;
         if (!minimal) {
             chg["v_raw"]  = g_charger.v_raw;
             chg["i_raw"]  = g_charger.i_raw;

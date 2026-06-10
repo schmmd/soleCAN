@@ -76,16 +76,30 @@ TEMP_OFFSET_C = 40                        # J1939 +40 C offset on temp bytes
 PACK_CURRENT_LSB_A = 0.1                  # F100F3 bytes 2-3 BE, 0.1 A/bit
 PACK_CURRENT_BIAS_RAW = 0x7D00            # raw value at 0 A (positive = discharge)
 PACK_VOLTAGE_LSB_V = 0.1                  # F100F3 byte 1 and FF50E5 bytes 1-2 LE
-PACK_VOLTAGE_OFFSET_HI_V = 76.8           # F100F3 variant 0x03 / FF50 (76.8–102.3 V)
+PACK_VOLTAGE_OFFSET_HI_V = 76.8           # F100F3 variant 0x03 (76.8–102.3 V)
 PACK_VOLTAGE_OFFSET_LO_V = 51.2           # F100F3 variant 0x02 (51.2–76.7 V)
 
 # Charger and BMS share the same on-the-wire voltage encoding today, but
 # keep these as their own named bindings so a future divergence has one
 # place to plug in. See feedback-keep-encoding-constants.
 CHARGER_V_LSB_V = PACK_VOLTAGE_LSB_V
-CHARGER_V_OFFSET_LO_V = PACK_VOLTAGE_OFFSET_LO_V   # status 0x02 (pack < 76.8 V)
-CHARGER_V_OFFSET_HI_V = PACK_VOLTAGE_OFFSET_HI_V   # status 0x03 (pack ≥ 76.8 V)
 CHARGER_I_LSB_A = 0.1
+
+# FF50E5 byte 4: Elcon/TC-protocol charger fault flags. The charger is
+# actively delivering iff the byte is 0x00.
+CHGR_FLAG_HW_FAIL = 0x01       # hardware failure
+CHGR_FLAG_OVER_TEMP = 0x02     # charger over-temperature
+CHGR_FLAG_NO_AC = 0x04         # input (AC) voltage abnormal / absent
+CHGR_FLAG_NO_BATTERY = 0x08    # battery voltage not detected at output
+CHGR_FLAG_COMM_TIMEOUT = 0x10  # no 1806E5F4 command received
+
+CHGR_FLAG_NAMES = {
+    CHGR_FLAG_HW_FAIL: "hardware fault",
+    CHGR_FLAG_OVER_TEMP: "over-temperature",
+    CHGR_FLAG_NO_AC: "no AC input",
+    CHGR_FLAG_NO_BATTERY: "output not connected",
+    CHGR_FLAG_COMM_TIMEOUT: "no BMS command",
+}
 
 RPM_BIAS = 0x0C80                         # FF21CA bytes 2-3 LE zero-RPM offset
 LIMIT_CURRENT_LSB_A = 0.01                # F107F3 bytes 0-1 / 2-3 BE, 0.01 A/bit
@@ -211,8 +225,8 @@ def decode(msg, emit, clear=_noop_clear):
     the unit string for that name.
 
     clear(name) is called when a frame's state machine says a previously-
-    valid value is no longer meaningful (charger V/I outside the active
-    window, DM1 reverting to idle, BMS->charger cmd going to idle). Each
+    valid value is no longer meaningful (DM1 reverting to idle,
+    BMS->charger cmd going to idle). Each
     caller decides what "clear" means (stream calls Channel.clear(), analyze
     treats it as a no-op since absence-of-row already conveys the same).
 
@@ -426,29 +440,21 @@ def decode(msg, emit, clear=_noop_clear):
     if src == SRC_CHARGER and pgn == PGN_FF50:
         if all(b == 0 for b in data):
             return "skipped_zero"
-        status = data[0]
-        v_raw = le16(data[1], data[2])
-        i_raw = le16(data[3], data[4])  # legacy combined u16 (kept for CSV)
-        emit("charger.status", status, "")
+        # Standard Elcon/TC charger status frame: BE-16 output voltage and
+        # BE-16 output current (0.1/bit each), then a fault-flag byte.
+        # Flags == 0x00 means actively delivering; see CHGR_FLAG_*.
+        v_raw = be16(data[0], data[1])
+        i_raw = be16(data[2], data[3])
+        flags = data[4]
+        emit("charger.flags", flags, "")
         emit("charger.v_raw", v_raw, "")
         emit("charger.i_raw", i_raw, "")
-        # Status 0x02 / 0x03 is a pack-V encoding-range selector for
-        # data[1..2] (same scheme as F100F3 byte 0):
-        #   0x02 → LO offset (pack 51.2..76.7 V)
-        #   0x03 → HI offset (pack 76.8..102.3 V)
-        # Current (data[3..4]) decodes identically in both. The data[4]==0
-        # guard skips the idle disconnect sentinel (i_raw = 0x0800) and any
-        # other out-of-band readings where the high byte is set — actual
-        # charging current stays in 0..25.5 A on this OBC.
-        if status in (0x02, 0x03) and data[4] == 0:
-            offset = (CHARGER_V_OFFSET_LO_V if status == 0x02
-                      else CHARGER_V_OFFSET_HI_V)
-            emit("charger.voltage_v",
-                 v_raw * CHARGER_V_LSB_V + offset, "v")
-            emit("charger.current_a", data[3] * CHARGER_I_LSB_A, "a")
-        else:
-            clear("charger.voltage_v")
-            clear("charger.current_a")
+        # Voltage reads the charger's own output terminals. It equals pack
+        # V only while delivering (flags == 0); otherwise it shows the
+        # bare rail (~0.2 V plug-idle, a slow decay after charge end), so
+        # consumers must gate any pack-V use on the flags.
+        emit("charger.voltage_v", v_raw * CHARGER_V_LSB_V, "v")
+        emit("charger.current_a", i_raw * CHARGER_I_LSB_A, "a")
         return "charger"
 
     if src == SRC_BMS_CHGR_IF and pgn == PGN_PROP_0600:

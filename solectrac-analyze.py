@@ -94,14 +94,13 @@ Signal names use a `domain.name` (or `domain.NN.name`) convention:
                                Per-bit tables live in BMS_FAULT_CODES_BYTES_0_TO_6 and
                                BMS_FAULT_CODES_BYTE7. All mappings injection-confirmed
                                on 2026-05-10.
-    charger.status             FF50 byte 0
-    charger.v_raw              FF50 bytes 1-2 LE (raw, always emitted)
-    charger.voltage_v          FF50 pack-terminal output voltage, raw * 0.1 + offset
-                               (offset = 51.2 V while status == 0x02, 76.8 V
-                                while status == 0x03; emitted in both states)
-    charger.i_raw              FF50 bytes 3-4 LE (raw, always emitted)
+    charger.flags              FF50 byte 4: Elcon fault flags (0x00 = delivering)
+    charger.v_raw              FF50 bytes 0-1 BE (raw, always emitted)
+    charger.voltage_v          FF50 charger output voltage, raw * 0.1 V/bit.
+                               Equals pack V only while flags == 0x00;
+                               otherwise reads the bare output rail
+    charger.i_raw              FF50 bytes 2-3 BE (raw, always emitted)
     charger.current_a          FF50 charger output current, raw * 0.1 A/bit
-                               (emitted in both status 0x02 and 0x03)
     chgr_cmd.voltage_v         0600 bytes 0-1 BE * 0.1: BMS->charger V setpoint
                                (no +76.8 V offset; suppressed when idle)
     chgr_cmd.current_a         0600 bytes 2-3 BE * 0.1: BMS->charger I setpoint
@@ -197,28 +196,25 @@ Decoder assumptions (verify against the BMS spec before trusting numerically):
           was almost certainly a 145 transcription.
         The bytes-0..6 and byte-7 active code sets are merged and
         deduplicated.
-  * PGN 0xFF50 from 0xE5: byte 0 = status (0x00=idle, 0x01=transient
-                          handshake during wake-up, 0x02=active charging
-                          with LO pack-V offset, 0x03=active charging with HI
-                          pack-V offset). The status byte is a dual-purpose
-                          field: it signals active charge AND selects the
-                          pack-V encoding offset for bytes 1-2 — same low/
-                          high variant scheme as F100F3 byte 0.
-                          bytes 1-2 LE = pack terminal voltage, raw * 0.1 V/bit
-                          with status-selected offset:
-                            status 0x02 → +51.2 V (covers 51.2..76.7 V)
-                            status 0x03 → +76.8 V (covers 76.8..102.3 V)
-                          Confirmed by linear regression across a multi-hour
-                          L1 charge (slope 0.099 V/LSB, intercept 51.6 V
-                          while status==0x02; matches the F100 byte 1 LO
-                          variant within 1%).
-                          bytes 3-4 LE = charger output current in 0.1 A/bit
-                          (no offset); meaningful in both 0x02 and 0x03
+  * PGN 0xFF50 from 0xE5: standard Elcon/TC charger status frame.
+                          bytes 0-1 BE = charger output voltage, 0.1 V/bit.
+                          Tracks pack V while delivering (confirmed by
+                          linear regression across a multi-hour L1 charge,
+                          slope 0.099 V/LSB); reads the bare output rail
+                          otherwise (~0.2 V plug-idle, slow decay after
+                          charge end).
+                          bytes 2-3 BE = charger output current, 0.1 A/bit
                           — CONFIRMED.
-  * PGN 0x000600 from 0xF4 to 0xE5 (charger): vendor-proprietary
-        BMS->charger command frame. Reverse-engineered by correlating
+                          byte 4 = fault flags; 0x00 = actively delivering.
+                            bit 0 = hardware fault
+                            bit 1 = over-temperature
+                            bit 2 = no AC input
+                            bit 3 = battery voltage not detected at output
+                            bit 4 = no BMS command (1806 timeout)
+  * PGN 0x000600 from 0xF4 to 0xE5 (charger): the Elcon BMS->charger
+        command frame. Decode confirmed by correlating
         58,584 frames in charging-120V-90ish-to-100.asc against
-        contemporaneous F100 (pack V/I/SoC), FF50 (charger V/I/status),
+        contemporaneous F100 (pack V/I/SoC), FF50 (charger V/I/flags),
         and F107 (BMS current limits). Source 0xF4 sends only this PGN,
         and only to destination 0xE5 -- consistent with a dedicated SA
         for the BMS's charger-control role (likely the same physical
@@ -234,8 +230,9 @@ Decoder assumptions (verify against the BMS spec before trusting numerically):
                                ~0.5 A. When the request exceeds capability
                                the charger saturates ~18 A regardless.
             byte 4           = enable: 0x00 = active command,
-                               0x01 = idle / no-request (charger drops
-                               to status 0x00 within a few frames).
+                               0x01 = idle / no-request (charger raises
+                               its no-BMS-command flag within a few
+                               frames).
             bytes 5-7        = padding 0xFF.
   * PGN 0xFECA from 0xCA: DM1 (Active Diagnostic Trouble Codes), per
         SAE J1939-73. Single-frame layout (multi-DTC BAM not observed):
@@ -324,7 +321,7 @@ from solectrac_proto import (
     PACK_CAPACITY_AH, PACK_NOMINAL_V, PACK_CAPACITY_WH,
     PACK_CURRENT_LSB_A, PACK_CURRENT_BIAS_RAW,
     PACK_VOLTAGE_LSB_V, PACK_VOLTAGE_OFFSET_HI_V, PACK_VOLTAGE_OFFSET_LO_V,
-    CHARGER_V_LSB_V, CHARGER_V_OFFSET_HI_V, CHARGER_I_LSB_A,
+    CHARGER_V_LSB_V, CHARGER_I_LSB_A,
     RPM_BIAS, LIMIT_CURRENT_LSB_A,
     BMS_FAULT_CODES_BYTE7, BMS_FAULT_CODES_BYTES_0_TO_6,
     parse_id, be16, le16, data_bytes, c_to_f,
@@ -643,11 +640,11 @@ DECODERS = [
      "charger_present / drive_mode / contactors below"),
     ("bms.state.charging", "F106", "F3", "1 (bit 3)", "(b1 >> 3) & 1",
      "", "verified",
-     "set only in charging-120V-90ish-to-100.asc while charger status=0x03"),
+     "set only while the charger is actively delivering "
+     "(charger.flags == 0x00)"),
     ("bms.state.charger_present", "F106", "F3", "1 (bit 2)", "(b1 >> 2) & 1",
      "", "verified",
-     "set whenever charger is plugged in (charging or idle); "
-     "matches charger.status presence"),
+     "set whenever charger is plugged in (charging or idle)"),
     ("bms.state.drive_mode", "F106", "F3", "1 (bit 5)", "(b1 >> 5) & 1",
      "", "verified",
      "set only in captures with motor (FF21CA) traffic; clear during charging"),
@@ -692,26 +689,29 @@ DECODERS = [
      "is 1 bit per code with gaps: bit 0=140, bits 1,2 silent, bit 3=142, "
      "bit 4=143, bits 5,6=144 (duplicate), bit 7=145. All mappings "
      "injection-confirmed on 2026-05-10; code 146 does not appear in F108"),
-    ("charger.status", "FF50", "E5", "0", "u8 (raw)",
+    ("charger.flags", "FF50", "E5", "4", "u8 (bitmask)",
      "", "verified",
-     "0x00=idle, 0x01=transient handshake, 0x02=active charging w/ LO "
-     "pack-V offset (pack <76.8V), 0x03=active charging w/ HI offset "
-     "(pack >=76.8V)"),
-    ("charger.v_raw", "FF50", "E5", "1-2", "LE u16",
+     "Elcon/TC fault flags; 0x00 = actively delivering. Bit 0 hardware "
+     "fault, bit 1 over-temperature, bit 2 no AC input, bit 3 battery "
+     "voltage not detected at output, bit 4 no BMS command (1806 "
+     "timeout). Observed: 0x08 plug-idle; 0x14/0x1C key-on wake with no "
+     "AC; 0x08->0x0C->0x1C cascade after charge end"),
+    ("charger.v_raw", "FF50", "E5", "0-1", "BE u16",
      "", "verified",
-     "raw bytes always emitted (handshake/idle constants visible)"),
-    ("charger.voltage_v", "FF50", "E5", "1-2", "LE u16 * 0.1 + offset",
+     "raw bytes always emitted"),
+    ("charger.voltage_v", "FF50", "E5", "0-1", "BE u16 * 0.1",
      "v", "verified",
-     "pack-terminal voltage; same encoding as F100 byte 1. Offset is "
-     "status-selected: 51.2 V for status==0x02, 76.8 V for status==0x03. "
-     "Emitted while status in {0x02, 0x03}"),
-    ("charger.i_raw", "FF50", "E5", "3-4", "LE u16",
+     "charger output-terminal voltage; same BE-16 encoding as F100 "
+     "bytes 0-1. Tracks pack V only while flags == 0x00; otherwise the "
+     "bare rail (~0.2 V plug-idle, slow decay after charge end)"),
+    ("charger.i_raw", "FF50", "E5", "2-3", "BE u16",
      "", "verified",
-     "raw bytes always emitted; in idle byte 4=0x08 -> i_raw=2048"),
-    ("charger.current_a", "FF50", "E5", "3-4", "LE u16 * 0.1",
+     "raw bytes always emitted"),
+    ("charger.current_a", "FF50", "E5", "2-3", "BE u16 * 0.1",
      "a", "verified",
-     "charger DC output current; emitted while status in {0x02, 0x03}. "
-     "In idle the raw bytes would decode to a spurious 204.8 A"),
+     "charger DC output current; 0.0 A whenever not delivering. L1 "
+     "charging tops out ~21.5 A so byte 2 has read 0x00 in every "
+     "capture; an L2 charge should exercise it"),
     ("chgr_cmd.voltage_v", "0600", "F4", "0-1", "BE u16 * 0.1",
      "v", "verified",
      "BMS-commanded charger voltage setpoint; always 84.6 V during "
@@ -727,7 +727,8 @@ DECODERS = [
     ("chgr_cmd.enable", "0600", "F4", "4", "u8 (raw)",
      "", "verified",
      "0x00 = active charging command, 0x01 = idle / no-request "
-     "(charger.status drops to 0x00 within a few frames)"),
+     "(charger.flags picks up the no-BMS-command bit within a few "
+     "frames)"),
     ("chgr_cmd.v_raw", "0600", "F4", "0-1", "BE u16",
      "", "verified",
      "raw setpoint, emitted alongside the engineering value for parity "
@@ -944,7 +945,7 @@ def summarize(counts: dict, rows: list):
         chgr_i = values_for(rows, scenario, "charger.current_a")
         if chgr_v:
             print(f"    chgr V    : {min(chgr_v):.1f}..{max(chgr_v):.1f} V "
-                  f"(0.1 V/bit + status-selected offset; status=0x02/0x03)")
+                  f"(output terminals; pack V only while flags=0x00)")
             print(f"    chgr I    : {min(chgr_i):.1f}..{max(chgr_i):.1f} A")
         # Per-channel module temps share the temp.NN.c naming.
         temps_c = [r[4] for r in rows

@@ -271,13 +271,19 @@ function update(d){
   }).join('');
   var bot='';
   if(d.charger){
-    var cs=chg.status;
-    var stTxt=cs==null?'–'
-      :cs===0?'idle'
-      :cs===1?'handshake'
-      :cs===2?'CHARGING (pack < 76.8 V)'
-      :cs===3?'CHARGING (pack ≥ 76.8 V)'
-      :'unknown (0x'+cs.toString(16).padStart(2,'0').toUpperCase()+')';
+    // chg.flags: Elcon fault flags (FF50E5 byte 4); 0x00 = actively delivering.
+    var cf=chg.flags;
+    var CHGR_FLAGS=[[0x01,'hardware fault'],[0x02,'over-temperature'],
+      [0x04,'no AC input'],[0x08,'output not connected'],[0x10,'no BMS command']];
+    var stTxt;
+    if(cf==null)stTxt='–';
+    else if(cf===0)stTxt='CHARGING';
+    else{
+      var rs=CHGR_FLAGS.filter(function(x){return cf&x[0];}).map(function(x){return x[1];});
+      var unk=cf&~0x1F;
+      if(unk)rs.push('unknown bits 0x'+unk.toString(16).toUpperCase());
+      stTxt='not charging — '+rs.join(', ');
+    }
     var dcw=(p.voltage_v!=null&&chg.current_a!=null)
       ? Math.round(p.voltage_v*chg.current_a)+' W' : '–';
     bot+='<div class="card" style="grid-column:1/-1"><h3>Charger</h3>'+
