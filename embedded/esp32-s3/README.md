@@ -29,7 +29,8 @@ Notes:
   ports are expected to be classic CAN at 250 kbit/s. The transceivers are
   galvanically isolated, so when wiring to a separate analyzer you must also
   connect DGND between the two — without it the bus floats and no frames
-  arrive.
+  arrive. To monitor the tractor, wire its single J1939 bus to **CAN B**
+  (`can0`); see "Wiring the LilyGo T-2CAN to the tractor" below.
 - The MCP2515 needs its active-low RESET line (GPIO 9 on the T-2CAN) driven
   high before SPI; the firmware pulses it in `setup()`. If `init_err` in
   `/json` is `1` (`kNoMCP2515`), the chip isn't answering SPI — check
@@ -39,6 +40,55 @@ Notes:
   a wrong crystal value is the prime suspect — try 8 MHz and reflash.
 - The pin map lives in `src/main.cpp` under `BOARD_ADAFRUIT_FEATHER_S3` /
   `BOARD_LILYGO_T2CAN`. Build environments are defined in `platformio.ini`.
+
+## Wiring the LilyGo T-2CAN to the tractor
+
+The Solectrac OBD-II diagnostic port is a passive tap on the single 250 kbit/s
+J1939 bus. Only four cavities are populated (see `DOCUMENTATION.md` →
+"CAN bus topology" for the full pinout):
+
+| OBD-II (J1962) pin | Signal |
+|---|---|
+| 6 | CAN_H |
+| 14 | CAN_L |
+| 4 | chassis ground |
+| 16 | +12 V battery |
+
+On the T-2CAN, use the **CAN B** 4-pin screw terminal (`P1`, the one wired to
+the native TWAI transceiver). Match the silkscreen labels:
+
+| OBD-II pin | → | T-2CAN CAN B terminal |
+|---|---|---|
+| 6 (CAN_H) | → | `CANH` |
+| 14 (CAN_L) | → | `CANL` |
+| 4 (GND) | → | `GND` (CAN-side / `DGND`) |
+
+The CAN transceiver (`TD501MCAN`) is a **galvanically isolated** module, so its
+bus side has its own ground reference. The ground wire is **not optional** — without
+tying OBD pin 4 to the CAN-side ground the bus floats and no frames arrive. If
+your board's terminal has a 120 Ω termination jumper for CAN B, leave it **off**:
+the tractor bus is already terminated (it measures ~40 Ω), and this is a tap, not
+a bus end.
+
+### Powering the board
+
+The T-2CAN accepts **DC 5–12 V** on its 2-pin power screw terminal (a separate
+terminal from the CAN-B connector, feeding an on-board buck regulator). You have
+two options:
+
+- **USB-C (galvanically isolated):** power from a laptop or USB power bank. The
+  isolated transceiver keeps the board fully decoupled from the tractor — best
+  for bench work or when wiring to a separate analyzer.
+- **Tap the tractor's 12 V (single-cable field setup):** wire OBD-II pin 16
+  (+12 V) to the power terminal **`+` / `VIN`** and OBD-II pin 4 (GND) to the
+  power terminal **`GND`**, observing polarity. 12 V is within the 5–12 V input
+  range. This shares the tractor's ground, so the CAN isolation is electrically
+  moot in this mode, but it is safe and is the simplest in-cab setup — one
+  connector powers the board and carries CAN.
+
+> ⚠️ Do **not** exceed 12 V on the power terminal — the board is rated DC 5–12 V.
+> The tractor's nominal 12 V accessory rail is fine; do not wire it to a higher
+> traction-pack rail.
 
 ## What the LED tells you
 
