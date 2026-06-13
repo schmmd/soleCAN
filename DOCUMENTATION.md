@@ -25,6 +25,7 @@ Confidence markers used throughout:
   - [Charger (SA 0xE5)](#charger-sa-0xe5)
   - [Vehicle controller (SA 0xD0)](#vehicle-controller-sa-0xd0)
 - [Instrument cluster hardware](#instrument-cluster-hardware)
+- [12V fuses](#12v-fuses)
 - [Vendor error code tables](#vendor-error-code-tables)
 - [Open questions](#open-questions)
 
@@ -155,7 +156,7 @@ populated (verified by physical inspection):
 - **Pin 4** — chassis ground
 - **Pin 6** — CAN_H (yellow 0.75 mm²)
 - **Pin 14** — CAN_L (green 0.75 mm²)
-- **Pin 16** — +12 V battery
+- **Pin 16** — +12 V battery (fed via F14 — see "12V fuse panel")
 
 The older Solectrac topology diagram's "DB9" connector label is a mislabel —
 it's the OBD-II port.
@@ -757,6 +758,14 @@ strictly tighter than gating on `code 140` alone for limp detection.
 A robust limp indicator wants `(byte-7 bit 1) AND (drive-enabled per
 F100D0)`.
 
+One ~10 s capture has byte 7 = `0x01` (140, bit 1 clear) with no
+charger present and code 110 (battery-temperature unbalance) co-fired
+on byte 2. Single instance, short window, so not enough to overturn
+the rule, but it suggests bit-1 suppression tracks a broader
+"thermal/SOC-fault" context than strictly charging. Worth keeping in
+mind before leaning on the `(byte-7 bit 1) AND drive-enabled` recipe
+in code.
+
 
 ### Motor controller (Curtis 1238E, SA 0xCA)
 
@@ -1265,6 +1274,78 @@ one omission relative to the as-built tractor:
 A non-destructive diagnostic harness can T-tap J35/J36 (row 9 cols
 3-4) without unplugging the cluster — the display stays functional
 while a capture tool reads the live bus.
+
+
+## 12V fuses
+
+Two-row 14-position fuse panel for the 12 V accessory system.  Functions below
+are from single-fuse-pull tests; "UNKNOWN" means the pull produced no observed
+symptom or the affected circuit wasn't identified.
+
+```
+  Row 1:   F1   F2   F3   F4   F5   F6   F7
+           10A  10A  15A  10A  20A  15A  15A
+
+  Row 2:   F8   F9   F10  F11  F12  F13  F14
+           10A  10A  10A  10A  15A  25A  15A
+```
+
+| #   | Rating | Observed function                                          | Confidence          |
+|-----|--------|------------------------------------------------------------|---------------------|
+| F1  | 10 A   | Horn                                                       | CONFIRMED           |
+| F2  | 10 A   | Low-beam headlights                                        | CONFIRMED           |
+| F3  | 15 A   | Turn signals + hazards + rear work light                   | CONFIRMED           |
+| F4  | 10 A   | UNKNOWN (no CAN)                                           | UNKNOWN             |
+| F5  | 20 A   | Cluster +Battery or KL15 rail — no key-cycle recovery      | CONFIRMED           |
+| F6  | 15 A   | Main pack disconnect (BMS rail A or C) — BMS dies first, VC + MC ~1 s later | CONFIRMED |
+| F7  | 15 A   | PTO wet-clutch engagement                                  | CONFIRMED           |
+| F8  | 10 A   | UNKNOWN (no CAN)                                           | UNKNOWN             |
+| F9  | 10 A   | Cluster +Battery or KL15 rail — no key-cycle recovery      | CONFIRMED           |
+| F10 | 10 A   | UNKNOWN (no CAN)                                           | UNKNOWN             |
+| F11 | 10 A   | Brake lights                                               | CONFIRMED           |
+| F12 | 15 A   | High-beam headlights                                       | CONFIRMED           |
+| F13 | 25 A   | Fan + VC + MC 12 V rail (cluster + BMS unaffected)         | CONFIRMED           |
+| F14 | 15 A   | Main pack disconnect (BMS rail A or C) — same cascade as F6; also feeds OBD-II pin 16 | CONFIRMED |
+
+**Three CAN-distinguishable fuse-pull cascades.** Each pull takes down
+a different set of CAN nodes:
+
+| Pulled | BMS                 | VC + MC              | Cluster | Inferred branch |
+|--------|---------------------|----------------------|---------|-----------------|
+| F6     | dies first, ~4 s in | die ~1 s after BMS   | alive   | One BMS 12 V rail (field-connector pin A switched or pin C unswitched) |
+| F14    | dies first, ~8 s in | die ~1 s after BMS   | alive   | The other BMS 12 V rail; also feeds OBD-II pin 16 |
+| F13    | unaffected          | die together         | alive   | Drive-side 12 V (likely MC KSI or VC 12 V feed; fan rides the same rail) |
+
+**F6 and F14 produce identical CAN signatures.** Both kill BMS first,
+then VC + MC ~1 s later, with cluster unaffected. The BMS field
+connector has two 12 V rails (pin A = switched +12 V, pin C =
+unswitched +12 V — see "BMS field connector" earlier in this doc),
+and cutting *either* drops the BMS — both rails are required for
+operation. F14 also tees +12 V over to OBD-II pin 16, so an
+OBD-II-powered capture tool loses power the instant F14 is pulled —
+use an independent supply when probing F14. Discriminator for *which*
+BMS rail each fuse feeds: DMM at each fuse output, key off vs key on
+— the fuse whose output reads 0 V key-off / +12 V key-on is the
+switched (KL15) rail; the one that reads +12 V in both states is the
+unswitched (+Battery) rail.
+
+**F13 is a different branch.** It cuts VC + MC together while leaving
+the BMS untouched, so it is not on either BMS rail. Likely candidates
+are MC KSI (Curtis Key-Switch Input) and the VC 12 V feed — both make
+sense as a shared circuit with a cooling fan that runs on the same
+"drive-enabled" rail. Discriminator: while F13 is out, can the main
+contactor still close at key-on? If yes, F13 is on MC KSI / VC 12 V
+(not the contactor coil); if no, F13 also feeds the contactor coil.
+
+**F5 and F9 both kill the cluster.** Per the cluster pinout above the
+cluster needs both J3 (+Battery, constant 12 V) and J4 (KL15 / IGN ON)
+— most likely one fuse on each rail, but which feeds which is not
+determinable from CAN alone. Key-cycle does not discriminate either:
+pulling the KL15-side fuse leaves KL15 cut regardless of key position,
+so neither rail recovers at next key-on. Discriminator: DMM at each
+fuse output with the key off, then again with the key on — the fuse
+whose output reads 0 V key-off / +12 V key-on is the KL15 rail; the
+one that reads +12 V in both states is +Battery.
 
 
 ## Vendor error code tables
