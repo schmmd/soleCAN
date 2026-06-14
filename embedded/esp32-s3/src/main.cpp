@@ -256,6 +256,17 @@ uint32_t    g_last_frame_ms  = 0;   // millis() at last received frame
 bool        g_can_initialized = false;
 bool        g_ap_running      = false;
 
+#if defined(HAS_MCP2518FD)
+bool        g_mcp_initialized = false;
+uint32_t    g_mcp_init_err    = 0xFFFFFFFFUL;   // sentinel: never attempted
+uint32_t    g_mcp_frames_rx   = 0;
+// Raw probe of OSC_REGISTER (0xE00) before/after manual reset. If SPI is alive
+// we expect non-FF/non-00. 0xFF = MISO floating / chip not selected; 0x00 =
+// MISO grounded / chip dead.
+uint8_t     g_mcp_probe_pre  = 0xAA;
+uint8_t     g_mcp_probe_post = 0xAA;
+#endif
+
 // Session energy tracking (integrated power since boot)
 uint32_t    g_session_last_ms   = 0;
 uint32_t    g_session_active_ms = 0;   // sum of valid dt's — excludes bus-silent gaps
@@ -595,6 +606,14 @@ String buildJson(bool pretty = true, bool minimal = false) {
     if (!minimal) can["frames_decoded"] = g_frames_decoded;
     if (g_frames_rx > 0)
         can["last_frame_age_s"] = (millis() - g_last_frame_ms) / 1000.0;
+#if defined(HAS_MCP2518FD)
+    auto mcp = can["mcp2518fd"].to<JsonObject>();
+    mcp["initialized"] = g_mcp_initialized;
+    mcp["init_err"]    = g_mcp_init_err;
+    mcp["frames_rx"]   = g_mcp_frames_rx;
+    mcp["probe_pre"]   = g_mcp_probe_pre;
+    mcp["probe_post"]  = g_mcp_probe_post;
+#endif
 
     // Pack
     auto pack = doc["pack"].to<JsonObject>();
@@ -910,7 +929,6 @@ static SocketcandSlot socketcand_slots[SOCKETCAND_NUM_CHANNELS];
 // is drained from loop(); frames are forwarded to socketcand as channel can1.
 // Crystal frequency is board-dependent — flip to OSC_20MHz if can1 stays silent.
 static ACAN2517FD g_mcp(MCP2518_CS_PIN, SPI, MCP2518_INT_PIN);
-static bool       g_mcp_initialized = false;
 #endif
 
 void socketcandSendFrame(const twai_message_t& msg, int8_t channel) {
@@ -1148,13 +1166,54 @@ void setup() {
     MDNS.addService("socketcand", "tcp", SOCKETCAND_PORT);
 
 #if defined(HAS_MCP2518FD)
-    SPI.begin(MCP2518_SCK_PIN, MCP2518_MISO_PIN, MCP2518_MOSI_PIN, MCP2518_CS_PIN);
+    // Do NOT pass the CS pin to SPI.begin — Arduino-ESP32 would attach it as
+    // hardware-SS and fight the library's software-CS control, leaving the
+    // chip never selected. The library calls pinMode(CS, OUTPUT) in initCS().
+    SPI.begin(MCP2518_SCK_PIN, MCP2518_MISO_PIN, MCP2518_MOSI_PIN);
+
+    // Deassert CS by hand before any SPI traffic.
+    pinMode(MCP2518_CS_PIN, OUTPUT);
+    digitalWrite(MCP2518_CS_PIN, HIGH);
+    delay(10);   // give the MCP2518FD's POR/OST a chance to finish
+
+    // Helper: SPI read of a single byte at a 12-bit register address.
+    auto mcp_read8 = [](uint16_t addr) -> uint8_t {
+        SPI.beginTransaction(SPISettings(800UL * 1000UL, MSBFIRST, SPI_MODE0));
+        digitalWrite(MCP2518_CS_PIN, LOW);
+        SPI.transfer((uint8_t)(0x30 | ((addr >> 8) & 0x0F)));   // READ op
+        SPI.transfer((uint8_t)(addr & 0xFF));
+        uint8_t v = SPI.transfer(0x00);
+        digitalWrite(MCP2518_CS_PIN, HIGH);
+        SPI.endTransaction();
+        return v;
+    };
+
+    // Probe OSC_REGISTER before any reset.
+    g_mcp_probe_pre = mcp_read8(0xE00);
+
+    // Issue an MCP2518FD software reset (instruction 0x0000).
+    SPI.beginTransaction(SPISettings(800UL * 1000UL, MSBFIRST, SPI_MODE0));
+    digitalWrite(MCP2518_CS_PIN, LOW);
+    SPI.transfer16(0x0000);
+    digitalWrite(MCP2518_CS_PIN, HIGH);
+    SPI.endTransaction();
+    delay(10);
+
+    // Probe again after reset.
+    g_mcp_probe_post = mcp_read8(0xE00);
+
     ACAN2517FDSettings mcp_cfg(
-        ACAN2517FDSettings::OSC_40MHz,
+        ACAN2517FDSettings::OSC_20MHz,
         250UL * 1000UL,
         DataBitRateFactor::x1);
     mcp_cfg.mRequestedMode = ACAN2517FDSettings::Normal20B;   // classic CAN 2.0B
-    g_mcp_initialized = (g_mcp.begin(mcp_cfg, [] { g_mcp.isr(); }) == 0);
+    g_mcp_init_err    = g_mcp.begin(mcp_cfg, [] { g_mcp.isr(); });
+    g_mcp_initialized = (g_mcp_init_err == 0);
+    Serial.printf("MCP2518FD begin: err=0x%08lX probe pre=0x%02X post=0x%02X (osc=%u MHz, CS=%d INT=%d SCK=%d MOSI=%d MISO=%d)\n",
+        (unsigned long)g_mcp_init_err,
+        g_mcp_probe_pre, g_mcp_probe_post,
+        (unsigned)(mcp_cfg.sysClock() / 1000000UL),
+        MCP2518_CS_PIN, MCP2518_INT_PIN, MCP2518_SCK_PIN, MCP2518_MOSI_PIN, MCP2518_MISO_PIN);
 #endif
 
     bleInit();
@@ -1173,6 +1232,7 @@ void loop() {
     if (g_mcp_initialized) {
         CANFDMessage frame;
         while (g_mcp.receive(frame)) {
+            g_mcp_frames_rx++;
             twai_message_t fwd = {};
             fwd.identifier       = frame.id;
             fwd.extd             = frame.ext ? 1 : 0;
