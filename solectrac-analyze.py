@@ -613,25 +613,36 @@ DECODERS = [
      "main_contactor / operating / standby below; bits 6 and 7 are perfectly "
      "mutually exclusive (operating vs standby)"),
     ("bms.state.output_enable", "F106", "F3", "0 (bit 0)", "(b0 >> 0) & 1",
-     "", "tentative",
+     "", "verified",
      "BMS output command active (drive request or active-charge request). "
      "Set during driving and active charging; cleared during plug-in "
-     "handshake, post-charge teardown, fault-blocked charging, and init"),
+     "handshake, post-charge teardown, fault-blocked charging, and init. "
+     "Vendor-anchored: across 4 paired iBMS-UI + CAN state captures "
+     "(idle / noseat / drive / plugin) this bit matches the operating-mode "
+     "condition shown on the iBMS Charge-info tab"),
     ("bms.state.main_contactor", "F106", "F3", "0 (bit 2)", "(b0 >> 2) & 1",
-     "", "tentative",
+     "", "verified",
      "main pack contactor closed. Cleared during init (b0=0x00) and after "
      "the contactor opens at end of charge (b0=0x80); set in all other "
-     "observed states"),
+     "observed states. Vendor-anchored: matches iBMS BMS-tab "
+     "`BCU HSS1 (MainP+) State` Close/Open 1:1 across 4 paired state "
+     "captures"),
     ("bms.state.operating", "F106", "F3", "0 (bit 6)", "(b0 >> 6) & 1",
-     "", "tentative",
-     "operating mode: power flowing in either direction (driving or actively "
-     "charging). Mutually exclusive with bms.state.standby across 36,955 "
-     "frames; cleared only in init (b0=0x00)"),
+     "", "verified",
+     "operating mode — BMS ready to source/sink current, main contactor "
+     "closed, not in standby. Initial semantic was 'power flowing' but the "
+     "idle state-capture shows the bit set with pack current = 0.0 A, so "
+     "readiness rather than active power flow. Cleared in init (b0=0x00) "
+     "and in standby states (b0=0x80). Mutex with bms.state.standby holds "
+     "in steady state across 36,955 frames; a ~1 s b0=0x85 transient at "
+     "plug-in is the only observed overlap"),
     ("bms.state.standby", "F106", "F3", "0 (bit 7)", "(b0 >> 7) & 1",
-     "", "tentative",
+     "", "verified",
      "standby mode: charger plugged in but no main-bus current (covers "
      "plug-in handshake, post-charge idle, and fault-blocked charging). "
-     "Mutually exclusive with bms.state.operating"),
+     "Mutex with bms.state.operating holds except for ~1 s b0=0x85 "
+     "transient at plug-in. Vendor-anchored: set in noseat / plug-in "
+     "captures where iBMS shows BCU HSS1 = Open"),
     ("bms.state.byte1", "F106", "F3", "1", "u8 (raw)",
      "", "verified",
      "BMS state bitmap; bits decoded into bms.state.charging / "
@@ -651,9 +662,13 @@ DECODERS = [
      "", "verified",
      "set only in captures with motor (FF21CA) traffic; clear during charging"),
     ("bms.state.contactors", "F106", "F3", "1 (bit 6)", "(b1 >> 6) & 1",
-     "", "tentative",
-     "set whenever the vehicle is awake (drive or charge); "
-     "likely tracks contactor / pre-charge complete"),
+     "", "verified",
+     "set whenever the BMS is broadcasting / vehicle is awake — including "
+     "noseat state where the main contactor is open. The name 'contactors' "
+     "is therefore a misnomer (kept for backward compatibility): the bit "
+     "tracks BMS-awake, not contactor-closed. For contactor state use "
+     "bms.state.main_contactor (b0 bit 2). Vendor-anchored across 4 paired "
+     "iBMS-UI + CAN state captures"),
     ("bms.limit.discharge_a", "F107", "F3", "0-1", "BE u16 * 0.01",
      "a", "verified",
      "max discharge current; 145.0 A in every drive capture, "

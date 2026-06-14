@@ -264,15 +264,30 @@ its column ordering alone cannot anchor the byte order.
 ### Charging — DID cluster `0x0900` + `0x0901` + `0x0902` (UDAN `0x94`)
 
 Three DIDs polled in parallel during the Charge-info / BMS tab. Combined
-35 data bytes covers the 16 non-time CSV columns of `Charging 0x94.csv`
-(Charger conn., elapsed time, req V/A, output V/A, fault stat., S2 state,
-CC/CC2 resistance, CP freq./duty, lock state, 3× port temp).
+35 data bytes. The iBMS internally represents this cluster as a 9-field
+record:
+
+| Field # | Name                      |
+|---------|---------------------------|
+| 1       | `ChargeConnect` (enum)    |
+| 2       | `ChargedTime`             |
+| 3       | `RequestChargeVoltMax`    |
+| 4       | `RequestChargeCurrentMax` |
+| 5       | `OutputVoltage`           |
+| 6       | `OutputCurrent`           |
+| 7       | `ErrorStatus`             |
+| 8       | `ChgStartDiagFault`       |
+| 9       | `DchgStartDiagFault`      |
+
+CSV columns the earlier scope listed but that don't belong to this
+cluster (CC/CC2 Resistance, CP freq./duty, lock state, 3× port temp,
+S2 state) are populated by other DIDs / parsers.
 
 | DID      | Data (B) | Idle sample                                       | Active-charge behavior                           |
 |----------|----------|---------------------------------------------------|--------------------------------------------------|
-| `0x0900` | 7        | `01 00 01 00 00 00 00`                            | **Invariant** across multi-hour active charging — same value as charger-disconnected baseline. Byte 0 = `0x01` = "AC Chg" enum (CSV "Charger conn." column) — CONFIRMED. Remaining bytes are TENTATIVELY the categorical enums that stay at their pack-default values on this BMS variant (Charger fault stat. = "Status", S2 state = "Open", Elec. lock state = "Unlocked"). |
-| `0x0901` | 14       | `33 0c 00 00 33 0c 00 00 00 00 ff ff ff ff`       | Bytes 0..1 BE and 4..5 BE are **paired dynamic u16 measurements** in a narrow 13100..13250 raw range across a full SOC sweep — they don't track pack V monotonically and the per-bit scale doesn't land on a clean V at observed pack voltages, so the CSV's "Charge Req. Volt." / "Charger Output Volt." mapping is still TENTATIVE. A clean × 0.01 V scale would put them at 131..132 V (close to L1 mains nominal). Byte 7 toggles `00 ↔ 0B` irregularly throughout charging (uncorrelated with status changes; likely a heartbeat — UNKNOWN). Trailing 4 bytes (10..13) are **`FF FF FF FF` = CC Resistance + CC2 Resistance "Invalid" sentinels** (CSV value 65535) — CONFIRMED. |
-| `0x0902` | 14       | `00 00 00 00 00 00 00 00 00 00 00 00 00 00`       | **Invariant all-zero** across multi-hour active charging — CONFIRMED. Consistent with the CSV showing 0 / "Invalid" for CP freq., CP duty, and the three Charger-port-temp columns on this pack variant. Unused fields padded to zero. |
+| `0x0900` | 7        | `01 00 01 00 00 00 00`                            | **Invariant** across multi-hour active charging on both L1 and L2. Byte 0 = `0x01` = "AC Chg" enum (CSV "Charger conn." column) — CONFIRMED. End-of-charge / unplug transitions byte 0 to `0x00`; post-CV the L2 trace also shows `00 00 01 00 00 00 00` (byte 2 still `0x01` while bytes 0..1 clear). Remaining bytes are TENTATIVELY the categorical enums that stay at their pack-default values on this BMS variant (Charger fault stat. = "Status", S2 state = "Open", Elec. lock state = "Unlocked"). |
+| `0x0901` | 14       | `33 0c 00 00 33 0c 00 00 00 00 ff ff ff ff`       | Bytes 0..1 BE and 4..5 BE are paired dynamic u16 values in a narrow 13100..13290 raw band across L1 (110 V) and L2 (240 V) — **invariant in mains**, ruling out any mains-V interpretation. Weak correlation during active charge: vs pack V r=0.41 L2 / 0.10 L1; vs OBC V r=0.42 L2; vs SOC r=0.42. The 9-field iBMS `ChargeMessage` record (above) has no slot these bytes map cleanly into, and the numeric match against the screenshot's `CC voltage = 4.993 V` (via `raw × 24.9/65535`) doesn't line up with any field the iBMS decodes from this cluster. Treating these as **opaque BMS-internal ADC counts that the iBMS UI doesn't surface from `0x094`** — possibly an internal reference/calibration readback. Both u16s are quantized to 11-LSB steps. Bytes 3 and 7 cycle through `{0x00, 0x0B, 0x16}` (3-state on L2; only `{00, 0B}` was observed on L1), mirrored across the two u16 blocks (byte 3 == byte 7 in ~71 % of samples) — heartbeat or paired status, UNKNOWN. Trailing 4 bytes (10..13) are **`FF FF FF FF` = CC Resistance + CC2 Resistance "Invalid" sentinels** (CSV value 65535) — CONFIRMED on L1 and L2. |
+| `0x0902` | 14       | `00 00 00 00 00 00 00 00 00 00 00 00 00 00`       | **Invariant all-zero** across multi-hour active charging on L1 and L2 — CONFIRMED. Consistent with the CSV showing 0 / "Invalid" for CP freq., CP duty, and the three Charger-port-temp columns on this pack variant. Unused fields padded to zero. |
 
 ### X700 IoT subsystem — DIDs `0xA501`, `0xA502`, `0xA506`, `0xA507`, `0xA50E`
 
@@ -915,16 +930,16 @@ Cell volt / Temp) that wasn't screenshotted.
 
 ### Open questions / TODO
 
-- **`0x94 Charging` cluster — finish per-byte ↔ CSV-column mapping.**
-  `data/dual-capture/dual-capture-charging-120.asc` (215 s, ~19 A L1
-  charging, 144 polls) advanced this: `0x0900` is invariant during charge
-  (byte 0 = `0x01` = "AC Chg" enum); `0x0901` trailing `FF FF FF FF` =
-  CC + CC2 Resistance sentinels CONFIRMED; `0x0902` invariant all-zero
-  during active charge (refutes "fault/state machine" guess). Still open:
-  decoding the two dynamic paired u16 fields at `0x0901` bytes 0..1 BE
-  and 4..5 BE (raw values don't land on a clean V at the observed pack
-  voltage) — needs a screenshotted iBMS UI value alongside the wire
-  capture to anchor units.
+- **`0x94 Charging` cluster — closed as decoded to the extent the iBMS
+  itself decodes it.** All four CONFIRMED bits (`0x0900` byte 0 =
+  "AC Chg"; `0x0901` bytes 10..13 = CC/CC2 Resistance sentinels;
+  `0x0902` all-zero) hold on L1 and L2 across full-sweep captures
+  (`dual-capture-charging-120-10p-to-100p.asc`,
+  `dual-capture-charging-240.asc`). The dynamic u16s at `0x0901` bytes
+  0..1 BE / 4..5 BE don't map to any field the iBMS surfaces from this
+  cluster — they're treated as opaque BMS-internal ADC counts. Further
+  decode would require firmware reverse engineering, a separate research
+  line.
 - **`0x4000` interpretation — UDAN `0x87` mapping is incorrect or partial.**
   The above capture shows `0x4000` is dominated by charger telemetry
   (bytes 5..8 mirror FF50 `data[0..3]`, byte 10 is a 1-Hz tick, bytes

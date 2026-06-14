@@ -44,7 +44,8 @@ runs the cluster and lights.
 | Cell P/N                  | —                                     | —                                                  | `SEPNI-8688190P-17.5AH-5P`  | —                       | `SEPNI8688190P-15Ah` (battery faceplate) |
 | Cells in parallel         | —                                     | —                                                  | 4 modules × 5P1S = 20P      | "~20 cells in parallel" | —        |
 | Cells in series           | —                                     | —                                                  | 20 (one per module)         | 20                      | 20 (CAN captures) |
-| Charge rate (L1, 110 V)   | ~1.2 kW AC (implied by 11 hr 20→80 %) | —                                                  | —                           | —                       | 1475 W ± 3 W DC, constant 10–95 % SOC |
+| Charge rate (L1, 110 V)   | ~1.2 kW AC (implied by 11 hr 20→80 %) | —                                                  | —                           | —                       | 1475 W ± 3 W DC constant (mains-power-limited), 10–95 % SOC |
+| Charge rate (L2, 240 V)   | 3.3 kW                                | —                                                  | —                           | —                       | 38.9 A constant (BMS-current-limited) → 3077–3213 W DC across 78–83 V pack |
 | Charging temp range       | 0–40 °C                               | —                                                  | —                           | —                       | —        |
 | Charging time             | 5.5 hr (Lvl 2, 220 VAC, 20→80%); 11 hr (Lvl 1, 110 VAC) | 8 hr (0→100%, on-board charger)  | —                           | —                       | ~14 hr (L1 120 VAC, 10→100 % SOC) |
 | Charging-target voltage   | 83 V                                  | 82 VDC (§9.1)                                      | —                           | —                       | —        |
@@ -493,7 +494,7 @@ Cross-validated two ways:
   values: F104F3 data[0] tracks 0x2830 top-1 raw value at r ≈ 1.0, and
   F104F3 data[1] tracks 0x2838 top-1 raw value the same way.
 
-#### F106F3 — BMS state — PARTIALLY CONFIRMED
+#### F106F3 — BMS state — CONFIRMED (byte 0 and byte 1 bit decode)
 
 Periodic frame. Byte 0 is **two bitfields, not a flat enum** — a context
 bit plus a three-step activity ladder:
@@ -537,19 +538,28 @@ output voltage decays toward zero and its flag byte cascades
 state for ~30 s and then sleeps. An unplug that interrupts an active
 mid-SOC charge remains unobserved.
 
-**Byte 1 — companion status byte (TENTATIVE).** Five values observed:
-0x80 (boot, alongside byte 0 = 0x00), 0x84 (boot transition), 0xE0 (no
-plug), 0xC4 (plug present), 0xCC (actively charging). It flips at the
-exact plug-in and charge-start instants and is *more* specific than
-byte 0 during charging: it distinguishes plug-present (0xC4) from
-actively-charging (0xCC) while byte 0 sits at 0x45 for both. Reads
-naturally as J1939 2-bit status pairs (bits 3..2: 0 = no plug, 1 = plug
-present, 3 = charging; bits 7..6: 3 = running, 2 = init). Bytes 2..7
-are constant `FC FF FF FF FF FF` across the entire corpus.
+**Byte 1 — companion status byte.** Five values observed: 0x80 (boot,
+alongside byte 0 = 0x00), 0x84 (boot transition), 0xE0 (no plug), 0xC4
+(plug present), 0xCC (actively charging). It flips at the exact plug-in
+and charge-start instants and is *more* specific than byte 0 during
+charging: it distinguishes plug-present (0xC4) from actively-charging
+(0xCC) while byte 0 sits at 0x45 for both. Reads naturally as J1939
+2-bit status pairs (bits 3..2: 0 = no plug, 1 = plug present, 3 =
+charging; bits 7..6: 3 = running, 2 = init). Bytes 2..7 are constant
+`FC FF FF FF FF FF` across the entire corpus.
 
-Vendor GUI implies more states exist (Calibrating, Charging,
-Discharging, Fault, Sleep); whether they map onto further byte-0 /
-byte-1 codes is not observed in captured data.
+**Vendor-anchored bit decode (4 paired iBMS-UI + CAN state captures):**
+
+| F106 bit | Decoder | Vendor anchor |
+|---|---|---|
+| b0 bit 0 (`0x01`) | `output_enable` | Set when BMS is in operating-ready mode; cleared in standby / init |
+| b0 bit 2 (`0x04`) | `main_contactor` | **1:1 with iBMS BMS-tab `BCU HSS1 (MainP+) State` Close/Open** across idle / drive / noseat / plugin captures |
+| b0 bit 6 (`0x40`) | `operating` | Set in `Calibrating`/`Operating` ready states; cleared in standby / init |
+| b0 bit 7 (`0x80`) | `standby` | Set when iBMS shows HSS1 = Open / plug present / fault-blocked; mutex with `operating` except for ~1 s b0=0x85 transient at plug-in |
+| b1 bit 2 (`0x04`) | `no_drive` | Set in noseat / plug-in (drive disabled); clear in idle / drive |
+| b1 bit 3 (`0x08`) | `charging` | Set only while charger delivers (`charger.flags == 0x00`) — unchanged |
+| b1 bit 5 (`0x20`) | `drive_mode` | Drive-context bit (anti-correlated with b1 bit 2) |
+| b1 bit 6 (`0x40`) | `contactors` | Misnomer: actually "BMS awake" — set even in noseat (HSS1 Open). For contactor state use `main_contactor` (b0 bit 2) |
 
 #### F107F3 — BMS limits — PARTIALLY CONFIRMED
 
@@ -1024,14 +1034,26 @@ The 0x4000 DID mirrors FF50 `data[0..3]` at its bytes 5..8 during charging;
 0x4000 byte 9 is a separate unknown dynamic/status byte — see `bms/README.md`
 §`0x4000`.
 
-**Charge-current profile is constant-power, not constant-current** — CONFIRMED,
-but unrelated to the status byte. Across a full L1 charge the OBC holds DC
-output power at **1475 W ± 3 W (σ/μ = 0.20 %)** while pack voltage rises 70 →
-83 V and current smoothly tapers 21 → 18 A. The regulator is
-mains-power-limited (≈110 V × 13 A × ~96 % efficiency). L2 (220 V) charging is
-expected to land at ~3 kW DC, matching the brochure's 3.3 kW rating. A brief
-true-CV taper (18 A → 9.9 A in ~6 min) occurs at the very end of charge before
-a clean `3 → 2 → 1 → 0` shutdown.
+**Charge-current profile depends on AC source — CONFIRMED.** The OBC runs two
+distinct control laws depending on whether it's saturating the mains or the
+BMS current limit:
+
+- **L1 (110 V AC) — mains-power-limited.** DC output power holds at
+  **1475 W ± 3 W (σ/μ = 0.20 %)** while pack voltage rises 70 → 83 V and
+  current smoothly tapers 21 → 18 A. Set by ≈110 V × 13 A × ~96 %
+  efficiency.
+- **L2 (240 V AC) — BMS-current-limited.** DC output current holds at
+  **38.9 A flat** (matching the 39.0 A ceiling published by 1806E5F4 byte
+  3..4) while pack voltage rises 78 → 83 V and delivered power scales
+  **3077 → 3213 W (mean 3144 W, σ = 53 W)**. CONFIRMED in
+  `dual-capture-charging-240.asc` (n=5901 CC samples). Lines up with the
+  brochure's 3.3 kW rating; mains capacity (~5 kW) is no longer the
+  binding constraint, so the BMS cap is.
+
+CC → CV transitions on L2: at SOC ≈ 94 % current steps 38.9 A → 19.9 A; at
+SOC ≈ 99 % it steps again to 9.9 A; the OBC then shuts down cleanly.
+L1 ends with the same `18 → 9.9 → 0` taper before a `3 → 2 → 1 → 0`
+status-byte shutdown.
 
 **The voltage field is only a pack-V reading while flags = 0x00** (output
 connected, charge flowing). With the plug inserted but no charge running
