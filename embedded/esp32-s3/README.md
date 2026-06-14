@@ -22,11 +22,14 @@ the same J1939 bus at 250 kbit/s (29-bit extended frames).
 Notes:
 
 - On the **Adafruit Feather**, the Reverse TFT display is not used.
-- On the **LilyGo T-2CAN**, use the **CAN B** header (the native ESP32-S3 TWAI
-  controller). The board's second CAN port (MCP2518FD on SPI) is unused. The
-  transceiver is galvanically isolated, so when wiring to a separate analyzer
-  you must also connect DGND between the two — without it the bus floats and
-  no frames arrive.
+- On the **LilyGo T-2CAN**, **both** CAN ports are streamed. The native TWAI
+  controller (CAN B header, GPIO 6/7) is read into the J1939 decoder and
+  forwarded as socketcand channel `can0`; the second port (MCP2518FD on SPI,
+  CS=10/SCK=12/MOSI=11/MISO=13/INT=8) is forwarded raw as channel `can1`. Both
+  ports are expected to be classic CAN at 250 kbit/s. The transceivers are
+  galvanically isolated, so when wiring to a separate analyzer you must also
+  connect DGND between the two — without it the bus floats and no frames
+  arrive.
 - The pin map lives in `src/main.cpp` under `BOARD_ADAFRUIT_FEATHER_S3` /
   `BOARD_LILYGO_T2CAN`. Build environments are defined in `platformio.ini`.
 
@@ -120,8 +123,16 @@ pass `host` / `port`:
 uv run python -m can.viewer -i socketcand -c can0 --bus-kwargs host=tractor.local port=28600
 ```
 
-Only one socketcand client can be connected at a time; a second connection
-drops the first.
+On the **T-2CAN** both buses are exposed on the same port; pick which one by
+changing the `-c` channel. Run two clients to log both at once:
+
+```bash
+uv run python -m can.logger -i socketcand -c can0 --bus-kwargs host=tractor.local port=28600 &
+uv run python -m can.logger -i socketcand -c can1 --bus-kwargs host=tractor.local port=28600
+```
+
+One client per channel is allowed; a new connection on a busy channel is
+refused so the existing clients aren't disturbed.
 
 ## Source layout
 

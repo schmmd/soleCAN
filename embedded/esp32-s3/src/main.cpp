@@ -26,6 +26,10 @@
 #include <BLEUtils.h>
 #include <BLE2902.h>
 #include "driver/twai.h"
+#if defined(BOARD_LILYGO_T2CAN)
+  #include <SPI.h>
+  #include <ACAN2517FD.h>
+#endif
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -44,11 +48,18 @@
   #define LED_POWER_PIN    GPIO_NUM_21
   #define LED_IS_NEOPIXEL  1
 #elif defined(BOARD_LILYGO_T2CAN)
-  // LilyGo T-2CAN: native TWAI on GPIO 6/7. The board's second CAN
-  // (MCP2518FD on SPI: CS=10, SCK=12, MOSI=11, MISO=13, INT=8) is unused.
+  // LilyGo T-2CAN exposes both CAN ports: CAN B is the ESP32-S3's native TWAI
+  // on GPIO 6/7; CAN A is an MCP2518FD on SPI. We stream both buses out
+  // over socketcand as channels can0 (TWAI) and can1 (MCP2518FD).
   // pin_config.h documents no user-controllable LED.
   #define CAN_TX_PIN       GPIO_NUM_7
   #define CAN_RX_PIN       GPIO_NUM_6
+  #define MCP2518_CS_PIN   GPIO_NUM_10
+  #define MCP2518_SCK_PIN  GPIO_NUM_12
+  #define MCP2518_MOSI_PIN GPIO_NUM_11
+  #define MCP2518_MISO_PIN GPIO_NUM_13
+  #define MCP2518_INT_PIN  GPIO_NUM_8
+  #define HAS_MCP2518FD    1
   #define LED_IS_NEOPIXEL  0
 #else
   #error "Define a board: BOARD_ADAFRUIT_FEATHER_S3 or BOARD_LILYGO_T2CAN"
@@ -859,13 +870,21 @@ void slcanPoll() {
 // ── socketcand ────────────────────────────────────────────────────────────────
 // Streams raw CAN frames over WiFi using the socketcand ASCII protocol.
 // python-can: interface='socketcand', host='tractor.local', port=28600,
-//             channel='can0'  (channel name is accepted but ignored).
+//             channel='can0'
 //
-// Single client at a time: a new connection drops the previous one. All work
-// is skipped when no client is in rawmode, so the cost when idle is one
-// pointer check per CAN frame.
+// One slot per channel — a client picks its bus with `< open canN >`. On the
+// T-2CAN both buses are streamed (can0 = TWAI, can1 = MCP2518FD); on the
+// Feather only can0 is available. Two clients can be connected at once on the
+// T-2CAN, one per channel. A new connection that arrives while every slot is
+// taken is rejected (the existing clients are kept).
 
 #define SOCKETCAND_PORT 28600
+
+#if defined(HAS_MCP2518FD)
+  #define SOCKETCAND_NUM_CHANNELS 2
+#else
+  #define SOCKETCAND_NUM_CHANNELS 1
+#endif
 
 enum SocketcandState {
     SC_DISCONNECTED,
@@ -874,14 +893,27 @@ enum SocketcandState {
     SC_RAWMODE,
 };
 
-static WiFiServer socketcand_server(SOCKETCAND_PORT);
-static WiFiClient socketcand_client;
-static SocketcandState socketcand_state = SC_DISCONNECTED;
-static char     socketcand_buf[64];
-static uint8_t  socketcand_len = 0;
+struct SocketcandSlot {
+    WiFiClient      client;
+    SocketcandState state   = SC_DISCONNECTED;
+    char            buf[64];
+    uint8_t         len     = 0;
+    int8_t          channel = -1;   // set when `< open canN >` is parsed
+};
 
-void socketcandSendFrame(const twai_message_t& msg) {
-    if (socketcand_state != SC_RAWMODE) return;
+static WiFiServer     socketcand_server(SOCKETCAND_PORT);
+static SocketcandSlot socketcand_slots[SOCKETCAND_NUM_CHANNELS];
+
+#if defined(HAS_MCP2518FD)
+// MCP2518FD: external CAN-FD controller wired to SPI. We run it in classic CAN
+// 2.0B mode at 250 kbit/s to match the J1939 main bus. The library's RX FIFO
+// is drained from loop(); frames are forwarded to socketcand as channel can1.
+// Crystal frequency is board-dependent — flip to OSC_20MHz if can1 stays silent.
+static ACAN2517FD g_mcp(MCP2518_CS_PIN, SPI, MCP2518_INT_PIN);
+static bool       g_mcp_initialized = false;
+#endif
+
+void socketcandSendFrame(const twai_message_t& msg, int8_t channel) {
     uint32_t now_ms = millis();
     uint32_t secs   = now_ms / 1000;
     uint32_t usecs  = (now_ms % 1000) * 1000;
@@ -894,16 +926,30 @@ void socketcandSendFrame(const twai_message_t& msg) {
     for (int i = 0; i < msg.data_length_code && n < (int)sizeof(line) - 4; i++)
         n += snprintf(line + n, sizeof(line) - n, "%02X", msg.data[i]);
     n += snprintf(line + n, sizeof(line) - n, " >");
-    socketcand_client.write((const uint8_t*)line, n);
+    for (auto& slot : socketcand_slots) {
+        if (slot.state == SC_RAWMODE && slot.channel == channel)
+            slot.client.write((const uint8_t*)line, n);
+    }
 }
 
-static void socketcandHandleCommand(const char* cmd) {
-    if (socketcand_state == SC_WAITING_OPEN && strncmp(cmd, "< open ", 7) == 0) {
-        socketcand_client.print("< ok >");
-        socketcand_state = SC_WAITING_RAWMODE;
-    } else if (socketcand_state == SC_WAITING_RAWMODE && strcmp(cmd, "< rawmode >") == 0) {
-        socketcand_client.print("< ok >");
-        socketcand_state = SC_RAWMODE;
+static void socketcandHandleCommand(SocketcandSlot& slot, const char* cmd) {
+    if (slot.state == SC_WAITING_OPEN && strncmp(cmd, "< open ", 7) == 0) {
+        // Parse "< open canN >": after "< open " expect "canN" then space-or-'>'.
+        const char* arg = cmd + 7;
+        if (strncmp(arg, "can", 3) == 0 && arg[3] >= '0' && arg[3] <= '9'
+                && (arg[4] == ' ' || arg[4] == '>')) {
+            int ch = arg[3] - '0';
+            if (ch < SOCKETCAND_NUM_CHANNELS) {
+                slot.channel = (int8_t)ch;
+                slot.state   = SC_WAITING_RAWMODE;
+                slot.client.print("< ok >");
+                return;
+            }
+        }
+        slot.client.print("< error >");
+    } else if (slot.state == SC_WAITING_RAWMODE && strcmp(cmd, "< rawmode >") == 0) {
+        slot.client.print("< ok >");
+        slot.state = SC_RAWMODE;
     }
     // bcmmode/isotpmode/echo/statistics are intentionally unsupported.
 }
@@ -911,29 +957,41 @@ static void socketcandHandleCommand(const char* cmd) {
 void socketcandPoll() {
     WiFiClient new_client = socketcand_server.available();
     if (new_client) {
-        if (socketcand_client) socketcand_client.stop();
-        socketcand_client = new_client;
-        socketcand_client.setNoDelay(true);
-        socketcand_client.print("< hi >");
-        socketcand_state = SC_WAITING_OPEN;
-        socketcand_len   = 0;
+        int free_idx = -1;
+        for (int i = 0; i < SOCKETCAND_NUM_CHANNELS; i++) {
+            if (socketcand_slots[i].state == SC_DISCONNECTED) { free_idx = i; break; }
+        }
+        if (free_idx >= 0) {
+            SocketcandSlot& slot = socketcand_slots[free_idx];
+            slot.client  = new_client;
+            slot.client.setNoDelay(true);
+            slot.client.print("< hi >");
+            slot.state   = SC_WAITING_OPEN;
+            slot.len     = 0;
+            slot.channel = -1;
+        } else {
+            new_client.stop();   // pool full — keep the existing clients
+        }
     }
-    if (socketcand_state != SC_DISCONNECTED && !socketcand_client.connected()) {
-        socketcand_client.stop();
-        socketcand_state = SC_DISCONNECTED;
-        socketcand_len   = 0;
-    }
-    while (socketcand_client && socketcand_client.available()) {
-        char c = socketcand_client.read();
-        if (c == '<') {
-            socketcand_len = 0;
-            socketcand_buf[socketcand_len++] = c;
-        } else if (socketcand_len > 0 && socketcand_len < sizeof(socketcand_buf) - 1) {
-            socketcand_buf[socketcand_len++] = c;
-            if (c == '>') {
-                socketcand_buf[socketcand_len] = '\0';
-                socketcandHandleCommand(socketcand_buf);
-                socketcand_len = 0;
+    for (auto& slot : socketcand_slots) {
+        if (slot.state != SC_DISCONNECTED && !slot.client.connected()) {
+            slot.client.stop();
+            slot.state   = SC_DISCONNECTED;
+            slot.len     = 0;
+            slot.channel = -1;
+        }
+        while (slot.client && slot.client.available()) {
+            char c = slot.client.read();
+            if (c == '<') {
+                slot.len = 0;
+                slot.buf[slot.len++] = c;
+            } else if (slot.len > 0 && slot.len < sizeof(slot.buf) - 1) {
+                slot.buf[slot.len++] = c;
+                if (c == '>') {
+                    slot.buf[slot.len] = '\0';
+                    socketcandHandleCommand(slot, slot.buf);
+                    slot.len = 0;
+                }
             }
         }
     }
@@ -1089,6 +1147,16 @@ void setup() {
     socketcand_server.setNoDelay(true);
     MDNS.addService("socketcand", "tcp", SOCKETCAND_PORT);
 
+#if defined(HAS_MCP2518FD)
+    SPI.begin(MCP2518_SCK_PIN, MCP2518_MISO_PIN, MCP2518_MOSI_PIN, MCP2518_CS_PIN);
+    ACAN2517FDSettings mcp_cfg(
+        ACAN2517FDSettings::OSC_40MHz,
+        250UL * 1000UL,
+        DataBitRateFactor::x1);
+    mcp_cfg.mRequestedMode = ACAN2517FDSettings::Normal20B;   // classic CAN 2.0B
+    g_mcp_initialized = (g_mcp.begin(mcp_cfg, [] { g_mcp.isr(); }) == 0);
+#endif
+
     bleInit();
 }
 
@@ -1098,9 +1166,22 @@ void loop() {
         if (msg.extd) {
             decodeCAN(msg.identifier, msg.data, msg.data_length_code);
             slcanSendFrame(msg);
-            socketcandSendFrame(msg);
+            socketcandSendFrame(msg, /*channel=*/0);
         }
     }
+#if defined(HAS_MCP2518FD)
+    if (g_mcp_initialized) {
+        CANFDMessage frame;
+        while (g_mcp.receive(frame)) {
+            twai_message_t fwd = {};
+            fwd.identifier       = frame.id;
+            fwd.extd             = frame.ext ? 1 : 0;
+            fwd.data_length_code = frame.len <= 8 ? frame.len : 8;
+            memcpy(fwd.data, frame.data, fwd.data_length_code);
+            socketcandSendFrame(fwd, /*channel=*/1);
+        }
+    }
+#endif
     slcanPoll();
     socketcandPoll();
     dns_server.processNextRequest();
