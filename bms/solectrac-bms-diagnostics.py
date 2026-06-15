@@ -7,7 +7,9 @@ single-page dashboard that re-renders the snapshot at ~1 Hz, organised into
 five sections matching the iBMS UI tabs:
 
   Overview    identity + pack state + per-cell voltages + temps + extremes + alarms
-  Charging    0x0900 / 0x0901 / 0x0902 (charger connection, V/A, lock, fault)
+  Charging    0x0900 / 0x0901 / 0x0902 (charger connection enum, paired
+              opaque u16s, CC/CC2 Resistance sentinels — vendor-anchored
+              against the iBMS `Charging 0x94` 17-col XLSX export)
   BMU         0x1600 BMU rails, 0x1620 on-board temps, 0x0E00 HV detection,
               0x0E40 Hall/Shunt current
   CellHealth  0x0EA0/0x0EA1 balancing, 0x0ED0-0x0ED7 open-wire / short flags,
@@ -448,20 +450,32 @@ class BmsState:
     temp_c: list = field(default_factory=list)
 
     # Peak data (DID cluster 0x2820/2828/2830/2838)
-    # Each entry: (value, subsys_0based, idx_0based)
+    # Each entry: (value, subsys_0based, idx_0based) — wire convention is
+    # 0-based throughout (matches the 0x0202 logical-to-physical map). The
+    # iBMS UI and XLSX exports render these 1-based: e.g. `Cell ID of max
+    # volt. = 16` in `Peak data 0x06` corresponds to wire `idx_0based=15`.
+    # peakRow() in the dashboard adds 1 when displaying.
     max_cells: list = field(default_factory=list)
     min_cells: list = field(default_factory=list)
     max_temps: list = field(default_factory=list)
     min_temps: list = field(default_factory=list)
 
-    # Active-session status (DID 0x4000). Byte 0 is an alarm-count candidate;
-    # bytes 5..8 carry charger telemetry, so this is not a flat alarm array.
+    # Active-session status (DID 0x4000). Byte 0 = alarm count
+    # (CONFIRMED against iBMS XLSX `Alarm state 0x87` -> `Alarm number`
+    # column at Δ ≤ 1 s); bytes 5..8 mirror FF50E5 data[0..3] (charger
+    # telemetry). The 0x4000 DID does NOT carry a per-alarm-category
+    # bitmap — that lives in F108F3 on the broadcast bus.
     alarms_raw: bytes = b""
 
-    # Charging cluster (0x0900 / 0x0901 / 0x0902)
-    charging_flags: bytes = b""    # 7B: enum/flag block (conn, S2, lock)
-    charging_meas: bytes = b""     # 14B: V/A measurements, trailing CC sentinels
-    charging_state: bytes = b""    # 14B: fault / state machine
+    # Charging cluster (0x0900 / 0x0901 / 0x0902) — vendor-anchored
+    # against the 17-column iBMS `Charging 0x94` XLSX export.
+    charging_flags: bytes = b""    # 7B: byte 0 = "AC Chg" enum; rest categorical
+    charging_meas: bytes = b""     # 14B: dynamic u16 head (opaque, wire-only),
+                                   # then heartbeat bytes, then trailing
+                                   # `FF FF FF FF` = CC/CC2 Resistance "Invalid"
+    charging_state: bytes = b""    # 14B: all-zero on this pack (CP freq/duty
+                                   # + 3× port-temp slots — all "Invalid" in
+                                   # the XLSX export)
 
     # BMU on-board rails (BMS tab)
     bmu_power: bytes = b""         # 0x1600 — BMU power-supply rail (~12.75 V)
@@ -473,12 +487,20 @@ class BmsState:
     shunt_state: bytes = b""       # 0x0E40 — Hall / Shunt current
     hall_current_a: Optional[float] = None     # bytes 0..1 BE i16 ÷ 10 A/bit
 
-    # Wake-source candidates (BMS-tab "On-board volt" sub-tab, TENTATIVE).
-    # 0x0F50 returns a single byte matching the leading WakeupSignal
-    # hypothesis: 0x01 in KL15-woken startup, 0x02 during active OBC charge,
-    # and rare 0x03 transients. The others sit alongside it in the same
-    # sub-tab and may be related rails or status.
-    wake_source: Optional[int] = None   # 0x0F50 byte 0 (TENTATIVE WakeupSignal)
+    # Wake-source (0x0F50 byte 0) — 5-bit bitmask. Anchored against the
+    # iBMS XLSX `System state 0x93` → `Wake-up signal` column which renders
+    # the active bits as a space-separated list: KL15 alone (4435×),
+    # OBC alone (10518×), `KL15 OBC` (26× transitions), and
+    # `KL15 OBC RTC CP CAN` (1× full-wake transient = 0x1F).
+    # The raw bytes observed (0x01 / 0x02 / 0x03 / 0x1F) match the bit
+    # assignments exactly:
+    #   bit 0 (0x01) = KL15
+    #   bit 1 (0x02) = OBC
+    #   bit 2 (0x04) = RTC
+    #   bit 3 (0x08) = CP
+    #   bit 4 (0x10) = CAN
+    wake_source: Optional[int] = None         # 0x0F50 byte 0 — raw u8 mask
+    wake_source_labels: list = field(default_factory=list)  # decoded names
     wake_block_f60: bytes = b""         # 0x0F60 — 3 bytes (07 00 80 observed)
     wake_block_f10: bytes = b""         # 0x0F10 — 3 bytes (00 01 00 observed)
     wake_block_f30: bytes = b""         # 0x0F30 — 4 bytes (toggles 00 0B 00 00 ↔ 00 00 00 00)
@@ -486,7 +508,7 @@ class BmsState:
     # Cell health (Cell info tab)
     balance_a: bytes = b""         # 0x0EA0 — balancing
     balance_b: bytes = b""         # 0x0EA1 — balancing
-    open_wire: dict = field(default_factory=dict)   # 0x0ED0..0x0ED7
+    open_wire: dict = field(default_factory=dict)   # 0x0ED0/1/2/5 (only 4 of 8 respond on this pack)
     cell_extremum: bytes = b""     # 0x2803
     cell_index: bytes = b""        # 0x2804
 
@@ -567,6 +589,7 @@ class BmsState:
                 "shunt_state": self.shunt_state.hex(),
                 "hall_current_a": self.hall_current_a,
                 "wake_source": self.wake_source,
+                "wake_source_labels": list(self.wake_source_labels),
                 "wake_block_f60": self.wake_block_f60.hex(),
                 "wake_block_f10": self.wake_block_f10.hex(),
                 "wake_block_f30": self.wake_block_f30.hex(),
@@ -603,6 +626,12 @@ def _be_u32(data: bytes, off: int) -> int:
 
 
 STATE_CODE_NAMES = {50: "discharging", 51: "idle", 52: "charging"}
+# iBMS XLSX `System state 0x93` exposes three vendor-labeled values:
+# `Charging` (= code 52 here), `Discharging` (= code 50), and `Self Check`
+# (1 row in 14,979 — a one-shot boot/init state; wire code value unobserved
+# in our captures). Wire code 51 ("idle") doesn't map to a distinct iBMS
+# label — the iBMS appears to fold brief 51 transitions into the previous
+# Charging or Discharging display.
 
 
 def decode_pack_state(data: bytes, st: BmsState):
@@ -709,12 +738,17 @@ def decode_bmu_temps(data: bytes, st: BmsState):
         st.bmu_temps_c = []
 
 
+WAKE_SOURCE_BITS = ("KL15", "OBC", "RTC", "CP", "CAN")
+
+
 def decode_wake_source(data: bytes, st: BmsState):
-    # 0x0F50 — 1 byte. Leading WakeupSignal candidate:
-    # 0x01 in KL15-woken startup, 0x02 during active OBC charge, and rare
-    # 0x03 transients observed in the 14-hour dual charge capture.
+    # 0x0F50 — 1 byte. 5-bit mask anchored against iBMS XLSX
+    # `Wake-up signal` column: KL15=bit 0, OBC=bit 1, RTC=bit 2,
+    # CP=bit 3, CAN=bit 4. Observed raw values: 0x01, 0x02, 0x03, 0x1F.
     if data:
-        st.wake_source = data[0]
+        b = data[0]
+        st.wake_source = b
+        st.wake_source_labels = [name for i, name in enumerate(WAKE_SOURCE_BITS) if b & (1 << i)]
 
 
 def decode_shunt_state(data: bytes, st: BmsState):
@@ -817,7 +851,11 @@ ALL_POLLS = [
     (0x0EA1, _store("balance_b")),
     (0x2803, _store("cell_extremum")),
     (0x2804, _store("cell_index")),
-    *[(0x0ED0 + i, _store_open_wire(0x0ED0 + i)) for i in range(8)],
+    # 0x0ED0..0x0ED7: 8 open-wire DIDs in the cluster, but only 4 respond on
+    # this pack (0x0ED0/0x0ED1/0x0ED2/0x0ED5). The other 4 return NRC every
+    # poll — wasted bus time. Confirmed by matching the iBMS PC Utility's own
+    # poll set: 33 DIDs total, none of the silent four. Drop them here too.
+    *[(did, _store_open_wire(did)) for did in (0x0ED0, 0x0ED1, 0x0ED2, 0x0ED5)],
     # Extended identity / config
     (0xA503, _store("ident_503")),
     (0xA505, _store("ident_505")),
@@ -1084,7 +1122,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         <table id="ov-counters"></table>
       </div>
       <div class="panel">
-        <h3>Status / alarm count (0x4000)</h3>
+        <h3>Status / alarm count (0x4000 byte 0)</h3>
         <div id="ov-alarms"></div>
       </div>
     </div>
@@ -1117,7 +1155,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         <div id="ch-flags"></div>
       </div>
       <div class="panel">
-        <h3>0x0901 measurements <span class="tent">head u16s TENT.</span></h3>
+        <h3>0x0901 measurements <span class="tent">head u16s opaque</span></h3>
         <div id="ch-meas"></div>
       </div>
       <div class="panel">
@@ -1329,7 +1367,7 @@ function peakRow(label, entries, unit) {
     return `<tr><td class="tag">${label}</td><td colspan="4">${dash}</td></tr>`;
   }
   const cells = entries.slice(0, 4).map(([v, sub, idx]) =>
-    `<td class="num">${v}${unit} <span class="tag">s${sub}/#${idx + 1}</span></td>`
+    `<td class="num">${v}${unit} <span class="tag">s${sub + 1}/#${idx + 1}</span></td>`
   );
   while (cells.length < 4) cells.push('<td class="num">—</td>');
   return `<tr><td class="tag">${label}</td>${cells.join('')}</tr>`;
@@ -1368,7 +1406,7 @@ function renderAlarms(hex) {
   const tailSentinel = bytes.length >= 31 && bytes.slice(26, 31).every(b => b === 0xFF);
 
   root.innerHTML = `<table>
-    ${row('Byte 0 alarm-count candidate', countHtml)}
+    ${row('Byte 0 alarm count', countHtml)}
     ${row('Bytes 1..4 status', `<span class="hex">${statusBlock || dash}</span>`)}
     ${row('Charger status mirror (byte 5)', byteHex(chargerStatus))}
     ${row('Charger voltage mirror', mirrorV == null ? dash : fmtNum(mirrorV, 1, 'V'))}
@@ -1377,7 +1415,7 @@ function renderAlarms(hex) {
     ${row('Byte 10 counter/status', byteHex(bytes.length > 10 ? bytes[10] : null))}
     ${row('Tail 26..30', tailSentinel ? '<span class="badge ok">0xFF sentinels</span>' : '<span class="badge warn">not all 0xFF</span>')}
   </table>
-  <div class="sub" style="margin-top:8px;">0x4000 is mixed status/charger telemetry; only byte 0 is an alarm-count candidate. Byte 9 is unknown and is not part of the charger-current mirror.</div>
+  <div class="sub" style="margin-top:8px;">0x4000 is mixed status/charger telemetry: byte 0 = alarm count (matches iBMS XLSX <code>Alarm number</code> column 1:1); bytes 5..8 mirror FF50E5 data[0..3] (charger V/A). Byte 9 is unknown and is not part of the charger-current mirror. F108F3 (broadcast bus) carries the per-fault bitmap, not 0x4000.</div>
   <div class="hex" style="margin-top:8px;">${hexSpaced(hex)}</div>`;
 }
 
@@ -1401,32 +1439,39 @@ function renderCharging(c) {
   let measHtml;
   if (!m || m.length < 28) measHtml = `<div class="sub">${dash}</div>`;
   else {
-    // Bytes 0..1 and 4..5: stable at ~13.2 V across 14 h L1 charge
-    // (r ≈ 0.09 vs pack V), so the ÷100 = 132 V interpretation is wrong.
-    // ÷1000 fits a 12 V rail; specific rail (BMU vs aux) unconfirmed.
-    const v1 = beU16(m, 0) / 1000;
-    const v2 = beU16(m, 4) / 1000;
+    // Bytes 0..1 BE and 4..5 BE: paired dynamic u16s, stable in 13100..13290
+    // raw band across both L1 (110 V) and L2 (240 V) full SOC sweeps —
+    // mains-invariant, weakly correlated with pack V (r ≈ 0.4 L2 / 0.1 L1).
+    // Confirmed NOT in any column of iBMS exports (`Charging 0x94` 17 cols
+    // and `System state 0x93` 51 cols, 14k+ rows scanned). Wire-only field
+    // the iBMS UI doesn't surface — likely an internal reference / ADC
+    // readback. Display as raw u16 only.
+    const raw1 = beU16(m, 0);
+    const raw2 = beU16(m, 4);
     const ccSentinel = m.slice(20, 28).toUpperCase() === 'FFFFFFFF';
     measHtml = `<table>
-      ${row('Field@0 (÷1000) <span class="tent">TENT.</span>', fmtNum(v1, 3, 'V'))}
-      ${row('Field@4 (÷1000) <span class="tent">TENT.</span>', fmtNum(v2, 3, 'V'))}
+      ${row('Bytes 0..1 BE u16 (opaque)', `<span class="hex">${raw1}</span>`)}
+      ${row('Bytes 4..5 BE u16 (opaque)', `<span class="hex">${raw2}</span>`)}
       ${row('CC / CC2 Resistance', ccSentinel
-          ? '<span class="badge">sentinel (disconnected)</span>'
+          ? '<span class="badge">sentinel (Invalid)</span>'
           : `<span class="hex">${m.slice(20, 28).match(/.{2}/g).join(' ')}</span>`)}
     </table>
     <div class="hex" style="margin-top:8px;">${hexSpaced(m)}</div>`;
   }
   $('ch-meas').innerHTML = measHtml;
 
-  // 0x0902 fault / state
+  // 0x0902 — invariant all-zero on this pack across L1 + L2 full sweeps.
+  // Maps to CP freq/duty + 3× port-temp slots, all of which appear as
+  // "Invalid" / 0 in the iBMS `Charging 0x94` XLSX export — unused on
+  // this BMS variant. Any non-zero would be genuinely unexpected.
   const st = c.state;
   let stateHtml;
   if (!st) stateHtml = `<div class="sub">${dash}</div>`;
   else {
     const nonZero = /[1-9a-f]/i.test(st);
     const badge = nonZero
-      ? '<span class="badge err">non-zero — investigate</span>'
-      : '<span class="badge ok">all zero (idle)</span>';
+      ? '<span class="badge err">non-zero — unexpected on this pack</span>'
+      : '<span class="badge ok">all zero (unused on this variant)</span>';
     stateHtml = `<div>${badge}</div>
       <div class="hex" style="margin-top:8px;">${hexSpaced(st)}</div>`;
   }

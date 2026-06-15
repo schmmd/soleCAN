@@ -30,8 +30,10 @@ Confidence markers used throughout: **CONFIRMED**, **TENTATIVE**, **UNKNOWN**.
 - Temperature probes: 7 per subsystem
 - HV rails: B+, HV1 (Main+), HV2, HV3 active; HV4 / HV5 not used
 - Contactors: HSS1 (Main+), HSS2–HSS5, LSS1 (only HSS1 closed when idle)
-- "Calibrating" Running mode — TENTATIVE: this BMS's normal idle state,
-  not a special diagnostic mode
+- "Calibrating" Running mode — CONFIRMED as this BMS's normal idle state,
+  not a special diagnostic mode. Anchored against the iBMS XLSX
+  `Device info. 0x92` → `Current mode` column: every populated row across
+  two 7-day exports reads `Calibrating` (44/44 and 45/45 rows).
 
 ---
 
@@ -146,7 +148,7 @@ for the same physical probe.
 | 6..7   | BE i16  | Signed pack current × 10 (A). **Positive = charging into pack, negative = discharging** — opposite sign convention from J1939 `F100F3` data[2..3] | `0xFFED` = −1.9 A (idle standby draw); +194 (`0x00C2`) during 120 V charging |
 | 8      | u8      | `0x00` padding                       | constant        |
 | 9      | u8      | Cell-mV spread (max − min)           | 4–15 mV; r ≈ 0.83 vs `0x2820`/`0x2828`; exact match ≈ 76 % of the time (small skew from staggered polls) |
-| 10     | u8      | Pack-current state code — TENTATIVE. Three observed values: **50 = discharging (drive)**, **51 = idle / brief transient**, **52 = actively charging**. Drive captures are dominated by 50 with 51 between current bursts; a multi-hour L1 charge is dominated by 52 (~87 %), 51 the remainder. Mirrored 99.9 % by `0x2810` byte 9. Also rules out max-temp raw (r = 0.0 vs `0x2830` top-1) | charging → mostly 52; discharge → mostly 50; idle → mostly 51 |
+| 10     | u8      | Pack-current state code — CONFIRMED. Three observed values: **50 = discharging (drive)**, **51 = idle / brief transient**, **52 = actively charging**. Drive captures are dominated by 50 with 51 between current bursts; a multi-hour L1 charge is dominated by 52 (~87 %), 51 the remainder. Mirrored 99.9 % by `0x2810` byte 9. Also rules out max-temp raw (r = 0.0 vs `0x2830` top-1) | charging → mostly 52; discharge → mostly 50; idle → mostly 51 |
 | 11     | u8      | `0x06` constant (struct version tag) | constant        |
 
 ### Peak data — DID cluster `0x2820`/`0x2828`/`0x2830`/`0x2838` (UDAN `0x06`)
@@ -175,8 +177,8 @@ Cross-checks against `0x0101`: top-1 entries match the cell-array max
 |--------|-------------|------------------------------------------------------------|
 | 0      | 832,857,443 | TENTATIVE: lifetime counter (ms or epoch-like); ticks 1/s  |
 | 4      | 1,329       | Session uptime; zero at boot, ticks 1/s                    |
-| 8      | 3,873,795   | Accumulated charge time (1076 h)                           |
-| 12     | 576,772     | Accumulated discharge / usage time (160 h)                 |
+| 8      | 3,873,795   | Accumulated charge time (1076 h) — **× 1 s/LSB CONFIRMED** via iBMS XLSX `(Dis)charged time 0x95` → `ACC. charge time(s)`: column advances 3,874,090 → 3,925,043 (+50,953 s = ~14.2 h) over a 7-day export, matching wire poll rate. |
+| 12     | 576,772     | Accumulated discharge / usage time (160 h) — **× 1 s/LSB CONFIRMED** same way (`ACC. discharge time(s)` 589,909 → 604,320 = +14,411 s ~ 4 h). |
 
 **Heartbeat byte:** byte 3 of the payload (low byte of the offset-0 u32)
 increments by 1 every ~1 s — this is the byte exported as the `Heartbeat`
@@ -189,16 +191,16 @@ column in the iBMS System-state CSV.
 | Offset | Type    | Field                                                 |
 |--------|---------|-------------------------------------------------------|
 | 0..1   | BE u16  | Cell count (= 20)                                     |
-| 2..3   | BE u16  | Cycle count (= 7)                                     |
+| 2..3   | BE u16  | Cycle count (= 7) — TENTATIVE. iBMS XLSX `Device info. 0x92` → `Charging cycles` reads `0` across every row of two 7-day exports, so this u16 is **not** the same counter the vendor surfaces as "Charging cycles". Possibly a startup/reset count or a different internal cycle metric. |
 | 4..5   | BE u16  | Average cell voltage (mV) — r ≈ 1.000 vs mean(`0x0101`); mean error 0.3 mV |
 | 6      | u8      | Average cell temperature (°C = raw − 50) — matches round(mean(`0x0102`)) ≥99 % |
 | 7      | u8      | `0x00` padding                                        |
 | 8      | u8      | Cell-mV spread (mirrors `0x2800` byte 9)              |
-| 9      | u8      | Pack-current state code (mirrors `0x2800` byte 10; 99.9 % match): **50 = discharging, 51 = idle/transient, 52 = active charging** — TENTATIVE |
+| 9      | u8      | Pack-current state code (mirrors `0x2800` byte 10; 99.9 % match): **50 = discharging, 51 = idle/transient, 52 = active charging** — CONFIRMED |
 | 10     | u8      | `0x00` padding                                        |
 | 11     | u8      | `0x1E` constant (struct version tag)                  |
-| 12..15 | BE u32  | Accumulated charge capacity, **raw u32 = lifetime Ah** (one LSB per Ah delivered) — CONFIRMED. Cross-checked across a 13.9 h L1 charge (10 → 99 % SOC): integrating signed pack current from `0x2800` yields 269 Ah delivered; counter advanced raw 7763 → 8032 (+269). Match at × 1 Ah scale is <1 %; the documented × 0.01 Ah scale would have moved ~26,900 LSBs. The wire format may nominally be × 0.01 Ah resolution but the firmware quantizes to whole-Ah steps. |
-| 16..19 | BE u32  | Accumulated discharge capacity, same scale convention as bytes 12..15 — TENTATIVE on the discharge side only (cross-check on the charge side is solid; same field on the discharge counter held flat at 8082 Ah lifetime during the charge session, so a long drive capture is still needed to independently verify the discharge scale). |
+| 12..15 | BE u32  | Accumulated charge capacity, **raw u32 = lifetime Ah** (one LSB per Ah delivered) — CONFIRMED. Cross-checked across a 13.9 h L1 charge (10 → 99 % SOC): integrating signed pack current from `0x2800` yields 269 Ah delivered; counter advanced raw 7763 → 8032 (+269). Match at × 1 Ah scale is <1 %; the documented × 0.01 Ah scale would have moved ~26,900 LSBs. The wire format may nominally be × 0.01 Ah resolution but the firmware quantizes to whole-Ah steps. **Independent second-source confirmation:** the iBMS XLSX `(Dis)charged energy 0x89` export's `Acc. charged energy/capacity` column advances 7763 → 8037 (+274 over 7 days) with explicit unit `AH` and scale `1` — same × 1 Ah/LSB. |
+| 16..19 | BE u32  | Accumulated discharge capacity, same scale convention as bytes 12..15 — **CONFIRMED** by the same XLSX export (`Acc. discharged energy/capacity` 8004 → 8154 = +150 Ah over 7 days, unit `AH` scale `1`). |
 
 ### `0x4000` — active-session status (UDAN `0x87` mapping QUESTIONED)
 
@@ -255,11 +257,17 @@ charging telemetry, not severity codes. Two possibilities remain open:
     block that UDAN tag `0x99` ("Charging state / ChgState — UNKNOWN")
     refers to.
 
-Still TENTATIVE. The 73-column Alarm CSV's per-byte-to-column mapping
+Still TENTATIVE. The 76-category Alarm CSV's per-byte-to-column mapping
 remains unresolved — a capture with a *new* fault firing (i.e. byte 0
-incrementing past `0x02`) is needed to pin it down. The historical
-on-pack CSV only ever shows the same two alarms across all 240 rows, so
-its column ordering alone cannot anchor the byte order.
+incrementing past `0x02`) is needed to pin it down. The newer XLSX
+export *does* contain rich alarm-history data — 2,942 rows with
+`Alarm number > 0` spanning **8 distinct categories** (LowSoc Lvl 3,
+ChgOV, ChgPackOV, DchgTdiff, DchgOV, DchgPackOV, ChargerComm,
+ChgTdiff) — but the iBMS RTC is unset (see [[project_ibms_clock]])
+so XLSX timestamps cannot be aligned to a wire-trace clock. Resolving
+the byte-to-column order still requires a *time-aligned* dual capture
+where a fault transitions live on both the diagnostic-port frame and
+either the broadcast `F108F3` or the iBMS UI.
 
 ### Charging — DID cluster `0x0900` + `0x0901` + `0x0902` (UDAN `0x94`)
 
@@ -405,8 +413,8 @@ Use 0x2800 as the authoritative pack current; treat 0x0E40 as a cross-check
 `BoardTempNum` is always `0` on this pack — the BMS-side board-temperature
 feature is not configured on the India 72V 300Ah Solectrac variant, and
 the iBMS PC tool reflects this by exporting no `BoardTemp` CSV
-(inventory under "Historical CSV exports" in the appendix lists 8 files,
-none of them BoardTemp). The trailing bytes carry a constant stub
+(inventory under "Historical CSV exports" in the appendix lists 10
+sheets, none of them BoardTemp). The trailing bytes carry a constant stub
 pattern (`47 47 00 00 45 00` across every observed capture); decoding
 those as live temps gives plausible-looking but spurious 17–21 °C
 readings even when ambient is 15 °C. The decoder gates on byte 0 and
@@ -457,7 +465,7 @@ These are polled by the iBMS but not yet mapped to a known UDAN message:
 | `0x0620`, `0x0621`, `0x0648`                           | Mostly-empty sub-block, UNKNOWN |
 | `0x0641`–`0x0647`                                      | Per-channel 1-byte values (7 total), UNKNOWN |
 | `0x0E21`                                               | UNKNOWN small value |
-| `0x0F50`                                               | 1-byte response — **leading `WakeupSignal` candidate** (BatteryPackMessage protobuf field 3, varint enum with sources KL15 / OBC / RTC). KL15-woken captures show `0x01`; the 14-hour OBC charge capture is dominated by `0x02` during active charging, with short `0x03` transients. |
+| `0x0F50`                                               | 1-byte response — **`WakeupSignal` 5-bit mask CONFIRMED**. Anchored against the iBMS XLSX `System state 0x93` → `Wake-up signal` column. Bit assignment: bit 0 = KL15, bit 1 = OBC, bit 2 = RTC, bit 3 = CP, bit 4 = CAN. Observed raw values across the 7-day export decode cleanly: `0x01` = `KL15` (4435 rows), `0x02` = `OBC` (10518 rows), `0x03` = `KL15 OBC` (26 rows, transitions), `0x1F` = `KL15 OBC RTC CP CAN` (1 row, full-wake transient). Previous "0x03 transient" interpretation matches: it was always KL15+OBC together, never a third enum value. |
 | `0x0F60`, `0x0F10`                                     | 3-byte constants (`07 00 80` and `00 01 00` respectively) in KL15 captures; sit next to `0x0F50` in the "On-board volt" sub-tab — possibly KL15/OBC/RTC rail voltages or wake-related status. |
 | `0x0F30`                                               | 4 bytes, toggles between `00 00 00 00` and `00 0B 00 00` with byte 1 flipping briefly to `0x0B` — signal-detection event flag. |
 | `0x0E70`–`0x0E72`, `0x0EF0`                            | Signal detection / on-board rails — all-zero in observed captures |
@@ -695,7 +703,7 @@ arbitration IDs.
 | 0x79  | Balancing state                 | UNKNOWN          |
 | 0x80  | Device list                     | —                |
 | 0x81  | Device info                     | —                |
-| 0x82  | Device list (alt)               | —                |
+| 0x82  | Device list                     | composite — XLSX sheet exports VIN + per-device HWID/FW (aggregate, no single DID) |
 | 0x83  | System state                    | alt name for `0x93` |
 | 0x84  | DTU info                        | —                |
 | 0x85  | Charging                        | alt name for `0x94` |
@@ -704,7 +712,7 @@ arbitration IDs.
 | 0x88  | (Dis)charged energy             | alt name for `0x89` |
 | 0x89  | (Dis)charged energy (alt)       | `0x2810`         |
 | 0x91  | List of supported commands      | —                |
-| 0x92  | Device info (alt)               | —                |
+| 0x92  | Device info                     | composite — XLSX sheet exports releaseName (`0xA50F`), FWID, BurnID, PackSN, Current mode (`Calibrating`), Charging cycles, Up time |
 | 0x93  | System state (alt)              | `0x2800`         |
 | 0x94  | Charging (alt)                  | `0x0900`+`0x0901`+`0x0902` (`0x0900` byte 0 + `0x0901` CC sentinels CONFIRMED; rest of `0x0901` head TENTATIVE) |
 | 0x95  | (Dis)charged time               | `0x2801`         |
@@ -869,7 +877,16 @@ Peak data 0x06.csv                — maps to DID cluster 0x2820/0x2828/0x2830/0
 System state 0x93.csv             — maps to DID 0x2800
 Temperatures 0x09.csv             — maps to DID 0x0102
 Voltages 0x08.csv                 — maps to DID 0x0101
+Device info. 0x92.csv             — Calibrating-mode + firmware/burn IDs + Charging-cycles counter + Up-time
+Device list 0x82.csv              — VIN, hardware-device count, per-device HWID + FWVerion
 ```
+
+The two `Device …` sheets appear in newer XLSX exports
+(`<pack-serial>_<timestamp>.xlsx`) and are sampled at much lower
+cadence (~45 rows over a 7-day window) than the per-second telemetry
+sheets above. The XLSX export carries all 10 sheets in one file — the
+loose per-tag `.csv` form is the live "Data Storage" toggle (see
+[[project-ibms-csv-login]]).
 
 ---
 
@@ -958,16 +975,25 @@ Cell volt / Temp) that wasn't screenshotted.
   category bytes. Open: identify the actual Alarm-state DID (candidates:
   UDAN tag `0x99` "Charging state / ChgState — UNKNOWN" might in fact
   point at `0x4000`, and the real Alarm DID is unpolled), and lock down
-  the byte-to-CSV-column order for the 73-column alarm CSV. Still
-  requires a *new* fault firing (byte 0 incrementing past `0x02`) — the
-  on-pack historical CSV only records `ChgOV` + `ChgPackOV` across all
-  240 rows, so its column ordering alone cannot anchor the byte order.
+  the byte-to-CSV-column order for the 76-category alarm CSV. The
+  newer XLSX export *does* contain rich alarm history (2,942 rows
+  with `Alarm number > 0` across 8 categories: LowSoc Lvl 3, ChgOV,
+  ChgPackOV, DchgTdiff, DchgOV, DchgPackOV, ChargerComm, ChgTdiff),
+  but iBMS RTC drift (see [[project_ibms_clock]]) blocks
+  timestamp-based alignment to a wire trace. Resolving the byte
+  order requires a *time-aligned* dual capture where a fault
+  transitions live on both the diagnostic-port frame and either
+  broadcast `F108F3` or the iBMS UI.
 - **Bootstrap RequestDownload payload.** Confirmed static across sessions
   (see above); remaining open question is what the blob *is*.
 - **Late-session routine burst trigger.** See above.
-- **Remaining tentative payload fields:** `0x2800` offsets 6/8/10;
-  `0x2810` offsets 4–11; `0x0EA0`/`0x0EA1` (balancing); `0x0ED0`–`0x0ED7`
+- **Remaining tentative payload fields:** `0x2810` bytes 2..3 (vendor
+  `Charging cycles` = 0 contradicts cycle-count interpretation);
+  `0x0EA0`/`0x0EA1` (balancing — no balancing seen); `0x0ED0`–`0x0ED7`
   (open-wire / short flags); `0x09xx` BMS-tab block (Hlss / HV / Hall).
+  Most prior `0x2800`/`0x2810` byte-level tentative items are now
+  CONFIRMED (state code 50/51/52; charge counter × 1 Ah/LSB; spread
+  mirror; avg cell V/T).
 - **Unmapped UDAN tags** from the iBMSUpper symbol table:
   - `0x0A` Heat and Pole Temperatures, `0x0B` Heat Pole MOS Temperatures —
     likely **features absent** on the Solectrac pack (no heat-pole MOS
@@ -983,12 +1009,14 @@ Cell volt / Temp) that wasn't screenshotted.
     `0x09xx` cluster currently labeled TENTATIVE Charging.
 
   Net: most are probably duplicate names or absent features. Indirect
-  support: the BMS's own historical CSV export contains exactly 8 files,
-  one per already-mapped tag (`0x06`, `0x08`, `0x09`, `0x87`, `0x89`,
-  `0x93`, `0x94`, `0x95`) — no CSV for any of the unmapped tags above.
-  The pack itself doesn't log these tags. Definitive confirmation still
-  needs (a) an active-charge / active-fault / balancing capture, and (b)
-  an attempt to read each unmapped UDAN tag's likely DID range to see
-  what (if anything) responds.
+  support: the BMS's own historical XLSX export contains exactly 10
+  sheets — the 8 per-second telemetry sheets (`0x06`, `0x08`, `0x09`,
+  `0x87`, `0x89`, `0x93`, `0x94`, `0x95`) plus low-cadence `Device
+  info. 0x92` and `Device list 0x82` — no sheet for any of the
+  unmapped tags above. The pack itself doesn't log these tags.
+  Definitive confirmation still needs (a) an active-charge /
+  active-fault / balancing capture, and (b) an attempt to read each
+  unmapped UDAN tag's likely DID range to see what (if anything)
+  responds.
 - **F700 sibling family** (informational): which hardware variants use
   TestModeSwitch alt registers `0x0EDC` / `0x0E13`.
