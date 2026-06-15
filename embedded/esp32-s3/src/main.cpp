@@ -950,6 +950,55 @@ void socketcandSendFrame(const twai_message_t& msg, int8_t channel) {
     }
 }
 
+// Parse "< send <idhex> <dlc> <b0> <b1> ... >" (rawmode TX) and inject the frame
+// onto this slot's CAN controller. We accept both extended-ID encodings seen in
+// the wild: standard socketcand/python-can distinguishes 29-bit frames purely by
+// id-field width (3 hex chars => 11-bit, otherwise extended, no flag bit), while
+// some clients also OR the EFF flag into bit 31 — either marks the frame
+// extended here. Byte tokens may be 1 or 2 hex digits; the dlc (0..8) reads the
+// same in decimal or hex. Anything unparseable is dropped, like a real daemon.
+static void socketcandHandleSend(SocketcandSlot& slot, const char* cmd) {
+    const char* p = cmd + 7;            // past "< send "
+    char* end = nullptr;
+    unsigned long id_val = strtoul(p, &end, 16);
+    if (end == p) return;
+    int id_len = (int)(end - p);
+    p = end;
+    long dlc = strtol(p, &end, 16);
+    if (end == p || dlc < 0 || dlc > 8) return;
+    p = end;
+    uint8_t data[8] = {0};
+    int got = 0;
+    while (got < dlc) {
+        long b = strtol(p, &end, 16);
+        if (end == p) break;            // fewer tokens than dlc — leave zero-padded
+        data[got++] = (uint8_t)(b & 0xFF);
+        p = end;
+    }
+    bool extended = (id_val & 0x80000000UL) != 0 || id_len > 3;
+    uint32_t id = extended ? (id_val & 0x1FFFFFFFUL) : (id_val & 0x7FFUL);
+
+    if (slot.channel == 0) {
+        twai_message_t tx = {};
+        tx.identifier       = id;
+        tx.extd             = extended ? 1 : 0;
+        tx.data_length_code = (uint8_t)dlc;
+        memcpy(tx.data, data, (size_t)dlc);
+        twai_transmit(&tx, pdMS_TO_TICKS(10));
+    }
+#if defined(HAS_MCP2515)
+    else if (slot.channel == 1 && g_mcp_initialized) {
+        CANMessage tx;
+        tx.id  = id;
+        tx.ext = extended;
+        tx.rtr = false;
+        tx.len = (uint8_t)dlc;
+        memcpy(tx.data, data, (size_t)dlc);
+        g_mcp.tryToSend(tx);
+    }
+#endif
+}
+
 static void socketcandHandleCommand(SocketcandSlot& slot, const char* cmd) {
     if (slot.state == SC_WAITING_OPEN && strncmp(cmd, "< open ", 7) == 0) {
         // Parse "< open canN >": after "< open " expect "canN" then space-or-'>'.
@@ -968,6 +1017,8 @@ static void socketcandHandleCommand(SocketcandSlot& slot, const char* cmd) {
     } else if (slot.state == SC_WAITING_RAWMODE && strcmp(cmd, "< rawmode >") == 0) {
         slot.client.print("< ok >");
         slot.state = SC_RAWMODE;
+    } else if (slot.state == SC_RAWMODE && strncmp(cmd, "< send ", 7) == 0) {
+        socketcandHandleSend(slot, cmd);
     }
     // bcmmode/isotpmode/echo/statistics are intentionally unsupported.
 }
@@ -1188,9 +1239,6 @@ void setup() {
     ACAN2515Settings mcp_cfg(MCP2515_QUARTZ_HZ, 250UL * 1000UL);
     g_mcp_init_err    = g_mcp.begin(mcp_cfg, [] { g_mcp.isr(); });
     g_mcp_initialized = (g_mcp_init_err == 0);
-    Serial.printf("MCP2515 begin: err=0x%08lX (quartz=%lu Hz, CS=%d INT=%d RST=%d SCK=%d MOSI=%d MISO=%d)\n",
-        (unsigned long)g_mcp_init_err, (unsigned long)MCP2515_QUARTZ_HZ,
-        MCP2515_CS_PIN, MCP2515_INT_PIN, MCP2515_RST_PIN, MCP2515_SCK_PIN, MCP2515_MOSI_PIN, MCP2515_MISO_PIN);
 #endif
 
     bleInit();
