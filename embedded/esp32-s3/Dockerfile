@@ -34,15 +34,15 @@ COPY embedded/esp32-s3/ ./
 # bakes it into the binary at build time).
 COPY android/app/src/main/assets/dashboard.html ./src/dashboard.html
 
-# WIFI_SSID / WIFI_PASS (the home network the board also joins for bench use)
-# are embedded at compile time; the build needs them set, so default to
-# placeholders. AP_SSID / AP_PASS / MDNS_NAME optionally override the hotspot
-# the board broadcasts and its mDNS hostname — leave them empty to keep the
-# firmware's built-in defaults, so the default build is unchanged. Override any
-# of these via --build-arg, e.g. `set -a; source embedded/esp32-s3/.env; set +a`
+# All of these are optional and embedded at compile time; leave them empty to
+# keep the firmware's built-in defaults. WIFI_SSID / WIFI_PASS are the home
+# network the board also joins for bench use — empty means AP-only (the stable
+# field default; the board still broadcasts its own hotspot). AP_SSID / AP_PASS
+# / MDNS_NAME override that hotspot and the mDNS hostname. Override any of these
+# via --build-arg, e.g. `set -a; source embedded/esp32-s3/.env; set +a`
 # then --build-arg AP_PASS="$AP_PASS".
-ARG WIFI_SSID=placeholder
-ARG WIFI_PASS=placeholder
+ARG WIFI_SSID=
+ARG WIFI_PASS=
 ARG AP_SSID=
 ARG AP_PASS=
 ARG MDNS_NAME=

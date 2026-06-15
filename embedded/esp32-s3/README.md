@@ -128,8 +128,9 @@ no-ops on that board.
    cd solectrac/embedded/esp32-s3
    ```
 
-3. **Set WiFi credentials** as environment variables — the build embeds them
-   into the firmware (the firmware refuses to compile without them):
+3. *(Optional)* **Set a bench WiFi network** to also join. Leave these unset to
+   build AP-only — the board still broadcasts its own hotspot (the stable
+   default for field use), so this step isn't required:
 
    ```bash
    export WIFI_SSID="your-network"
@@ -214,13 +215,18 @@ docker build -f embedded/esp32-s3/Dockerfile \
 
 ## Customizing the WiFi AP and mDNS hostname (optional)
 
-The board runs in dual AP+STA mode: it broadcasts its own hotspot (so it's
-reachable in the field) and also tries to join a home network for bench use.
+The board always broadcasts its own hotspot (so it's reachable in the field).
 By default the hotspot is **SSID `tractor` / password `electricity`** and the
 board advertises itself as **`tractor.local`** — if you don't do anything here,
 the build is unchanged.
 
-To override the AP credentials, mDNS hostname (and/or the bench network), copy
+If you also set `WIFI_SSID` / `WIFI_PASS`, the board additionally joins that
+network as a station for bench use (dual AP+STA mode). Leave them empty for an
+AP-only build — the recommended field setup, since the AP and station share one
+radio and a station endlessly scanning for an out-of-range network makes the
+hotspot drop in and out.
+
+To override the AP credentials, mDNS hostname (and/or set a bench network), copy
 the template to a gitignored `.env` and set values:
 
 ```bash

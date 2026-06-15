@@ -33,11 +33,14 @@
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
+// Optional home network the board also joins (for bench use). Leave unset to
+// run AP-only — the board still broadcasts its own hotspot (see AP_SSID below),
+// which is the stable default for field use. Set both to join a network.
 #ifndef WIFI_SSID
-#error "Set WIFI_SSID env var before building"
+#define WIFI_SSID ""
 #endif
 #ifndef WIFI_PASS
-#error "Set WIFI_PASS env var before building"
+#define WIFI_PASS ""
 #endif
 
 // Per-board pin map. Selected via -DBOARD_* in platformio.ini.
@@ -1208,9 +1211,17 @@ void setup() {
     // Bring up the soft-AP first so the board is always reachable in the field
     // at 192.168.4.1 even if there's no home network in range. STA connect
     // happens in the background; we don't block boot waiting on it.
-    WiFi.mode(WIFI_AP_STA);
+    //
+    // Only enable the station when a home network is actually configured. The
+    // AP and STA share one radio: if WIFI_SSID is empty the station would scan
+    // every channel forever looking for a network that doesn't exist, which
+    // makes the soft-AP beacon hop channels and drop out (it appears briefly
+    // then vanishes and won't accept clients). Build with an empty WIFI_SSID
+    // for a rock-solid AP-only setup; set it to join a bench network as before.
+    const bool join_sta = (sizeof(WIFI_SSID) > 1);
+    WiFi.mode(join_sta ? WIFI_AP_STA : WIFI_AP);
     g_ap_running = WiFi.softAP(AP_SSID, AP_PASS);
-    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    if (join_sta) WiFi.begin(WIFI_SSID, WIFI_PASS);
 
     // Wildcard DNS on the soft-AP: any hostname (tractor.local, tractor,
     // captive-portal probes, etc.) resolves to the board's AP IP. Needed
