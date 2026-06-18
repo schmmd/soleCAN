@@ -200,7 +200,7 @@ column in the iBMS System-state CSV.
 | 10     | u8      | `0x00` padding                                        |
 | 11     | u8      | `0x1E` constant (struct version tag)                  |
 | 12..15 | BE u32  | Accumulated charge capacity, **raw u32 = lifetime Ah** (one LSB per Ah delivered) — CONFIRMED. Cross-checked across a 13.9 h L1 charge (10 → 99 % SOC): integrating signed pack current from `0x2800` yields 269 Ah delivered; counter advanced raw 7763 → 8032 (+269). Match at × 1 Ah scale is <1 %; the documented × 0.01 Ah scale would have moved ~26,900 LSBs. The wire format may nominally be × 0.01 Ah resolution but the firmware quantizes to whole-Ah steps. **Independent second-source confirmation:** the iBMS XLSX `(Dis)charged energy 0x89` export's `Acc. charged energy/capacity` column advances 7763 → 8037 (+274 over 7 days) with explicit unit `AH` and scale `1` — same × 1 Ah/LSB. |
-| 16..19 | BE u32  | Accumulated discharge capacity, same scale convention as bytes 12..15 — **CONFIRMED** by the same XLSX export (`Acc. discharged energy/capacity` 8004 → 8154 = +150 Ah over 7 days, unit `AH` scale `1`). |
+| 16..19 | BE u32  | Accumulated discharge capacity, same scale convention as bytes 12..15 — **CONFIRMED** by the same XLSX export (`Acc. discharged energy/capacity` 8004 → 8154 = +150 Ah over 7 days, unit `AH` scale `1`). **In-capture cross-check:** a 15.5 min mow (97.5 → 92.4 % SOC, mean −59.5 A, peak −110 A) advanced the counter raw 8164 → 8179 (+15) while integrating signed pack current from `0x2800` yielded 14.2 Ah drawn — × 1 Ah/LSB matches within ~5 % (shunt vs whole-LSB quantization on a 15-LSB delta). The × 0.01 Ah scale would have moved ~1,420 LSBs. |
 
 ### `0x4000` — active-session status (UDAN `0x87` mapping QUESTIONED)
 
