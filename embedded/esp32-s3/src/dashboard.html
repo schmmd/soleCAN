@@ -376,8 +376,8 @@ function renderDetail(d){
     '<h2>Cell Detail</h2></div>';
   var vals=volts.filter(function(v){return v!=null;});
   if(!vals.length){
-    el.innerHTML=head+'<div class="card note">Per-cell voltages are only '+
-      'available on the WiFi dashboard, not over the Bluetooth link.</div>';
+    el.innerHTML=head+'<div class="card note">Waiting for per-cell voltage '+
+      'data from the BMS…</div>';
     return;
   }
   var mn=Math.min.apply(null,vals),mx=Math.max.apply(null,vals),rng=mx-mn;

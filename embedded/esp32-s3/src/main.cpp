@@ -576,7 +576,9 @@ static void addFloat(JsonObject& obj, const char* key, float v, int decimals = 2
 }
 
 // `minimal` strips fields the HTML dashboard doesn't render — used to cut BLE
-// payload size. The full set is still served at /json.
+// payload size. The full set is still served at /json. Note the per-cell
+// voltage/temperature arrays are NOT stripped: the cell-detail view renders
+// them over BLE too.
 String buildJson(bool pretty = true, bool minimal = false) {
     JsonDocument doc;
 
@@ -678,8 +680,10 @@ String buildJson(bool pretty = true, bool minimal = false) {
         }
     }
 
-    // Per-cell arrays (20 voltages, 7 temperatures; null if not yet received)
-    if (!minimal) {
+    // Per-cell arrays (20 voltages, 7 temperatures; null if not yet received).
+    // Emitted in the minimal/BLE payload too so the cell-detail view works over
+    // Bluetooth as well as WiFi; costs ~200 B (a couple more BLE chunks).
+    {
         auto cells = cells_obj["voltages"].to<JsonArray>();
         for (int i = 0; i < NUM_CELLS; i++) {
             if (!isnan(g_cell_v[i]))
@@ -1135,7 +1139,8 @@ static void bleSendFramed(const String& payload) {
     size_t total = payload.length();
     if (total > 65535) return;
 
-    // 8 KB scratch is plenty: minimal JSON for this dashboard runs ~600 B.
+    // 8 KB scratch is plenty: minimal JSON for this dashboard runs ~800 B
+    // (incl. the per-cell voltage/temperature arrays).
     static uint8_t buf[2 + 8192];
     size_t framed = 2 + total;
     if (framed > sizeof(buf)) return;
