@@ -187,9 +187,10 @@ function update(d){
   var tractor = d.tractor || 'off';
   var statEl=document.getElementById('status');
   statEl.className='status '+tractor;
-  statEl.textContent= tractor==='starting' ? 'Tractor Starting…'
+  var vinTxt = (d.vin_v != null) ? ' ('+d.vin_v.toFixed(1)+' V)' : '';
+  statEl.textContent=(tractor==='starting' ? 'Tractor Starting…'
                     : tractor==='on'       ? 'Tractor On'
-                    : 'Tractor Off';
+                    : 'Tractor Off') + vinTxt;
   const soc=p.soc_pct,scls=soc==null?'':soc<20?'bad':soc<40?'warn':'ok';
   const cur=p.current_a,pwr=p.power_w;
   // Sign convention everywhere: positive = into pack (charging), negative = out.

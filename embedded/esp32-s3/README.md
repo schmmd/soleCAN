@@ -11,13 +11,14 @@ exposes the decoded state in four different ways:
 
 ## Supported hardware
 
-The firmware builds for two ESP32-S3 boards. Pick the one you have; both speak
-the same J1939 bus at 250 kbit/s (29-bit extended frames).
+The firmware builds for three ESP32-S3 boards. Pick the one you have; all
+speak the same J1939 bus at 250 kbit/s (29-bit extended frames).
 
 | Board | PlatformIO env | CAN TX | CAN RX | Status LED |
 |---|---|---|---|---|
 | Adafruit ESP32-S3 Reverse TFT Feather + CAN Pal | `adafruit_feather_s3` | GPIO 8 (A5) | GPIO 14 (A4) | NeoPixel on GPIO 33 (power-gated by GPIO 21) |
 | LilyGo T-2CAN (CAN B / native TWAI) | `lilygo_t2can` | GPIO 7 | GPIO 6 | none |
+| RejsaCAN-ESP32-S3 v3.x | `rejsacan` | GPIO 14 | GPIO 13 | Yellow on GPIO 11 (warnings), Blue on GPIO 10 (CAN activity) |
 
 Notes:
 
@@ -37,13 +38,21 @@ Notes:
 - The crystal frequency is `MCP2515_QUARTZ_HZ` in `src/main.cpp` (16 MHz for
   the stock T-2CAN). If init succeeds (`init_err: 0`) but `frames_rx` stays 0,
   a wrong crystal value is the prime suspect — try 8 MHz and reflash.
+- On the **RejsaCAN-ESP32-S3** the firmware drives two extra pins at boot:
+  `CAN_RS` (GPIO 38) is pulled LOW so the transceiver runs in high-speed
+  normal mode, and `FORCE_ON` (GPIO 17) is pulled HIGH so the auto-shutdown
+  circuit doesn't cut power across key cycles. If `frames_rx` stays 0 with the
+  bus clearly active, double-check that `CAN_RS` is reaching the transceiver —
+  a floating RS pin silently mangles 250 kbit/s framing.
 - The pin map lives in `src/main.cpp` under `BOARD_ADAFRUIT_FEATHER_S3` /
-  `BOARD_LILYGO_T2CAN`. Build environments are defined in `platformio.ini`.
+  `BOARD_LILYGO_T2CAN` / `BOARD_REJSACAN`. Build environments are defined
+  in `platformio.ini`.
 
-## What the LED tells you
+## What the LEDs tell you
 
-Adafruit Feather only — the LilyGo T-2CAN has no user LED, so these calls are
-no-ops on that board.
+The LilyGo T-2CAN has no user LED, so its LED calls are no-ops.
+
+**Adafruit Feather** (single NeoPixel):
 
 | Pattern | Meaning |
 |---|---|
@@ -51,6 +60,16 @@ no-ops on that board.
 | Amber blink | Booted, waiting for WiFi |
 | Dim white (solid) | WiFi connected, no CAN frames received recently |
 | Green blink | CAN frames arriving on the bus |
+
+**RejsaCAN-ESP32-S3** (yellow + blue, plus a hard-wired green power LED):
+
+| Pattern | Meaning |
+|---|---|
+| Yellow fast blink (10 Hz) | CAN driver failed to initialize |
+| Yellow slow blink (2 Hz) | Booted, waiting for WiFi |
+| Yellow off | Network OK |
+| Blue blink | CAN frames arriving on the bus |
+| Blue off | No frames recently (green power LED still confirms the board is alive) |
 
 ## Setting up on a new computer
 

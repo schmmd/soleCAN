@@ -68,8 +68,41 @@
   #define MCP2515_QUARTZ_HZ (16UL * 1000UL * 1000UL)
   #define HAS_MCP2515      1
   #define LED_IS_NEOPIXEL  0
+#elif defined(BOARD_REJSACAN)
+  // RejsaCAN-ESP32-S3 v3.x: ESP32-S3-WROOM-1-N16R8 driving a TJA1051-style
+  // transceiver. Pin numbers come from the vendor's getall_s3.ino example.
+  #define CAN_TX_PIN       GPIO_NUM_14
+  #define CAN_RX_PIN       GPIO_NUM_13
+  // CAN_RS controls the transceiver's mode: LOW = high-speed normal,
+  // HIGH = listen-only/low-power. Leaving it floating puts the transceiver in
+  // slope-control mode, which silently mangles 250/500 kbit/s frames.
+  #define CAN_RS_PIN       GPIO_NUM_38
+  // FORCE_ON keeps the auto-shutdown circuit from cutting power once the host
+  // 12 V drops (the board is designed to ride out engine cranking / key-off).
+  // Driving it high here means the firmware decides when to shut down, not the
+  // hardware — convenient for continuous tractor capture.
+  #define FORCE_ON_PIN     GPIO_NUM_17
+  // Two user LEDs. Yellow carries warnings (no WiFi / CAN didn't init); blue
+  // carries CAN-bus activity. Each is independently controlled — the board's
+  // third LED is a hard-wired green power indicator we can't drive.
+  #define WARN_LED_PIN     GPIO_NUM_11   // yellow
+  #define ACTIVITY_LED_PIN GPIO_NUM_10   // blue
+  #define LED_IS_DUAL_GPIO 1
+  #define LED_IS_NEOPIXEL  0
+  // 12 V input sense: an R18(120K)/R6(33K) divider off the protected VCC rail
+  // feeds GPIO 9 (ADC1_CH8). Vin = Vadc × (R18+R6)/R6 = Vadc × 153/33 ≈ ×4.636.
+  // With the default 12 dB attenuation the ADC saturates around ~14.4 V at the
+  // VIN terminal — plenty for a 12 V tractor accessory rail.
+  #define VIN_SENSE_PIN    GPIO_NUM_9
+  #define VIN_DIVIDER_NUM  153    // (R18 + R6) in kΩ
+  #define VIN_DIVIDER_DEN  33     // R6 in kΩ
+  #define HAS_VIN_SENSE    1
 #else
-  #error "Define a board: BOARD_ADAFRUIT_FEATHER_S3 or BOARD_LILYGO_T2CAN"
+  #error "Define a board: BOARD_ADAFRUIT_FEATHER_S3, BOARD_LILYGO_T2CAN, or BOARD_REJSACAN"
+#endif
+
+#ifndef LED_IS_DUAL_GPIO
+  #define LED_IS_DUAL_GPIO 0
 #endif
 
 // WiFi runs in dual AP+STA mode: the board always broadcasts its own hotspot
@@ -269,6 +302,10 @@ uint32_t    g_mcp_init_err    = 0xFFFFFFFFUL;   // sentinel: never attempted
 uint32_t    g_mcp_frames_rx   = 0;
 #endif
 
+#if defined(HAS_VIN_SENSE)
+float       g_vin_v = NAN;   // most recent 12 V supply reading, averaged
+#endif
+
 // Session energy tracking (integrated power since boot)
 uint32_t    g_session_last_ms   = 0;
 uint32_t    g_session_active_ms = 0;   // sum of valid dt's — excludes bus-silent gaps
@@ -287,16 +324,26 @@ extern const uint8_t dashboard_html_start[] asm("_binary_src_dashboard_html_star
 extern const uint8_t dashboard_html_end[]   asm("_binary_src_dashboard_html_end");
 
 // ── LED status indicator ──────────────────────────────────────────────────────
-// On boards with a NeoPixel (Adafruit Feather S3 — GPIO 33, power gated by
-// GPIO 21), status is colour-coded:
+// Single-LED boards (Adafruit Feather S3 NeoPixel) colour-code state on one
+// pixel:
 //   Red blink     — CAN driver failed to initialize
 //   Amber blink   — No Wi-Fi up at all (AP failed and STA not connected)
 //   Dim white     — Alive, no CAN frames received recently
 //   Green blink   — CAN frames arriving (toggles on bus activity)
-// On boards without a user LED (LilyGo T-2CAN), the calls are no-ops.
+//
+// Dual-LED boards (RejsaCAN-ESP32-S3) split the state across two pins:
+//   Yellow fast blink — CAN driver failed to initialize
+//   Yellow slow blink — No Wi-Fi
+//   Yellow off        — Network OK
+//   Blue blink        — CAN frames arriving
+//   Blue off          — No frames recently (green power LED still shows alive)
+//
+// On boards without any user LED (LilyGo T-2CAN), the calls are no-ops.
 
-#define LED_BLINK_MS     50
-#define LED_ACTIVE_MS    200
+#define LED_BLINK_MS         50
+#define LED_ACTIVE_MS        200
+#define WARN_BLINK_FAST_MS   100   // CAN init failed
+#define WARN_BLINK_SLOW_MS   500   // no WiFi
 
 static uint32_t g_led_last_toggle = 0;
 static bool     g_led_on = false;
@@ -305,6 +352,11 @@ static inline void ledInit() {
 #if LED_IS_NEOPIXEL
     pinMode(LED_POWER_PIN, OUTPUT);
     digitalWrite(LED_POWER_PIN, HIGH);   // enable NeoPixel power rail
+#elif LED_IS_DUAL_GPIO
+    pinMode(WARN_LED_PIN, OUTPUT);
+    pinMode(ACTIVITY_LED_PIN, OUTPUT);
+    digitalWrite(WARN_LED_PIN, LOW);
+    digitalWrite(ACTIVITY_LED_PIN, LOW);
 #endif
 }
 
@@ -316,11 +368,54 @@ static inline void ledWrite(uint8_t r, uint8_t g, uint8_t b) {
     neopixelWrite(LED_PIN, r, g, b);
   #endif
 #else
+    // Dual-GPIO and no-LED boards: updateLed() drives the pins directly (dual)
+    // or there's nothing to drive (none).
     (void)r; (void)g; (void)b;
 #endif
 }
 
 void updateLed() {
+#if LED_IS_DUAL_GPIO
+    uint32_t now = millis();
+
+    // Yellow warning channel. Off when healthy; periods chosen so the two
+    // failure modes are distinguishable at a glance.
+    uint32_t warn_period_ms = 0;
+    if (!g_can_initialized) {
+        warn_period_ms = WARN_BLINK_FAST_MS;
+    } else if (!g_ap_running && WiFi.status() != WL_CONNECTED) {
+        warn_period_ms = WARN_BLINK_SLOW_MS;
+    }
+    static uint32_t warn_last_toggle = 0;
+    static bool     warn_on = false;
+    if (warn_period_ms > 0) {
+        if (now - warn_last_toggle >= warn_period_ms) {
+            warn_last_toggle = now;
+            warn_on = !warn_on;
+        }
+        digitalWrite(WARN_LED_PIN, warn_on ? HIGH : LOW);
+    } else {
+        digitalWrite(WARN_LED_PIN, LOW);
+        warn_on = false;
+    }
+
+    // Blue activity channel. The board's green power LED already signals
+    // "alive", so blue stays off until bus traffic appears.
+    bool active = (g_frames_rx > 0) && (now - g_last_frame_ms < LED_ACTIVE_MS);
+    static uint32_t act_last_toggle = 0;
+    static bool     act_on = false;
+    if (active) {
+        if (now - act_last_toggle >= LED_BLINK_MS) {
+            act_last_toggle = now;
+            act_on = !act_on;
+        }
+        digitalWrite(ACTIVITY_LED_PIN, act_on ? HIGH : LOW);
+    } else {
+        digitalWrite(ACTIVITY_LED_PIN, LOW);
+        act_on = false;
+    }
+    return;
+#else
     uint32_t now = millis();
     bool toggle = (now - g_led_last_toggle) >= LED_BLINK_MS;
 
@@ -346,7 +441,24 @@ void updateLed() {
         g_led_on = !g_led_on;
     }
     ledWrite(0, g_led_on ? 32 : 0, 0);
+#endif
 }
+
+#if defined(HAS_VIN_SENSE)
+// Sample the 12 V input rail every ~500 ms. analogReadMilliVolts() applies
+// the ADC's eFuse calibration; we oversample 16× to knock the LSB noise down.
+// The divider scales the pin reading back up to the actual VCC.
+static void updateVinSense() {
+    static uint32_t last_ms = 0;
+    uint32_t now = millis();
+    if (now - last_ms < 500) return;
+    last_ms = now;
+    uint32_t sum_mv = 0;
+    for (int i = 0; i < 16; i++) sum_mv += analogReadMilliVolts(VIN_SENSE_PIN);
+    float pin_mv = sum_mv / 16.0f;
+    g_vin_v = (pin_mv * VIN_DIVIDER_NUM / VIN_DIVIDER_DEN) / 1000.0f;
+}
+#endif
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -778,6 +890,12 @@ String buildJson(bool pretty = true, bool minimal = false) {
         doc["tractor"] = mc_alive ? "on" : "off";
     }
 
+#if defined(HAS_VIN_SENSE)
+    if (!isnan(g_vin_v)) {
+        doc["vin_v"] = roundf(g_vin_v * 10.0f) / 10.0f;
+    }
+#endif
+
     // Charger
     if (g_charger.valid) {
         auto chg = doc["charger"].to<JsonObject>();
@@ -1175,6 +1293,17 @@ void setup() {
     ledInit();
     ledWrite(4, 4, 4);   // dim white the moment firmware starts running
 
+#if defined(BOARD_REJSACAN)
+    // Drive the transceiver into high-speed normal mode (RS=LOW) and assert
+    // the auto-shutdown override so the board stays on across vehicle/key
+    // cycles. Both must happen before the TWAI driver starts — otherwise the
+    // bus floats and the first frames after boot are lost.
+    pinMode(CAN_RS_PIN, OUTPUT);
+    digitalWrite(CAN_RS_PIN, LOW);
+    pinMode(FORCE_ON_PIN, OUTPUT);
+    digitalWrite(FORCE_ON_PIN, HIGH);
+#endif
+
     for (int i = 0; i < NUM_CELLS; i++) g_cell_v[i] = NAN;
     for (int i = 0; i < NUM_TEMPS; i++) g_temp_c[i] = NAN;
 
@@ -1273,4 +1402,7 @@ void loop() {
     server.handleClient();
     bleTick();
     updateLed();
+#if defined(HAS_VIN_SENSE)
+    updateVinSense();
+#endif
 }
