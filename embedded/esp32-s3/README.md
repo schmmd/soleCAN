@@ -30,7 +30,8 @@ Notes:
   ports are expected to be classic CAN at 250 kbit/s. The transceivers are
   galvanically isolated, so when wiring to a separate analyzer you must also
   connect DGND between the two — without it the bus floats and no frames
-  arrive.
+  arrive. To monitor the tractor, wire its single J1939 bus to **CAN B**
+  (`can0`); see "Wiring the LilyGo T-2CAN to the tractor" below.
 - The MCP2515 needs its active-low RESET line (GPIO 9 on the T-2CAN) driven
   high before SPI; the firmware pulses it in `setup()`. If `init_err` in
   `/json` is `1` (`kNoMCP2515`), the chip isn't answering SPI — check
@@ -48,7 +49,56 @@ Notes:
   `BOARD_LILYGO_T2CAN` / `BOARD_REJSACAN`. Build environments are defined
   in `platformio.ini`.
 
-## What the LEDs tell you
+## Wiring the LilyGo T-2CAN to the tractor
+
+The Solectrac OBD-II diagnostic port is a passive tap on the single 250 kbit/s
+J1939 bus. Only four cavities are populated (see `DOCUMENTATION.md` →
+"CAN bus topology" for the full pinout):
+
+| OBD-II (J1962) pin | Signal |
+|---|---|
+| 6 | CAN_H |
+| 14 | CAN_L |
+| 4 | chassis ground |
+| 16 | +12 V battery |
+
+On the T-2CAN, use the **CAN B** 4-pin screw terminal (`P1`, the one wired to
+the native TWAI transceiver). Match the silkscreen labels:
+
+| OBD-II pin | → | T-2CAN CAN B terminal |
+|---|---|---|
+| 6 (CAN_H) | → | `CANH` |
+| 14 (CAN_L) | → | `CANL` |
+| 4 (GND) | → | `GND` (CAN-side / `DGND`) |
+
+The CAN transceiver (`TD501MCAN`) is a **galvanically isolated** module, so its
+bus side has its own ground reference. The ground wire is **not optional** — without
+tying OBD pin 4 to the CAN-side ground the bus floats and no frames arrive. If
+your board's terminal has a 120 Ω termination jumper for CAN B, leave it **off**:
+the tractor bus is already terminated (it measures ~40 Ω), and this is a tap, not
+a bus end.
+
+### Powering the board
+
+The T-2CAN accepts **DC 5–12 V** on its 2-pin power screw terminal (a separate
+terminal from the CAN-B connector, feeding an on-board buck regulator). You have
+two options:
+
+- **USB-C (galvanically isolated):** power from a laptop or USB power bank. The
+  isolated transceiver keeps the board fully decoupled from the tractor — best
+  for bench work or when wiring to a separate analyzer.
+- **Tap the tractor's 12 V (single-cable field setup):** wire OBD-II pin 16
+  (+12 V) to the power terminal **`+` / `VIN`** and OBD-II pin 4 (GND) to the
+  power terminal **`GND`**, observing polarity. 12 V is within the 5–12 V input
+  range. This shares the tractor's ground, so the CAN isolation is electrically
+  moot in this mode, but it is safe and is the simplest in-cab setup — one
+  connector powers the board and carries CAN.
+
+> ⚠️ Do **not** exceed 12 V on the power terminal — the board is rated DC 5–12 V.
+> The tractor's nominal 12 V accessory rail is fine; do not wire it to a higher
+> traction-pack rail.
+
+## What the LED tells you
 
 The LilyGo T-2CAN has no user LED, so its LED calls are no-ops.
 
@@ -73,11 +123,22 @@ The LilyGo T-2CAN has no user LED, so its LED calls are no-ops.
 
 ## Setting up on a new computer
 
-1. **Install PlatformIO** — either the VS Code extension or the standalone CLI:
+> **Prefer a reproducible build?** Skip straight to "Building with Docker"
+> below — it sidesteps all host Python/toolchain issues and is the recommended
+> path on macOS.
+
+1. **Install PlatformIO** into an isolated Python environment:
 
    ```bash
-   pip install platformio          # or: brew install platformio
+   python3.13 -m venv ~/.venvs/pio
+   ~/.venvs/pio/bin/pip install platformio
+   # then use ~/.venvs/pio/bin/pio, or add it to PATH
    ```
+
+   > ⚠️ **Use Python 3.11–3.13, not 3.14.** PlatformIO 6.1.x segfaults during
+   > package post-install on Python 3.14. `brew install platformio` currently
+   > pulls in Python 3.14 as a dependency and fails for this reason — install
+   > into a 3.13 venv (above), or use Docker.
 
 2. **Clone the repo and enter this folder**:
 
@@ -86,8 +147,9 @@ The LilyGo T-2CAN has no user LED, so its LED calls are no-ops.
    cd solectrac/embedded/esp32-s3
    ```
 
-3. **Set WiFi credentials** as environment variables — the build embeds them
-   into the firmware (the firmware refuses to compile without them):
+3. *(Optional)* **Set a bench WiFi network** to also join. Leave these unset to
+   build AP-only — the board still broadcasts its own hotspot (the stable
+   default for field use), so this step isn't required:
 
    ```bash
    export WIFI_SSID="your-network"
@@ -120,6 +182,88 @@ close it:
 ```bash
 lsof /dev/cu.usbmodem*
 ```
+
+## Building with Docker
+
+The `Dockerfile` builds the firmware in a pinned, reproducible environment
+(Python 3.13 + PlatformIO 6.1.19), avoiding host toolchain issues entirely.
+**Build the firmware in Docker, then flash from the host** — Docker Desktop on
+macOS cannot reach the board's USB serial port.
+
+The build context is the **repo root** (the firmware embeds the Android
+`dashboard.html`). From the repo root:
+
+```bash
+docker build -f embedded/esp32-s3/Dockerfile -t solectrac-fw .
+```
+
+Extract the build artifacts onto the host:
+
+```bash
+docker run --rm -v "$PWD/out:/out" solectrac-fw
+# -> out/{bootloader,partitions,boot_app0,firmware}.bin
+```
+
+Then flash from the host with `esptool` (from a Python 3.13 venv). These are the
+standard Arduino-ESP32 offsets — the same four images, at the same offsets, that
+`pio run -t upload` writes:
+
+```bash
+~/.venvs/pio/bin/pip install esptool
+~/.venvs/pio/bin/esptool --chip esp32s3 --port /dev/cu.usbmodemXXXX \
+    --baud 921600 write_flash \
+    0x0     out/bootloader.bin \
+    0x8000  out/partitions.bin \
+    0xe000  out/boot_app0.bin \
+    0x10000 out/firmware.bin
+```
+
+> If `write_flash` can't connect, hold **BOOT-0**, tap **RST**, release
+> **BOOT-0** to force the board into download mode, then retry.
+
+To override the credentials in a Docker build, pass them as build args:
+
+```bash
+set -a; source embedded/esp32-s3/.env; set +a
+docker build -f embedded/esp32-s3/Dockerfile \
+    --build-arg AP_SSID="$AP_SSID" --build-arg AP_PASS="$AP_PASS" \
+    --build-arg MDNS_NAME="$MDNS_NAME" \
+    --build-arg WIFI_SSID="$WIFI_SSID" --build-arg WIFI_PASS="$WIFI_PASS" \
+    -t solectrac-fw .
+```
+
+## Customizing the WiFi AP and mDNS hostname (optional)
+
+The board always broadcasts its own hotspot (so it's reachable in the field).
+By default the hotspot is **SSID `tractor` / password `electricity`** and the
+board advertises itself as **`tractor.local`** — if you don't do anything here,
+the build is unchanged.
+
+If you also set `WIFI_SSID` / `WIFI_PASS`, the board additionally joins that
+network as a station for bench use (dual AP+STA mode). Leave them empty for an
+AP-only build — the recommended field setup, since the AP and station share one
+radio and a station endlessly scanning for an out-of-range network makes the
+hotspot drop in and out.
+
+To override the AP credentials, mDNS hostname (and/or set a bench network), copy
+the template to a gitignored `.env` and set values:
+
+```bash
+cp .env.example .env
+# set a strong AP_PASS (WPA2 requires 8-63 chars), e.g.:
+python3 -c "import secrets,string; print(''.join(secrets.choice(string.ascii_letters+string.digits) for _ in range(24)))"
+```
+
+Then source it before building (native or Docker):
+
+```bash
+set -a; source .env; set +a
+pio run -e lilygo_t2can          # native; or use the Docker --build-arg form above
+```
+
+`AP_SSID`/`AP_PASS`/`MDNS_NAME` are injected at build time by
+`inject_build_overrides.py` (a no-op when the env vars are unset), so the
+default build is unchanged.
 
 ## Endpoints
 

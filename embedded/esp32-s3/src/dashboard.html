@@ -39,9 +39,30 @@ h3{font-size:.68em;text-transform:uppercase;letter-spacing:.1em;color:#757575;ma
 .status.starting{background:#fff3cd;color:#ef6c00}
 #foot{text-align:center;font-size:.65em;color:#9e9e9e;margin-top:10px;padding-bottom:4px}
 .ok{color:#2e7d32}.warn{color:#ef6c00}.bad{color:#c62828}
+/* Cell-detail view */
+.tap{cursor:pointer;position:relative}
+.tap::after{content:'›';position:absolute;top:10px;right:12px;color:#bdbdbd;font-size:1.3em;line-height:1}
+.tap:active{transform:scale(.99)}
+.dhead{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+.dhead h2{font-size:.78em;text-transform:uppercase;letter-spacing:.12em;color:#757575;font-weight:700}
+.backbtn{background:#fff;border:0;border-radius:8px;padding:8px 14px;font-size:.82em;font-weight:600;color:#1976d2;box-shadow:0 1px 2px rgba(0,0,0,.06);cursor:pointer}
+.cellgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:8px}
+.tempgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+@media(max-width:400px){.cellgrid,.tempgrid{grid-template-columns:1fr 1fr}}
+.cell .cn{font-size:.62em;text-transform:uppercase;letter-spacing:.06em;color:#9e9e9e}
+.cell .cv{font-size:1.05em;font-weight:700;line-height:1.15;margin-top:1px}
+.cell .cvu{font-size:.5em;color:#9e9e9e;font-weight:400}
+.cell.nul .cv{color:#bdbdbd}
+.cell.mn{background:#ffe0b2}.cell.mn .cn{color:#e65100}
+.cell.mx{background:#c8e6c9}.cell.mx .cn{color:#1b5e20}
+.cellbar{height:5px;border-radius:3px;background:#eee;margin-top:6px;overflow:hidden}
+.cellbar i{display:block;height:100%;border-radius:3px;background:#1976d2}
+.tbox .cv{font-size:.82em;font-weight:600}
+.note{color:#757575;font-size:.86em;line-height:1.4}
 </style>
 </head>
 <body>
+<div id="main">
 <div id="status" class="status off">Tractor —</div>
 <div id="al"></div>
 <div class="g4" id="kpi"></div>
@@ -112,6 +133,8 @@ h3{font-size:.68em;text-transform:uppercase;letter-spacing:.1em;color:#757575;ma
 <div class="g2" id="bot"></div>
 <div class="card" style="margin-bottom:8px"><h3>BMS State (F106)</h3><div class="bits" id="flags" style="margin-bottom:0"></div></div>
 <div id="foot">Connecting…</div>
+</div>
+<div id="detail" style="display:none"></div>
 <script>
 const f=(v,d=1)=>v==null?'–':v.toFixed(d);
 const fi=v=>v==null?'–':(v>=0?'+':'')+v.toFixed(1);
@@ -166,6 +189,7 @@ function feta(s){
   var h=Math.floor(s/3600),m=Math.floor((s%3600)/60);
   return h>0?h+'h '+m+'m':m+'m';
 }
+var detailOpen=false,lastData=null;
 function update(d){
   const p=d.pack||{},m=d.motor||{},can=d.can||{};
   const pc=p.cells||{},pt=pc.temp_summary||{};
@@ -282,7 +306,7 @@ function update(d){
       return'<div class="dirbtn '+(m.direction===x[1]?'on':'')+'">'+x[0]+'</div>';
     }).join('');
   document.getElementById('mid').innerHTML=
-    '<div class="card"><h3>Cell</h3>'+
+    '<div class="card tap" onclick="openDetail()"><h3>Cell</h3>'+
     kv('Max',(pc.max_mv!=null?(pc.max_mv/1000).toFixed(3):'–')+' V (#'+(pc.max_n||'?')+')')+
     kv('Min',(pc.min_mv!=null?(pc.min_mv/1000).toFixed(3):'–')+' V (#'+(pc.min_n||'?')+')')+
     kv('Spread',pc.spread_mv!=null?(pc.spread_mv+' mV'+(pc.max_mv&&pc.min_mv?' ('+(pc.spread_mv/((pc.max_mv+pc.min_mv)/2)*100).toFixed(2)+'%)':'')):'–')+
@@ -338,6 +362,63 @@ function update(d){
   var dot=can.state==='running'?'<span class="ok">●</span>':'<span class="bad">●</span>';
   document.getElementById('foot').innerHTML=
     dot+' '+can.state+' · '+(can.frames_rx||0)+' rx · age '+(age!=null?age.toFixed(1)+'s':'–')+' · up '+f(d.uptime/3600,1)+'h';
+  lastData=d;
+  if(detailOpen)renderDetail(d);
+}
+// Per-cell battery detail view. Voltages are genuinely per-cell; the 7
+// temperature probes are pack-level (no documented cell mapping) so they get
+// their own section. The per-cell arrays appear only in the full WiFi /json
+// payload — the BLE/minimal payload omits them, so we degrade gracefully.
+function renderDetail(d){
+  var el=document.getElementById('detail');
+  var pc=(d&&d.pack&&d.pack.cells)||{};
+  var volts=pc.voltages||[];
+  var head='<div class="dhead"><button class="backbtn" onclick="closeDetail()">‹ Back</button>'+
+    '<h2>Cell Detail</h2></div>';
+  var vals=volts.filter(function(v){return v!=null;});
+  if(!vals.length){
+    el.innerHTML=head+'<div class="card note">Waiting for per-cell voltage '+
+      'data from the BMS…</div>';
+    return;
+  }
+  var mn=Math.min.apply(null,vals),mx=Math.max.apply(null,vals),rng=mx-mn;
+  var summary='<div class="card" style="margin-bottom:8px">'+
+    kv('Pack voltage',d.pack.voltage_v!=null?d.pack.voltage_v.toFixed(1)+' V':'–')+
+    kv('Spread',Math.round(rng*1000)+' mV ('+(rng/((mx+mn)/2)*100).toFixed(2)+'%)')+
+    kv('Highest',mx.toFixed(3)+' V')+
+    kv('Lowest',mn.toFixed(3)+' V')+'</div>';
+  var cells='';
+  for(var i=0;i<volts.length;i++){
+    var v=volts[i],cls='card cell',body;
+    if(v==null){
+      cls+=' nul';body='<div class="cv">–</div>';
+    }else{
+      if(v>=mx)cls+=' mx';else if(v<=mn)cls+=' mn';
+      var frac=rng>0?(v-mn)/rng:1;
+      body='<div class="cv">'+v.toFixed(3)+'<span class="cvu"> V</span></div>'+
+        '<div class="cellbar"><i style="width:'+Math.round(frac*100)+'%"></i></div>';
+    }
+    cells+='<div class="'+cls+'"><div class="cn">#'+(i+1)+'</div>'+body+'</div>';
+  }
+  var temps=pc.temp_readings||[],trow='';
+  for(var j=0;j<temps.length;j++){
+    trow+='<div class="card tbox"><div class="cn">T'+(j+1)+'</div>'+
+      '<div class="cv">'+ftemp(temps[j])+'</div></div>';
+  }
+  el.innerHTML=head+summary+
+    '<h3>Cell Voltages</h3><div class="cellgrid">'+cells+'</div>'+
+    (trow?'<h3>Cell Temperatures</h3><div class="tempgrid">'+trow+'</div>':'');
+}
+function openDetail(){
+  detailOpen=true;
+  document.getElementById('main').style.display='none';
+  document.getElementById('detail').style.display='block';
+  if(lastData)renderDetail(lastData);
+}
+function closeDetail(){
+  detailOpen=false;
+  document.getElementById('detail').style.display='none';
+  document.getElementById('main').style.display='';
 }
 function refresh(){
   fetch('/json').then(function(r){return r.json();}).then(update)
@@ -363,4 +444,4 @@ if(window.DashboardBridge){
 </script>
 </body>
 </html>
- 
+  

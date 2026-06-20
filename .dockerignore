@@ -1,0 +1,15 @@
+# Keep the Docker build context small. Only the firmware project and the
+# embedded dashboard asset are needed.
+.git
+**/.pio
+**/__pycache__
+*.log
+out/
+embedded/esp32-s3/.env
+
+# Host-side Python tooling — not needed for the firmware build.
+solectrac-*.py
+solectrac_proto.py
+util/
+bms/
+screenshot.svg

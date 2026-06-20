@@ -33,11 +33,14 @@
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
+// Optional home network the board also joins (for bench use). Leave unset to
+// run AP-only — the board still broadcasts its own hotspot (see AP_SSID below),
+// which is the stable default for field use. Set both to join a network.
 #ifndef WIFI_SSID
-#error "Set WIFI_SSID env var before building"
+#define WIFI_SSID ""
 #endif
 #ifndef WIFI_PASS
-#error "Set WIFI_PASS env var before building"
+#define WIFI_PASS ""
 #endif
 
 // Per-board pin map. Selected via -DBOARD_* in platformio.ini.
@@ -107,9 +110,21 @@
 
 // WiFi runs in dual AP+STA mode: the board always broadcasts its own hotspot
 // (so it's reachable in the field), and concurrently tries to join the
-// configured home network for bench use. AP IP is 192.168.4.1.
+// configured home network for bench use. AP IP is 192.168.4.1. MDNS_NAME is
+// the mDNS hostname the board advertises (MDNS_NAME.local).
+//
+// AP_SSID/AP_PASS/MDNS_NAME default to the values below. They can optionally
+// be overridden at build time via environment variables (see .env.example);
+// when unset, the build is unchanged.
+#ifndef AP_SSID
 #define AP_SSID "tractor"
+#endif
+#ifndef AP_PASS
 #define AP_PASS "electricity"
+#endif
+#ifndef MDNS_NAME
+#define MDNS_NAME "tractor"
+#endif
 
 // ── J1939 source addresses ────────────────────────────────────────────────────
 
@@ -688,7 +703,9 @@ static void addFloat(JsonObject& obj, const char* key, float v, int decimals = 2
 }
 
 // `minimal` strips fields the HTML dashboard doesn't render — used to cut BLE
-// payload size. The full set is still served at /json.
+// payload size. The full set is still served at /json. Note the per-cell
+// voltage/temperature arrays are NOT stripped: the cell-detail view renders
+// them over BLE too.
 String buildJson(bool pretty = true, bool minimal = false) {
     JsonDocument doc;
 
@@ -790,8 +807,10 @@ String buildJson(bool pretty = true, bool minimal = false) {
         }
     }
 
-    // Per-cell arrays (20 voltages, 7 temperatures; null if not yet received)
-    if (!minimal) {
+    // Per-cell arrays (20 voltages, 7 temperatures; null if not yet received).
+    // Emitted in the minimal/BLE payload too so the cell-detail view works over
+    // Bluetooth as well as WiFi; costs ~200 B (a couple more BLE chunks).
+    {
         auto cells = cells_obj["voltages"].to<JsonArray>();
         for (int i = 0; i < NUM_CELLS; i++) {
             if (!isnan(g_cell_v[i]))
@@ -1253,7 +1272,8 @@ static void bleSendFramed(const String& payload) {
     size_t total = payload.length();
     if (total > 65535) return;
 
-    // 8 KB scratch is plenty: minimal JSON for this dashboard runs ~600 B.
+    // 8 KB scratch is plenty: minimal JSON for this dashboard runs ~800 B
+    // (incl. the per-cell voltage/temperature arrays).
     static uint8_t buf[2 + 8192];
     size_t framed = 2 + total;
     if (framed > sizeof(buf)) return;
@@ -1325,16 +1345,24 @@ void setup() {
     // Bring up the soft-AP first so the board is always reachable in the field
     // at 192.168.4.1 even if there's no home network in range. STA connect
     // happens in the background; we don't block boot waiting on it.
-    WiFi.mode(WIFI_AP_STA);
+    //
+    // Only enable the station when a home network is actually configured. The
+    // AP and STA share one radio: if WIFI_SSID is empty the station would scan
+    // every channel forever looking for a network that doesn't exist, which
+    // makes the soft-AP beacon hop channels and drop out (it appears briefly
+    // then vanishes and won't accept clients). Build with an empty WIFI_SSID
+    // for a rock-solid AP-only setup; set it to join a bench network as before.
+    const bool join_sta = (sizeof(WIFI_SSID) > 1);
+    WiFi.mode(join_sta ? WIFI_AP_STA : WIFI_AP);
     g_ap_running = WiFi.softAP(AP_SSID, AP_PASS);
-    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    if (join_sta) WiFi.begin(WIFI_SSID, WIFI_PASS);
 
     // Wildcard DNS on the soft-AP: any hostname (tractor.local, tractor,
     // captive-portal probes, etc.) resolves to the board's AP IP. Needed
     // because phones generally don't do mDNS over an AP with no internet.
     if (g_ap_running) dns_server.start(53, "*", WiFi.softAPIP());
 
-    MDNS.begin("tractor");
+    MDNS.begin(MDNS_NAME);
 
     server.on("/",     handleRoot);
     server.on("/json", handleJson);

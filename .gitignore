@@ -3,3 +3,6 @@
 .python-version
 uv.lock
 __pycache__
+
+# Firmware artifacts extracted from the Docker build (see embedded/esp32-s3)
+out/
