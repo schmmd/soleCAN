@@ -1619,6 +1619,17 @@ def state_to_json(state: State, now: float, mode: str) -> dict:
         temp["min_c"] = int(state.temp_min_c.value)
     if temp:
         cells["temp_summary"] = temp
+    # Per-cell arrays mirror the firmware emission so the dashboard's
+    # cell-detail view works in --ui web replay/stream mode too. Channels
+    # that haven't received a value yet emit null (same shape as firmware).
+    cells["voltages"] = [
+        round(c.value / 1000.0, 3) if c.value is not None else None
+        for c in state.cells
+    ]
+    cells["temp_readings"] = [
+        int(t.value) if t.value is not None else None
+        for t in state.temps
+    ]
     if cells:
         pack["cells"] = cells
     if pack:
