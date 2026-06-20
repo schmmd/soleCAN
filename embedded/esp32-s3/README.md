@@ -49,7 +49,9 @@ Notes:
   `BOARD_LILYGO_T2CAN` / `BOARD_REJSACAN`. Build environments are defined
   in `platformio.ini`.
 
-## Wiring the LilyGo T-2CAN to the tractor
+## LilyGo T-2CAN
+
+### Wiring to the tractor
 
 The Solectrac OBD-II diagnostic port is a passive tap on the single 250 kbit/s
 J1939 bus. Only four cavities are populated (see `DOCUMENTATION.md` →
@@ -72,11 +74,9 @@ the native TWAI transceiver). Match the silkscreen labels:
 | 4 (GND) | → | `GND` (CAN-side / `DGND`) |
 
 The CAN transceiver (`TD501MCAN`) is a **galvanically isolated** module, so its
-bus side has its own ground reference. The ground wire is **not optional** — without
-tying OBD pin 4 to the CAN-side ground the bus floats and no frames arrive. If
-your board's terminal has a 120 Ω termination jumper for CAN B, leave it **off**:
-the tractor bus is already terminated (it measures ~40 Ω), and this is a tap, not
-a bus end.
+bus side has its own ground reference. If your board's terminal has a 120 Ω
+termination jumper for CAN B, leave it **off**: the tractor bus is already
+terminated (it measures ~40 Ω), and this is a tap, not a bus end.
 
 ### Powering the board
 
