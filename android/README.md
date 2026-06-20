@@ -25,6 +25,22 @@ gradle wrapper --gradle-version 8.7
 ./gradlew installDebug
 ```
 
+## Reproducible Docker build
+
+For a pinned, host-toolchain-independent build (JDK 17 + Gradle 8.7 +
+Android SDK platform 34), use the Dockerfile. The build context is the
+**repo root** because the Gradle build copies the canonical
+`dashboard.html` from there.
+
+```bash
+docker build -f android/Dockerfile -t solectrac-android .
+docker run --rm -v "$PWD/out:/out" solectrac-android   # -> out/app-debug.apk
+adb install out/app-debug.apk
+```
+
+The Docker build only produces the debug APK — release would need a
+signing config that isn't checked in.
+
 ## Architecture
 
 - `BleClient.kt` — scans for the NUS service UUID, connects to the first
