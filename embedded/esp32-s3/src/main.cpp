@@ -326,6 +326,8 @@ uint32_t    g_session_last_ms   = 0;
 uint32_t    g_session_active_ms = 0;   // sum of valid dt's — excludes bus-silent gaps
 float       g_session_wh_drawn  = 0.0f;
 float       g_session_wh_charged = 0.0f;
+// First BMS-published SOC seen this session; current - start = session ΔSOC.
+float       g_session_soc_start_pct = NAN;
 
 WebServer server(80);
 DNSServer  dns_server;
@@ -548,6 +550,8 @@ void decodeCAN(uint32_t can_id, const uint8_t* raw, uint8_t len) {
             g_pack.power_w     = volts * amps;
             g_pack.soc_raw     = d[4];
             g_pack.soc_pct     = d[4] * 0.4f - 0.8f;
+            if (isnan(g_session_soc_start_pct))
+                g_session_soc_start_pct = g_pack.soc_pct;
 
             // Integrate power into session energy counters
             uint32_t now = millis();
@@ -777,6 +781,8 @@ String buildJson(bool pretty = true, bool minimal = false) {
     sess["wh_charged"] = roundf(g_session_wh_charged * 10.0f) / 10.0f;
     sess["wh_net"]     = roundf((g_session_wh_charged - g_session_wh_drawn) * 10.0f) / 10.0f;
     sess["wh_capacity"] = PACK_CAPACITY_WH;
+    if (!isnan(g_session_soc_start_pct))
+        sess["soc_start_pct"] = roundf(g_session_soc_start_pct * 10.0f) / 10.0f;
 
     // Session-average net power. Positive = net charging, negative = net drawing.
     // Uses *active* time (sum of valid dt's), so bus-silent gaps don't dilute it.

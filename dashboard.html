@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tractor Dashboard</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#f0f2f5;color:#212121;font-family:system-ui,sans-serif;padding:10px;max-width:600px;margin:0 auto}
+h3{font-size:.68em;text-transform:uppercase;letter-spacing:.1em;color:#757575;margin-bottom:8px}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px}
+.g4{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:8px}
+@media(max-width:400px){.g4{grid-template-columns:1fr 1fr}}
+.card{background:#fff;border-radius:10px;padding:12px;box-shadow:0 1px 2px rgba(0,0,0,.06)}
+.big{font-size:1.9em;font-weight:700;line-height:1.1}
+.unit{font-size:.5em;color:#9e9e9e;font-weight:400}
+.sub{font-size:.72em;color:#757575;margin-top:2px}
+.kv{display:flex;justify-content:space-between;align-items:center;font-size:.82em;padding:2px 0}
+.kv .k{color:#757575}
+.gauges{display:grid;grid-template-columns:1fr 18px 1fr;gap:6px;align-items:end}
+.gauge{display:block;width:100%}
+.gauges h3{text-align:center}
+.effortbar{display:block;width:100%;height:auto}
+.dir{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:8px}
+.dirbtn{background:#fff;border-radius:10px;padding:16px 0;text-align:center;font-size:1.8em;font-weight:700;color:#bdbdbd;letter-spacing:.05em;box-shadow:0 1px 2px rgba(0,0,0,.06)}
+.dirbtn.on{background:#c8e6c9;color:#1b5e20}
+.bits{margin-bottom:8px;font-size:.7em}
+.bitrow{display:flex;align-items:center;gap:3px;margin-bottom:3px}
+.bithex{font-family:monospace;flex:0 0 52px;color:#616161}
+.bitcell{flex:1 1 0;text-align:center;padding:3px 0;border-radius:4px;background:#eee;color:#9e9e9e;white-space:nowrap;overflow:hidden}
+.bitcell.on{background:#c8e6c9;color:#1b5e20}
+.bitcell.flt.on{background:#ffcdd2;color:#b71c1c}
+.bitcell.unk{color:#bdbdbd}
+.bitcell.unk.on{background:#ffe0b2;color:#e65100}
+.alert{background:#ffcdd2;color:#b71c1c;border-radius:8px;padding:10px 12px;margin-bottom:8px;font-size:.9em;font-weight:600}
+.status{border-radius:8px;padding:8px 14px;text-align:center;font-weight:700;font-size:.78em;letter-spacing:.15em;text-transform:uppercase;margin-bottom:8px}
+.status.on{background:#c8e6c9;color:#1b5e20}
+.status.off{background:#eeeeee;color:#9e9e9e}
+.status.starting{background:#fff3cd;color:#ef6c00}
+#foot{text-align:center;font-size:.65em;color:#9e9e9e;margin-top:10px;padding-bottom:4px}
+.ok{color:#2e7d32}.warn{color:#ef6c00}.bad{color:#c62828}
+/* Cell-detail view */
+.tap{cursor:pointer;position:relative}
+.tap::after{content:'›';position:absolute;top:10px;right:12px;color:#bdbdbd;font-size:1.3em;line-height:1}
+.tap:active{transform:scale(.99)}
+.dhead{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+.dhead h2{font-size:.78em;text-transform:uppercase;letter-spacing:.12em;color:#757575;font-weight:700}
+.backbtn{background:#fff;border:0;border-radius:8px;padding:8px 14px;font-size:.82em;font-weight:600;color:#1976d2;box-shadow:0 1px 2px rgba(0,0,0,.06);cursor:pointer}
+.cellgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:8px}
+.tempgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+@media(max-width:400px){.cellgrid,.tempgrid{grid-template-columns:1fr 1fr}}
+.cell .cn{font-size:.62em;text-transform:uppercase;letter-spacing:.06em;color:#9e9e9e}
+.cell .cv{font-size:1.05em;font-weight:700;line-height:1.15;margin-top:1px}
+.cell .cvu{font-size:.5em;color:#9e9e9e;font-weight:400}
+.cell.nul .cv{color:#bdbdbd}
+.cell.mn{background:#ffe0b2}.cell.mn .cn{color:#e65100}
+.cell.mx{background:#c8e6c9}.cell.mx .cn{color:#1b5e20}
+.cellbar{height:5px;border-radius:3px;background:#eee;margin-top:6px;overflow:hidden}
+.cellbar i{display:block;height:100%;border-radius:3px;background:#1976d2}
+.tbox .cv{font-size:.82em;font-weight:600}
+.note{color:#757575;font-size:.86em;line-height:1.4}
+</style>
+</head>
+<body>
+<div id="main">
+<div id="status" class="status off">Tractor —</div>
+<div id="al"></div>
+<div class="g4" id="kpi"></div>
+<div class="card" style="margin-bottom:8px">
+<div class="gauges">
+<div>
+<h3>Tach</h3>
+<svg class="gauge" viewBox="0 0 200 120">
+  <path d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="#e0e0e0" stroke-width="14" stroke-linecap="butt"/>
+  <path id="sprog" fill="none" stroke="#1976d2" stroke-width="14" stroke-linecap="butt"/>
+  <!-- Range RPM caps: L=2000, M=2500, H=2800 -->
+  <line x1="140.0" y1="30.7" x2="143.0" y2="25.5" stroke="#ef6c00" stroke-width="2" stroke-linecap="round"/>
+  <line x1="169.3" y1="60.0" x2="174.5" y2="57.0" stroke="#ef6c00" stroke-width="2" stroke-linecap="round"/>
+  <line x1="178.3" y1="83.4" x2="184.1" y2="82.2" stroke="#ef6c00" stroke-width="2" stroke-linecap="round"/>
+  <text x="147" y="22" text-anchor="middle" font-size="7" font-weight="700" fill="#ef6c00">L</text>
+  <text x="181" y="54" text-anchor="middle" font-size="7" font-weight="700" fill="#ef6c00">M</text>
+  <text x="190" y="80" text-anchor="middle" font-size="7" font-weight="700" fill="#ef6c00">H</text>
+  <text x="20" y="116" text-anchor="middle" font-size="9" fill="#757575">0</text>
+  <text x="180" y="116" text-anchor="middle" font-size="9" fill="#757575">3000</text>
+  <text x="100" y="78" text-anchor="middle" font-size="26" font-weight="700" fill="#212121" id="sval">–</text>
+  <text x="100" y="92" text-anchor="middle" font-size="9" fill="#9e9e9e" id="sunit">RPM</text>
+</svg>
+</div>
+<div class="effortcol">
+<svg class="effortbar" viewBox="0 0 14 120" preserveAspectRatio="none">
+  <text x="7" y="10" text-anchor="middle" font-size="7" font-weight="700" fill="#9e9e9e">τ</text>
+  <rect x="3" y="20" width="8" height="80" rx="2" fill="#e0e0e0"/>
+  <!-- 25 / 50 / 75 % reference ticks (y = 100 - pct*0.8) -->
+  <line x1="3" y1="80" x2="11" y2="80" stroke="#bdbdbd" stroke-width="0.6"/>
+  <line x1="3" y1="60" x2="11" y2="60" stroke="#bdbdbd" stroke-width="0.6"/>
+  <line x1="3" y1="40" x2="11" y2="40" stroke="#bdbdbd" stroke-width="0.6"/>
+  <rect id="ebar" x="3" y="100" width="8" height="0" rx="2" fill="#1976d2"/>
+  <text x="7" y="114" text-anchor="middle" font-size="7" fill="#9e9e9e" id="eval">–</text>
+</svg>
+</div>
+<div>
+<h3>Power</h3>
+<svg class="gauge" viewBox="0 0 200 120">
+  <!-- Ioniq-style split dial: rest point at 1/3 of the arc. Left zone =
+       CHARGE 0-10 kW (regen / wall), right zone = POWER 0-20 kW. Both
+       zones share one scale: 30 kW over 180deg. -->
+  <!-- Butt caps + a small dead-band gap at zero keep the CHARGE (left) and
+       POWER (right) fills cleanly separated; a round cap here would bulge a
+       half-circle of the fill across the zero point into the other zone. -->
+  <path d="M 20 100 A 80 80 0 0 1 57.63 32.14" fill="none" stroke="#c8e6c9" stroke-width="14" stroke-linecap="butt"/>
+  <path d="M 62.42 29.38 A 80 80 0 0 1 180 100" fill="none" stroke="#e0e0e0" stroke-width="14" stroke-linecap="butt"/>
+  <path id="pprog" fill="none" stroke="#1976d2" stroke-width="14" stroke-linecap="butt"/>
+  <!-- Graduations: charge +5 kW / power -5, -10, -15 kW -->
+  <line x1="30.72" y1="60" x2="25.52" y2="57" stroke="#757575" stroke-width="2" stroke-linecap="round"/>
+  <line x1="100" y1="20" x2="100" y2="14" stroke="#757575" stroke-width="2" stroke-linecap="round"/>
+  <line x1="140" y1="30.72" x2="143" y2="25.55" stroke="#757575" stroke-width="2" stroke-linecap="round"/>
+  <line x1="169.28" y1="60" x2="174.46" y2="57" stroke="#757575" stroke-width="2" stroke-linecap="round"/>
+  <text x="19" y="54" text-anchor="middle" font-size="7" fill="#757575">5</text>
+  <text x="100" y="10" text-anchor="middle" font-size="7" fill="#757575">5</text>
+  <text x="147" y="22" text-anchor="middle" font-size="7" fill="#757575">10</text>
+  <text x="181" y="54" text-anchor="middle" font-size="7" fill="#757575">15</text>
+  <text x="20" y="116" text-anchor="middle" font-size="9" fill="#757575">10</text>
+  <text x="180" y="116" text-anchor="middle" font-size="9" fill="#757575">20 kW</text>
+  <text x="100" y="78" text-anchor="middle" font-size="26" font-weight="700" fill="#212121" id="pval">–</text>
+  <text x="100" y="92" text-anchor="middle" font-size="9" fill="#9e9e9e" id="punit">kW</text>
+</svg>
+</div>
+</div>
+</div>
+<div class="dir" id="dir"></div>
+<div class="card" style="margin-bottom:8px"><h3>Power Summary</h3><div id="psum"></div></div>
+<div class="g2" id="mid"></div>
+<div class="g2" id="bot"></div>
+<div class="card" style="margin-bottom:8px"><h3>BMS State (F106)</h3><div class="bits" id="flags" style="margin-bottom:0"></div></div>
+<div id="foot">Connecting…</div>
+</div>
+<div id="detail" style="display:none"></div>
+<script>
+const f=(v,d=1)=>v==null?'–':v.toFixed(d);
+const fi=v=>v==null?'–':(v>=0?'+':'')+v.toFixed(1);
+const ftemp=c=>c==null?'–':Math.round(c*9/5+32)+'°F ('+c+'°C)';
+function kv(k,v){return'<div class="kv"><span class="k">'+k+'</span><span>'+v+'</span></div>';}
+var MC_FAULTS={
+  12:'Controller Over Current',13:'Current Sensor Fault',
+  15:'Controller Severe Undertemp',16:'Controller Severe Overtemp',
+  17:'Severe B+ Undervoltage',18:'Severe B+ Overvoltage',
+  22:'Controller Over Temp Cutback',23:'B+ Undervoltage Cutback',
+  24:'B+ Overvoltage Cutback',25:'+5V Supply Failure',
+  26:'Motor Temp Hot Cutback',29:'Motor Temp Sensor Fault',
+  31:'Coil1 Driver Open/Short / Main Open/Short',
+  32:'Coil2 Driver Open/Short / EM Brake Open/Short',
+  36:'Encoder Fault / Sin/Cos Sensor Fault',37:'Motor Open',
+  38:'Main Contactor Welded',39:'Main Contactor Did Not Close',
+  41:'Throttle Wiper High',42:'Throttle Wiper Low',
+  43:'Pot2 Wiper High',44:'Pot2 Wiper Low',
+  45:'Pot Low Over Current',47:'HPD/Sequencing Fault',
+  49:'Parameter Change Fault / PDO Timeout',
+  71:'Stall Detected / Vehicle lock without applying hand brake',
+  83:'Driver Supply',87:'Motor Characterization Fault',
+  89:'Encoder Pulse Count Fault / Motor Type Fault',
+  92:'EM Brake failed to set',99:'Parameter Mismatch'
+};
+var BMS_FAULTS={
+  100:'SOC too high',101:'SOC too low',
+  102:'Total voltage too high',103:'Total voltage too low',
+  104:'Charge current fault',105:'Discharge current fault',
+  106:'Battery temp too low',107:'Battery temp too high',
+  108:'Battery under voltage',109:'Battery over voltage',
+  110:'Battery temp unbalance',111:'Battery voltage unbalance',
+  112:'Battery does not match',113:'Output pole temp too high',
+  116:'Memory parameters fault',117:'Data memory fault',
+  118:'Cell voltage detection fault',119:'Temperature detection fault',
+  120:'Current detection fault',121:'Internal total voltage detection fault',
+  122:'External total voltage detection fault',123:'Insulation monitoring fault',
+  124:'Clock fault',125:'Internal CAN comm fault',
+  126:'Serious insulation fault',127:'Slight insulation fault',
+  140:'System fault level',142:'BMS fault — maintenance',
+  143:'Battery fault — maintenance',144:'Battery system fault — maintenance',
+  145:'Needs full charge/discharge cycle',146:'Maintenance mode status'
+};
+function fwh(wh){
+  if(wh==null)return'–';
+  if(Math.abs(wh)>=1000)return(wh/1000).toFixed(2)+' kWh';
+  return Math.round(wh)+' Wh';
+}
+function feta(s){
+  if(s==null||s<=0)return'–';
+  if(s>360000)return'>100h';
+  var h=Math.floor(s/3600),m=Math.floor((s%3600)/60);
+  return h>0?h+'h '+m+'m':m+'m';
+}
+var detailOpen=false,lastData=null;
+function update(d){
+  const p=d.pack||{},m=d.motor||{},can=d.can||{};
+  const pc=p.cells||{},pt=pc.temp_summary||{};
+  const bst=(d.bms&&d.bms.state)||{};
+  const fts=d.faults||{},chg=d.charger||{},cmd=d.chgr_cmd||{};
+  const s=d.session||{};
+  const al=[];
+  (fts.bms||[]).forEach(function(c){
+    al.push('BMS '+c+(BMS_FAULTS[c]?' ('+BMS_FAULTS[c]+')':''));
+  });
+  (fts.mc||[]).forEach(function(c){
+    al.push('MC '+c+(MC_FAULTS[c]?' ('+MC_FAULTS[c]+')':''));
+  });
+  document.getElementById('al').innerHTML=al.length
+    ? '<div class="alert">⚠ '+al.join('<br>⚠ ')+'</div>'
+    : '';
+  // Tractor status: backend emits "on" / "starting" / "off". "Starting"
+  // shows up during the ~1.4s BMS boot ramp before the MC joins the bus.
+  var tractor = d.tractor || 'off';
+  var statEl=document.getElementById('status');
+  statEl.className='status '+tractor;
+  var vinTxt = (d.vin_v != null) ? ' ('+d.vin_v.toFixed(1)+' V)' : '';
+  statEl.textContent=(tractor==='starting' ? 'Tractor Starting…'
+                    : tractor==='on'       ? 'Tractor On'
+                    : 'Tractor Off') + vinTxt;
+  const soc=p.soc_pct,scls=soc==null?'':soc<20?'bad':soc<40?'warn':'ok';
+  const cur=p.current_a,pwr=p.power_w;
+  // Sign convention everywhere: positive = into pack (charging), negative = out.
+  const curCls=cur!=null&&cur>0.05?'ok':'';
+  const pwrCls=pwr!=null&&pwr>0?'ok':'';
+  const pwrStr=pwr==null?'–'
+    :(pwr>0?'+':'')+(pwr/1000).toFixed(1);
+  document.getElementById('kpi').innerHTML=
+    '<div class="card"><h3>SoC</h3><div class="big '+scls+'">'+f(soc,0)+'<span class="unit">%</span></div><div class="sub">'+(s.wh_remaining!=null&&s.wh_capacity?(s.wh_remaining/1000).toFixed(2)+' / '+fwh(s.wh_capacity):'')+'</div></div>'+
+    '<div class="card"><h3>Voltage</h3><div class="big">'+f(p.voltage_v,1)+'<span class="unit">V</span></div><div class="sub">60 – 84 V range</div></div>'+
+    '<div class="card"><h3>Current</h3><div class="big '+curCls+'">'+fi(cur)+'<span class="unit">A</span></div></div>'+
+    '<div class="card"><h3>Power</h3><div class="big '+pwrCls+'">'+pwrStr+'<span class="unit">kW</span></div></div>';
+  const netCharging=s.wh_net!=null&&s.wh_net>0;
+  const etaLabel=netCharging?'ETA to 100%':'ETA to 0%';
+  const etaVal=netCharging?s.eta_to_full_s:s.eta_to_zero_s;
+  const netCls=s.wh_net!=null&&s.wh_net>0?'ok':'';
+  const netStr=s.wh_net==null?'–'
+    :'<span class="'+netCls+'">'+(s.wh_net>0?'+':'')+fwh(s.wh_net)+'</span>';
+  var chgStr=s.wh_charged==null?'–'
+    :(s.wh_charged>0?'<span class="ok">':'<span>')+fwh(s.wh_charged)+'</span>';
+  // Session ΔSOC: current minus the first SOC seen this session
+  // (server-captured so it survives a tab refresh). Same sign convention as
+  // wh_net — positive = charged up. The start→current breakdown is in the
+  // native tooltip so the row stays compact.
+  var socStart=s.soc_start_pct,socNow=soc;
+  var socStr='–';
+  if(socStart!=null&&socNow!=null){
+    var dSoc=socNow-socStart;
+    var tip=socStart.toFixed(0)+' → '+socNow.toFixed(0)+' %';
+    socStr='<span title="'+tip+'">'+
+      (dSoc>0?'+':'')+dSoc.toFixed(0)+' %</span>';
+  }
+  document.getElementById('psum').innerHTML=
+    kv('Session draw',fwh(s.wh_drawn))+
+    kv('Session charge',chgStr)+
+    kv('Session net',netStr)+
+    kv('Session ΔSOC',socStr)+
+    kv(etaLabel,feta(etaVal));
+  // Gauges (speed + power)
+  function setGauge(val,max,progId){
+    var cx=100,cy=100,r=80;
+    var pr=document.getElementById(progId);
+    if(val==null){pr.setAttribute('d','');return;}
+    var frac=Math.max(0,Math.min(val/max,1));
+    var th=Math.PI*(1-frac);
+    var ex=cx+r*Math.cos(th),ey=cy-r*Math.sin(th);
+    pr.setAttribute('d',val>0.05?'M '+(cx-r)+' '+cy+' A '+r+' '+r+' 0 0 1 '+ex.toFixed(2)+' '+ey.toFixed(2):'');
+  }
+  // Ioniq-style split power dial. Rest point sits at 1/3 of the arc; the
+  // fill swings left into the CHARGE zone (0-10 kW into the pack) and right
+  // into the POWER zone (0-20 kW drawn). Both halves share a single
+  // 30 kW / 180deg scale, so the rare >10 kW regen spike just pegs left.
+  // w is pack power in W (sign convention: positive = into pack/charging).
+  function setSplitGauge(w,progId){
+    var cx=100,cy=100,r=80,restFa=1/3,gapFa=0.011; // gapFa = dead band each side of zero
+    var pr=document.getElementById(progId);
+    function pt(fa,rad){var th=Math.PI*(1-fa);return[cx+rad*Math.cos(th),cy-rad*Math.sin(th)];}
+    if(w==null){pr.setAttribute('d','');return;}
+    var kw=w/1000,fa,fromFa,sweep;
+    if(kw>=0){ // charging swings left, full deflection at +10 kW
+      fa=restFa-Math.min(kw/10,1)*restFa;fromFa=restFa-gapFa;sweep=0; // ccw, left of zero
+    }else{ // drawing swings right, full deflection at -20 kW
+      fa=restFa+Math.min(-kw/20,1)*(1-restFa);fromFa=restFa+gapFa;sweep=1; // cw, right of zero
+    }
+    // Fill grows from the gap edge outward, drawn only once the value clears
+    // the dead band so the zero divider stays clean on both sides.
+    if((kw>=0&&fa<fromFa)||(kw<0&&fa>fromFa)){
+      var a=pt(fromFa,r),b=pt(fa,r);
+      pr.setAttribute('d','M '+a[0].toFixed(2)+' '+a[1].toFixed(2)+
+        ' A '+r+' '+r+' 0 0 '+sweep+' '+b[0].toFixed(2)+' '+b[1].toFixed(2));
+    }else{
+      pr.setAttribute('d','');
+    }
+    pr.setAttribute('stroke',kw>0?'#2e7d32':'#1976d2');
+  }
+  setGauge(m.rpm_magnitude,3000,'sprog');
+  document.getElementById('sval').textContent=m.rpm_magnitude!=null?m.rpm_magnitude:'–';
+  document.getElementById('sunit').textContent='RPM';
+  var eff=m.torque_raw;
+  var ebar=document.getElementById('ebar');
+  if(eff!=null){
+    var efrac=Math.max(0,Math.min(eff/255,1));
+    var eh=efrac*80;
+    ebar.setAttribute('y',(100-eh).toFixed(1));
+    ebar.setAttribute('height',eh.toFixed(1));
+    ebar.setAttribute('fill',eff>=0x14?'#1976d2':'#bdbdbd');
+    document.getElementById('eval').textContent=Math.round(efrac*100)+'%';
+  }else{
+    ebar.setAttribute('height',0);
+    document.getElementById('eval').textContent='–';
+  }
+  setSplitGauge(pwr,'pprog');
+  var pkw=pwr!=null?pwr/1000:null;
+  var pv=document.getElementById('pval');
+  // Signed to match the dashboard-wide convention (+ = into pack). Green
+  // while charging, blue while drawing, matching the dial fill colour.
+  pv.textContent=pkw==null?'–':(pkw>0?'+':'')+pkw.toFixed(1);
+  pv.setAttribute('fill',pkw==null?'#212121':pkw>0.05?'#2e7d32':pkw<-0.05?'#1976d2':'#212121');
+  document.getElementById('punit').textContent='kW';
+  document.getElementById('dir').innerHTML=
+    [['R',-1],['N',0],['F',1]].map(function(x){
+      return'<div class="dirbtn '+(m.direction===x[1]?'on':'')+'">'+x[0]+'</div>';
+    }).join('');
+  document.getElementById('mid').innerHTML=
+    '<div class="card tap" onclick="openDetail()"><h3>Cell</h3>'+
+    kv('Max',(pc.max_mv!=null?(pc.max_mv/1000).toFixed(3):'–')+' V (#'+(pc.max_n||'?')+')')+
+    kv('Min',(pc.min_mv!=null?(pc.min_mv/1000).toFixed(3):'–')+' V (#'+(pc.min_n||'?')+')')+
+    kv('Spread',pc.spread_mv!=null?(pc.spread_mv+' mV'+(pc.max_mv&&pc.min_mv?' ('+(pc.spread_mv/((pc.max_mv+pc.min_mv)/2)*100).toFixed(2)+'%)':'')):'–')+
+    kv('Temp max',ftemp(pt.max_c))+
+    kv('Temp min',ftemp(pt.min_c))+
+    '</div>'+
+    '<div class="card"><h3>Motor</h3>'+
+    kv('RPM',m.rpm_magnitude!=null?m.rpm_magnitude:'–')+
+    kv('Range','R'+(m.range||'?'))+
+    kv('MC Temp',ftemp(m.controller_temp_c))+
+    kv('Motor Temp',ftemp(m.motor_temp_c))+
+    '</div>';
+  // F106 bit labels [short, full], index = bit position; null = unknown.
+  var B0_NAMES=[['Output','Output Enabled'],null,['Contactor','Main Contactor'],
+    null,null,null,['Oper','Operating'],['Prechg','Precharge']];
+  var B1_NAMES=[null,null,['NoDrive','Drive Disabled'],['Charge','Charging'],
+    null,['Drive','Drive Mode'],['Awake','Awake'],null];
+  // onCls: extra class for set cells ('flt' renders faults red).
+  function bitRow(label,val,names,onCls){
+    if(val==null)return'';
+    var h='<div class="bitrow"><div class="bithex">'+label+' '+
+      (val<16?'0':'')+val.toString(16).toUpperCase()+'</div>';
+    for(var b=7;b>=0;b--){
+      var on=(val>>b)&1,nm=names[b];
+      h+='<div class="bitcell'+(nm?'':' unk')+(on?' on'+(onCls?' '+onCls:''):'')+
+        '" title="bit '+b+' (0x'+(1<<b).toString(16).toUpperCase()+')'+
+        (nm?' '+nm[1]:'')+'">'+(nm?nm[0]:b)+'</div>';
+    }
+    return h+'</div>';
+  }
+  document.getElementById('flags').innerHTML=
+    bitRow('b0',bst.byte0,B0_NAMES)+bitRow('b1',bst.byte1,B1_NAMES)
+    ||kv('State','–');
+  var bot='';
+  // Charger card always renders; fields show '–' while the charger
+  // (FF50E5) or BMS command (1806E5F4) is silent or stale.
+  // chg.flags: Elcon fault flags (FF50E5 byte 4); 0x00 = actively delivering.
+  var CF_NAMES=[['Fault','Hardware Fault'],['Temp','Over-Temperature'],
+    ['NoAC','No AC Input'],['NoDC','No DC Delivery'],
+    ['NoCmd','No BMS Command'],null,null,null];
+  var dcw=(p.voltage_v!=null&&chg.current_a!=null)
+    ? Math.round(p.voltage_v*chg.current_a)+' W' : '–';
+  bot+='<div class="card" style="grid-column:1/-1"><h3>Charger</h3>'+
+    (chg.flags!=null
+      ?'<div class="bits">'+bitRow('fl',chg.flags,CF_NAMES,'flt')+'</div>'
+      :kv('Flags','–'))+
+    kv('Charger voltage',chg.voltage_v!=null?chg.voltage_v.toFixed(1)+' V':'–')+
+    kv('Charger current',chg.current_a!=null?chg.current_a.toFixed(1)+' A':'–')+
+    kv('Charger power',dcw)+
+    kv('BMS setpoint V / A',f(cmd.voltage_v)+' / '+f(cmd.current_a))+'</div>';
+  document.getElementById('bot').innerHTML=bot;
+  var age=can.last_frame_age_s;
+  var dot=can.state==='running'?'<span class="ok">●</span>':'<span class="bad">●</span>';
+  document.getElementById('foot').innerHTML=
+    dot+' '+can.state+' · '+(can.frames_rx||0)+' rx · age '+(age!=null?age.toFixed(1)+'s':'–')+' · up '+f(d.uptime/3600,1)+'h';
+  lastData=d;
+  if(detailOpen)renderDetail(d);
+}
+// Per-cell battery detail view. Voltages are genuinely per-cell; the 7
+// temperature probes are pack-level (no documented cell mapping) so they get
+// their own section. The per-cell arrays appear only in the full WiFi /json
+// payload — the BLE/minimal payload omits them, so we degrade gracefully.
+function renderDetail(d){
+  var el=document.getElementById('detail');
+  var pc=(d&&d.pack&&d.pack.cells)||{};
+  var volts=pc.voltages||[];
+  var head='<div class="dhead"><button class="backbtn" onclick="closeDetail()">‹ Back</button>'+
+    '<h2>Cell Detail</h2></div>';
+  var vals=volts.filter(function(v){return v!=null;});
+  if(!vals.length){
+    el.innerHTML=head+'<div class="card note">Waiting for per-cell voltage '+
+      'data from the BMS…</div>';
+    return;
+  }
+  var mn=Math.min.apply(null,vals),mx=Math.max.apply(null,vals),rng=mx-mn;
+  var summary='<div class="card" style="margin-bottom:8px">'+
+    kv('Pack voltage',d.pack.voltage_v!=null?d.pack.voltage_v.toFixed(1)+' V':'–')+
+    kv('Spread',Math.round(rng*1000)+' mV ('+(rng/((mx+mn)/2)*100).toFixed(2)+'%)')+
+    kv('Highest',mx.toFixed(3)+' V')+
+    kv('Lowest',mn.toFixed(3)+' V')+'</div>';
+  var cells='';
+  for(var i=0;i<volts.length;i++){
+    var v=volts[i],cls='card cell',body;
+    if(v==null){
+      cls+=' nul';body='<div class="cv">–</div>';
+    }else{
+      if(v>=mx)cls+=' mx';else if(v<=mn)cls+=' mn';
+      var frac=rng>0?(v-mn)/rng:1;
+      body='<div class="cv">'+v.toFixed(3)+'<span class="cvu"> V</span></div>'+
+        '<div class="cellbar"><i style="width:'+Math.round(frac*100)+'%"></i></div>';
+    }
+    cells+='<div class="'+cls+'"><div class="cn">#'+(i+1)+'</div>'+body+'</div>';
+  }
+  var temps=pc.temp_readings||[],trow='';
+  for(var j=0;j<temps.length;j++){
+    trow+='<div class="card tbox"><div class="cn">T'+(j+1)+'</div>'+
+      '<div class="cv">'+ftemp(temps[j])+'</div></div>';
+  }
+  el.innerHTML=head+summary+
+    '<h3>Cell Voltages</h3><div class="cellgrid">'+cells+'</div>'+
+    (trow?'<h3>Cell Temperatures</h3><div class="tempgrid">'+trow+'</div>':'');
+}
+function openDetail(){
+  detailOpen=true;
+  document.getElementById('main').style.display='none';
+  document.getElementById('detail').style.display='block';
+  if(lastData)renderDetail(lastData);
+}
+function closeDetail(){
+  detailOpen=false;
+  document.getElementById('detail').style.display='none';
+  document.getElementById('main').style.display='';
+}
+function refresh(){
+  fetch('/json').then(function(r){return r.json();}).then(update)
+    .catch(function(){document.getElementById('foot').textContent='Error — retrying…';});
+}
+// When hosted inside the Android WebView, window.DashboardBridge is injected
+// by MainActivity. We then receive pushed JSON via dispatchDashboardUpdate
+// (called from the BLE reassembler) instead of polling /json.
+window.dispatchDashboardUpdate=function(s){
+  var d;
+  try{d=JSON.parse(s);}
+  catch(e){document.getElementById('foot').textContent='Bad JSON: '+e.message;return;}
+  try{update(d);}
+  catch(e){document.getElementById('foot').textContent='Render error: '+e.message;}
+};
+if(window.DashboardBridge){
+  document.getElementById('foot').textContent='Waiting for BLE…';
+  try{window.DashboardBridge.ready();}catch(e){}
+}else{
+  refresh();
+  setInterval(refresh,200);
+}
+</script>
+</body>
+</html>
+  

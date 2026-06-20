@@ -359,6 +359,9 @@ class State:
     limit_mode: Channel = field(default_factory=Channel)           # 0 chg / 1 drv
     # BMS-published SOC (F100F3 byte 4): % = raw × 0.4 − 0.8.
     bms_soc_pct: Channel = field(default_factory=Channel)
+    # First SOC seen this session; current - start = session ΔSOC. Captured
+    # once on the first valid sample and held until process restart.
+    bms_soc_start_pct: Optional[float] = None
     # Recent (ts, bms_soc%) samples used to estimate time-to-full during
     # charging. Pruned to SOC_ETA_HISTORY_S; the estimator prefers slope
     # over the SOC_ETA_WINDOW_S window and falls back to the full
@@ -567,6 +570,8 @@ def decode(msg: "can.Message", state: State, now: float) -> None:
             state.last_energy_ts = now
             state.last_energy_p = value
         elif name == "pack.soc_pct":
+            if state.bms_soc_start_pct is None:
+                state.bms_soc_start_pct = value
             state.soc_history.append((now, value))
             cutoff = now - SOC_ETA_HISTORY_S
             while (state.soc_history
@@ -1627,6 +1632,8 @@ def state_to_json(state: State, now: float, mode: str) -> dict:
         "wh_net": round(state.energy_wh_charged - state.energy_wh_drawn, 1),
         "wh_capacity": PACK_CAPACITY_WH,
     }
+    if state.bms_soc_start_pct is not None:
+        sess["soc_start_pct"] = round(state.bms_soc_start_pct, 1)
     if state.bms_soc_pct.value is not None:
         remaining = state.bms_soc_pct.value * PACK_CAPACITY_WH / 100.0
         sess["wh_remaining"] = round(remaining, 1)
