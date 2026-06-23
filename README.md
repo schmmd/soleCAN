@@ -91,11 +91,10 @@ One row per signal name (parametric signals like `cell.NN.voltage_v` use
 id, ext, count, priority, R, DP, PF, PS, SA, PGN, PDU, PS_role, name
 ```
 
-### `solecan-stream.py` — live TUI dashboard
+### `solecan-stream.py` — live dashboard
 
 Live (or replayed) BMS / charger / motor dashboard. Decodes the same J1939
-frames as `solecan-analyze.py` and serves the decoded snapshot as JSON over
-HTTP for other consumers.
+frames as `solecan-analyze.py` and serves a dashboard.
 
 ![solecan-stream TUI](screenshot.svg)
 
