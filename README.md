@@ -16,9 +16,17 @@ J1939 CAN-bus tooling for a Solectrac electric tractor.
 
 ## Python tooling
 
-`pyproject.toml` (managed with `uv`) is the full dependency set, including BLE
-and the Canalyst-II interface. `requirements.txt` is the lighter set sufficient
-for the analyzer and stream TUI (`python-can`, `pyserial`, `rich`).
+Dependencies live in `pyproject.toml` (managed with `uv`). The base install
+(`python-can`, `pyserial`, `rich`) is enough for the analyzer and stream TUI;
+the `ble` and `canalyst` extras add `bless` and `canalystii` for the embedded
+BLE work and the Canalyst-II adapter respectively, and `all` pulls in both.
+
+```sh
+uv sync                          # base
+uv sync --extra all              # everything
+pip install .                    # base, via pip
+pip install '.[ble,canalyst]'    # everything, via pip
+```
 
 ### `solecan-analyze.py` — offline decoder
 
