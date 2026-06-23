@@ -1,6 +1,6 @@
 # Reproducible runtime environment for the host-side Python tooling
-# (solecan-analyze.py and solecan-stream.py). Mirrors what requirements.txt
-# pulls in — the lighter dependency set, which is enough for both the
+# (solecan-analyze.py and solecan-stream.py). Installs the base dependency
+# set from pyproject.toml — no extras — which is enough for both the
 # offline analyzer and the live/replay TUI/web dashboard.
 #
 #   docker build -t solectrac-py .
@@ -10,15 +10,16 @@
 #   docker run --rm -v "$PWD/captures:/data" solectrac-py \
 #       python solecan-analyze.py -o /data/out /data/session.asc
 #
-FROM python:3.13-slim
+FROM python:3.14-slim
 
 WORKDIR /project
 
-# Pinned via requirements.txt (python-can, pyserial, rich). The wheels are
-# pure-Python for the formats and backends both scripts use, so no system
-# build tools are needed.
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# Install the base dependency set (python-can, pyserial, rich) from
+# pyproject.toml's [project].dependencies. The `ble` and `canalyst` extras
+# are intentionally omitted — neither script needs them.
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/
+COPY pyproject.toml ./
+RUN uv pip install --system --no-cache -r pyproject.toml
 
 # Only the files the two scripts actually need. dashboard.html is required
 # by solecan-stream.py when run with --ui web (it serves the file).
