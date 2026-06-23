@@ -473,6 +473,12 @@ Lending evidence to the above, UDAN exposes a separately labeled **`SOH(%)`**
 field that reads exactly **`100.0`** on this pack, sitting alongside its own
 `Shown SOC` and `Real SOC` fields.
 
+A second tractor's main-bus capture reads the same constant 0xFA spanning both
+a driving session and a charge session. Two independent packs both reading
+exactly 0xFA is consistent with SOH = 100 % on both, but does not rule out the
+byte being a static sentinel; confirmation still requires a pack whose SOH
+differs from 100 %.
+
 #### F104F3 — Pack temperature min/max summary — CONFIRMED
 
 Pack-wide hottest/coldest module-temperature summary, analogous to F102.
