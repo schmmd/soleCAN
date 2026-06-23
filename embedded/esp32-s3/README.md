@@ -78,30 +78,6 @@ bus side has its own ground reference. If your board's terminal has a 120 Ω
 termination jumper for CAN B, leave it **off**: the tractor bus is already
 terminated (it measures ~40 Ω), and this is a tap, not a bus end.
 
-### Sharing the bus with another device (listen-only)
-
-If the OBD-II port is already occupied by a device you must not disturb — e.g. a
-fleet or grant-compliance telematics logger — tap the same bus in parallel (a
-passive OBD-II Y-splitter is the simplest way) and build the firmware in
-**listen-only** mode so this board never transmits:
-
-```bash
-# Native PlatformIO
-pio run -e lilygo_t2can                                            # NORMAL: ACKs frames (default)
-PLATFORMIO_BUILD_FLAGS=-DCAN_LISTEN_ONLY pio run -e lilygo_t2can   # listen-only
-
-# Docker (reproducible build): add the build-arg; omit it for NORMAL
-docker build -f embedded/esp32-s3/Dockerfile --build-arg CAN_LISTEN_ONLY=1 -t solectrac-fw .
-```
-
-In listen-only mode the TWAI controller emits nothing — no ACKs, no error
-frames — so it cannot perturb the other device's traffic (beyond what CAN's
-error-confinement already guarantees). The tractor's other nodes (MC, BMS,
-charger, cluster) handle ACKing, so monitoring still works. **Trade-off:** all
-transmit is disabled — SLCAN injection, socketcand client→bus send, and UDS
-polling will not function. Confirm which mode is running via `can.mode`
-(`normal` / `listen_only`) in `/json`.
-
 ### Powering the board
 
 The T-2CAN accepts **DC 5–12 V** on its 2-pin power screw terminal (a separate
@@ -121,6 +97,31 @@ two options:
 > ⚠️ Do **not** exceed 12 V on the power terminal — the board is rated DC 5–12 V.
 > The tractor's nominal 12 V accessory rail is fine; do not wire it to a higher
 > traction-pack rail.
+
+## Sharing the bus with another device (listen-only)
+
+If the OBD-II port is already occupied by a device you must not disturb — e.g. a
+fleet or grant-compliance telematics logger — tap the same bus in parallel (a
+passive OBD-II Y-splitter is the simplest way) and build the firmware in
+**listen-only** mode so this board never transmits. The flag is board-agnostic
+and works on all three envs (`adafruit_feather_s3`, `lilygo_t2can`, `rejsacan`):
+
+```bash
+# Native PlatformIO (substitute your env)
+pio run -e <env>                                            # NORMAL: ACKs frames (default)
+PLATFORMIO_BUILD_FLAGS=-DCAN_LISTEN_ONLY pio run -e <env>   # listen-only
+
+# Docker (reproducible build): add the build-arg; omit it for NORMAL
+docker build -f embedded/esp32-s3/Dockerfile --build-arg CAN_LISTEN_ONLY=1 -t solectrac-fw .
+```
+
+In listen-only mode the TWAI controller emits nothing — no ACKs, no error
+frames — so it cannot perturb the other device's traffic (beyond what CAN's
+error-confinement already guarantees). The tractor's other nodes (MC, BMS,
+charger, cluster) handle ACKing, so monitoring still works. **Trade-off:** all
+transmit is disabled — SLCAN injection, socketcand client→bus send, and UDS
+polling will not function. Confirm which mode is running via `can.mode`
+(`normal` / `listen_only`) in `/json`.
 
 ## What the LED tells you
 
