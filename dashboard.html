@@ -46,18 +46,22 @@ h3{font-size:.68em;text-transform:uppercase;letter-spacing:.1em;color:#757575;ma
 .dhead{display:flex;align-items:center;gap:10px;margin-bottom:8px}
 .dhead h2{font-size:.78em;text-transform:uppercase;letter-spacing:.12em;color:#757575;font-weight:700}
 .backbtn{background:#fff;border:0;border-radius:8px;padding:8px 14px;font-size:.82em;font-weight:600;color:#1976d2;box-shadow:0 1px 2px rgba(0,0,0,.06);cursor:pointer}
-.cellgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:8px}
-.tempgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
-@media(max-width:400px){.cellgrid,.tempgrid{grid-template-columns:1fr 1fr}}
-.cell .cn{font-size:.62em;text-transform:uppercase;letter-spacing:.06em;color:#9e9e9e}
-.cell .cv{font-size:1.05em;font-weight:700;line-height:1.15;margin-top:1px}
-.cell .cvu{font-size:.5em;color:#9e9e9e;font-weight:400}
-.cell.nul .cv{color:#bdbdbd}
-.cell.mn{background:#ffe0b2}.cell.mn .cn{color:#e65100}
-.cell.mx{background:#c8e6c9}.cell.mx .cn{color:#1b5e20}
-.cellbar{height:5px;border-radius:3px;background:#eee;margin-top:6px;overflow:hidden}
-.cellbar i{display:block;height:100%;border-radius:3px;background:#1976d2}
-.tbox .cv{font-size:.82em;font-weight:600}
+.dsub{color:#757575;font-size:.82em;margin:0 4px 10px}
+.clist{display:grid;grid-auto-flow:column;column-gap:8px;background:#fff;border-radius:10px;padding:2px 0;box-shadow:0 1px 2px rgba(0,0,0,.06);margin-bottom:8px}
+.crow{display:grid;grid-template-columns:38px 1fr 60px;align-items:baseline;padding:6px 12px;font-size:.92em;border-bottom:1px solid #f0f2f5}
+.crow .cn{color:#9e9e9e;font-size:.85em}
+.crow .cv{font-variant-numeric:tabular-nums}
+.crow .cd{text-align:right;color:#9e9e9e;font-size:.85em;font-variant-numeric:tabular-nums}
+.crow.mn{background:#ffe0b2}.crow.mn .cn{color:#e65100}
+.crow.mx{background:#c8e6c9}.crow.mx .cn{color:#1b5e20}
+.crow.nul .cv{color:#bdbdbd}
+.trow{display:flex;align-items:baseline;gap:14px;background:#fff;border-radius:10px;padding:10px 14px;box-shadow:0 1px 2px rgba(0,0,0,.06);font-size:.92em}
+.trow .tlab{color:#9e9e9e;text-transform:uppercase;letter-spacing:.08em;font-size:.7em}
+.trow .tv{font-variant-numeric:tabular-nums}
+.trow .tv.mx{color:#e57373;font-weight:600}
+.trow .tv.mn{color:#64b5f6;font-weight:600}
+.trow .tv.mx.strong{color:#c62828;font-weight:700}
+.trow .tv.mn.strong{color:#1565c0;font-weight:700}
 .note{color:#757575;font-size:.86em;line-height:1.4}
 </style>
 </head>
@@ -134,7 +138,10 @@ h3{font-size:.68em;text-transform:uppercase;letter-spacing:.1em;color:#757575;ma
 <div class="card" style="margin-bottom:8px"><h3>BMS State (F106)</h3><div class="bits" id="flags" style="margin-bottom:0"></div></div>
 <div id="foot">Connecting…</div>
 </div>
-<div id="detail" style="display:none"></div>
+<div id="detail" style="display:none">
+<div class="dhead"><button class="backbtn" onclick="closeDetail()">‹ Back</button><h2>Cell Detail</h2></div>
+<div id="dbody"></div>
+</div>
 <script>
 const f=(v,d=1)=>v==null?'–':v.toFixed(d);
 const fi=v=>v==null?'–':(v>=0?'+':'')+v.toFixed(1);
@@ -383,44 +390,58 @@ function update(d){
 // their own section. The per-cell arrays appear only in the full WiFi /json
 // payload — the BLE/minimal payload omits them, so we degrade gracefully.
 function renderDetail(d){
-  var el=document.getElementById('detail');
+  var el=document.getElementById('dbody');
   var pc=(d&&d.pack&&d.pack.cells)||{};
   var volts=pc.voltages||[];
-  var head='<div class="dhead"><button class="backbtn" onclick="closeDetail()">‹ Back</button>'+
-    '<h2>Cell Detail</h2></div>';
   var vals=volts.filter(function(v){return v!=null;});
   if(!vals.length){
-    el.innerHTML=head+'<div class="card note">Waiting for per-cell voltage '+
+    el.innerHTML='<div class="card note">Waiting for per-cell voltage '+
       'data from the BMS…</div>';
     return;
   }
   var mn=Math.min.apply(null,vals),mx=Math.max.apply(null,vals),rng=mx-mn;
-  var summary='<div class="card" style="margin-bottom:8px">'+
-    kv('Pack voltage',d.pack.voltage_v!=null?d.pack.voltage_v.toFixed(1)+' V':'–')+
-    kv('Spread',Math.round(rng*1000)+' mV ('+(rng/((mx+mn)/2)*100).toFixed(2)+'%)')+
-    kv('Highest',mx.toFixed(3)+' V')+
-    kv('Lowest',mn.toFixed(3)+' V')+'</div>';
-  var cells='';
+  var sum=0;for(var k=0;k<vals.length;k++)sum+=vals[k];
+  var mean=sum/vals.length;
+  var packV=d.pack.voltage_v!=null?d.pack.voltage_v.toFixed(1)+' V':'–';
+  var sub='Pack '+packV+' · spread '+Math.round(rng*1000)+' mV ('+
+    (rng/mean*100).toFixed(2)+'%)';
+  var rows='';
   for(var i=0;i<volts.length;i++){
-    var v=volts[i],cls='card cell',body;
+    var v=volts[i];
     if(v==null){
-      cls+=' nul';body='<div class="cv">–</div>';
-    }else{
-      if(v>=mx)cls+=' mx';else if(v<=mn)cls+=' mn';
-      var frac=rng>0?(v-mn)/rng:1;
-      body='<div class="cv">'+v.toFixed(3)+'<span class="cvu"> V</span></div>'+
-        '<div class="cellbar"><i style="width:'+Math.round(frac*100)+'%"></i></div>';
+      rows+='<div class="crow nul"><span class="cn">#'+(i+1)+'</span>'+
+        '<span class="cv">–</span><span class="cd"></span></div>';
+      continue;
     }
-    cells+='<div class="'+cls+'"><div class="cn">#'+(i+1)+'</div>'+body+'</div>';
+    var dev=Math.round((v-mean)*1000);
+    var cls='crow'+(v>=mx?' mx':v<=mn?' mn':'');
+    var devStr=(dev>0?'+'+dev:String(dev))+' mV';
+    rows+='<div class="'+cls+'"><span class="cn">#'+(i+1)+'</span>'+
+      '<span class="cv">'+v.toFixed(3)+' V</span>'+
+      '<span class="cd">'+devStr+'</span></div>';
   }
+  // Two columns, column-major (#1–#10 left, #11–#20 right).
+  var rpc=Math.ceil(volts.length/2);
+  var listStyle=' style="grid-template-rows:repeat('+rpc+',auto)"';
   var temps=pc.temp_readings||[],trow='';
-  for(var j=0;j<temps.length;j++){
-    trow+='<div class="card tbox"><div class="cn">T'+(j+1)+'</div>'+
-      '<div class="cv">'+ftemp(temps[j])+'</div></div>';
+  if(temps.length){
+    var tvals=temps.filter(function(c){return c!=null;});
+    var tmn=tvals.length?Math.min.apply(null,tvals):null;
+    var tmx=tvals.length?Math.max.apply(null,tvals):null;
+    var tcolor=tmn!=null&&tmx!=null&&tmx>tmn;
+    // Strong tint only when min↔max span ≥5 °F; tighter spreads get a muted tint.
+    var tstrong=tcolor&&(Math.round(tmx*9/5+32)-Math.round(tmn*9/5+32))>=5;
+    var parts=temps.map(function(c){
+      if(c==null)return '<span class="tv">–</span>';
+      var cls='tv'+(tcolor?(c>=tmx?' mx':c<=tmn?' mn':''):'');
+      if(tstrong&&(c>=tmx||c<=tmn))cls+=' strong';
+      return '<span class="'+cls+'" title="'+c.toFixed(1)+' °C">'+
+        Math.round(c*9/5+32)+'°</span>';
+    }).join('');
+    trow='<div class="trow"><span class="tlab">Temps °F</span>'+parts+'</div>';
   }
-  el.innerHTML=head+summary+
-    '<h3>Cell Voltages</h3><div class="cellgrid">'+cells+'</div>'+
-    (trow?'<h3>Cell Temperatures</h3><div class="tempgrid">'+trow+'</div>':'');
+  el.innerHTML='<div class="dsub">'+sub+'</div>'+
+    '<div class="clist"'+listStyle+'>'+rows+'</div>'+trow;
 }
 function openDetail(){
   detailOpen=true;

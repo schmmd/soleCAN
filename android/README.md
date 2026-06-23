@@ -9,6 +9,8 @@ whenever any displayed signal changes — into the page via a
 The dashboard HTML lives at the repo root (`/dashboard.html`) and is shared
 with the firmware; see "Shared dashboard HTML" in `CLAUDE.md`.
 
+![Screenshot](screenshot.png)
+
 ## One-time setup
 
 The Gradle wrapper JAR is not checked in. From this directory:
