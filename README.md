@@ -104,7 +104,8 @@ id, ext, count, priority, R, DP, PF, PS, SA, PGN, PDU, PS_role, name
 Live (or replayed) BMS / charger / motor dashboard. Decodes the same J1939
 frames as `solecan-analyze.py` and serves a dashboard.
 
-![solecan-stream TUI](screenshot.svg)
+![solecan-stream web dashboard](web-screenshot.png)
+![solecan-stream TUI](tui-screenshot.svg)
 
 ```sh
 # Live capture using slcan
