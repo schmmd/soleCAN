@@ -53,6 +53,14 @@ ENV AP_SSID=${AP_SSID}
 ENV AP_PASS=${AP_PASS}
 ENV MDNS_NAME=${MDNS_NAME}
 
+# Optional: pass --build-arg CAN_LISTEN_ONLY=1 to build the CAN controller in
+# listen-only mode — it never transmits (no ACKs / no error frames), for tapping
+# a bus shared with a device you must not disturb. Empty (default) builds NORMAL
+# mode. PlatformIO appends PLATFORMIO_BUILD_FLAGS to build_flags; an empty value
+# is a no-op, so the default image is unchanged.
+ARG CAN_LISTEN_ONLY=
+ENV PLATFORMIO_BUILD_FLAGS=${CAN_LISTEN_ONLY:+-DCAN_LISTEN_ONLY}
+
 # Build for the LilyGo T-2CAN. This downloads the espressif32 platform and
 # Xtensa toolchain on first run and caches them in the image layer.
 RUN pio run -e lilygo_t2can

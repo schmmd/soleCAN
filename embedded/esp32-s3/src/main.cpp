@@ -738,6 +738,11 @@ String buildJson(bool pretty = true, bool minimal = false) {
         }
     }
     can["frames_rx"]      = g_frames_rx;
+#if defined(CAN_LISTEN_ONLY)
+    if (!minimal) can["mode"] = "listen_only";
+#else
+    if (!minimal) can["mode"] = "normal";
+#endif
     if (!minimal) can["frames_decoded"] = g_frames_decoded;
     if (g_frames_rx > 0)
         can["last_frame_age_s"] = (millis() - g_last_frame_ms) / 1000.0;
@@ -1336,8 +1341,20 @@ void setup() {
     // CAN at 250 kbit/s (J1939 standard). Default rx_queue_len is 5, which
     // overflows when server.handleClient() blocks the loop building JSON.
     // 128 gives ~0.5 s of buffer at full bus utilisation.
+    //
+    // Build with -DCAN_LISTEN_ONLY to put the controller in listen-only mode:
+    // it never transmits — no ACKs, no error frames — so it is electrically
+    // incapable of perturbing other nodes. Use this when tapping a bus shared
+    // with a device you must not disturb (e.g. a fleet/compliance logger).
+    // Trade-off: ALL transmit is disabled (SLCAN injection, socketcand
+    // client->bus send, UDS polling). Default is NORMAL, which ACKs frames.
+#if defined(CAN_LISTEN_ONLY)
+    const twai_mode_t kCanMode = TWAI_MODE_LISTEN_ONLY;
+#else
+    const twai_mode_t kCanMode = TWAI_MODE_NORMAL;
+#endif
     twai_general_config_t can_cfg = TWAI_GENERAL_CONFIG_DEFAULT(
-        CAN_TX_PIN, CAN_RX_PIN, TWAI_MODE_NORMAL);
+        CAN_TX_PIN, CAN_RX_PIN, kCanMode);
     can_cfg.rx_queue_len = 128;
     can_cfg.tx_queue_len = 32;
     twai_timing_config_t  tim_cfg = TWAI_TIMING_CONFIG_250KBITS();
