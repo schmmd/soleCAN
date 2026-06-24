@@ -115,7 +115,8 @@ macOS can't reach USB).
 ```bash
 # Docker build (context = repo root, because it embeds the canonical dashboard.html)
 docker build -f embedded/esp32-s3/Dockerfile \
-    --build-arg WIFI_SSID="..." --build-arg WIFI_PASS="..." -t solectrac-fw .
+    --build-arg WIFI_SSID="..." --build-arg WIFI_PASS="..." \
+    --build-arg GIT_SHA=$(git rev-parse --short HEAD) -t solectrac-fw .
 docker run --rm -v "$PWD/out:/out" solectrac-fw   # extracts bins to out/
 
 # Native PlatformIO
@@ -131,7 +132,8 @@ pio run -e lilygo_t2can -t upload  # build + flash
 ### Android (`android/`)
 ```bash
 # Docker build (context = repo root, like the firmware build)
-docker build -f android/Dockerfile -t solectrac-android .
+docker build -f android/Dockerfile \
+    --build-arg GIT_SHA=$(git rev-parse --short HEAD) -t solectrac-android .
 docker run --rm -v "$PWD/out:/out" solectrac-android   # extracts APK to out/
 
 # Native Gradle

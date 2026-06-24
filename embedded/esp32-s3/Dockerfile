@@ -47,11 +47,15 @@ ARG WIFI_PASS=
 ARG AP_SSID=
 ARG AP_PASS=
 ARG MDNS_NAME=
+# Host-resolved git SHA (the build context omits .git). Pass with
+# --build-arg GIT_SHA=$(git rev-parse --short HEAD); falls back to "unknown".
+ARG GIT_SHA=unknown
 ENV WIFI_SSID=${WIFI_SSID}
 ENV WIFI_PASS=${WIFI_PASS}
 ENV AP_SSID=${AP_SSID}
 ENV AP_PASS=${AP_PASS}
 ENV MDNS_NAME=${MDNS_NAME}
+ENV GIT_SHA=${GIT_SHA}
 
 # Build for the LilyGo T-2CAN. This downloads the espressif32 platform and
 # Xtensa toolchain on first run and caches them in the image layer.

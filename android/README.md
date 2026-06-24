@@ -35,13 +35,18 @@ Android SDK platform 34), use the Dockerfile. The build context is the
 `dashboard.html` from there.
 
 ```bash
-docker build -f android/Dockerfile -t solectrac-android .
+docker build -f android/Dockerfile \
+    --build-arg GIT_SHA=$(git rev-parse --short HEAD) -t solectrac-android .
 docker run --rm -v "$PWD/out:/out" solectrac-android   # -> out/app-debug.apk
 adb install out/app-debug.apk
 ```
 
 The Docker build only produces the debug APK — release would need a
 signing config that isn't checked in.
+
+The git SHA is appended to `versionName` (e.g. `1.0+a1b2c3d`) and exposed
+as `BuildConfig.GIT_SHA`. Native `./gradlew` builds resolve it from the
+working tree automatically; omit the build-arg to ship `unknown`.
 
 ## Architecture
 

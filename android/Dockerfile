@@ -53,6 +53,11 @@ WORKDIR /project
 COPY android/ ./android/
 COPY dashboard.html ./dashboard.html
 
+# Host-resolved git SHA (the build context omits .git). Pass with
+# --build-arg GIT_SHA=$(git rev-parse --short HEAD); falls back to "unknown".
+ARG GIT_SHA=unknown
+ENV GIT_SHA=${GIT_SHA}
+
 # Build the debug APK. assembleRelease would need a signing config that
 # isn't checked in, so debug is the reproducible default.
 WORKDIR /project/android

@@ -194,8 +194,13 @@ The build context is the **repo root** (the firmware embeds the canonical
 `dashboard.html` shared with the Android app). From the repo root:
 
 ```bash
-docker build -f embedded/esp32-s3/Dockerfile -t solectrac-fw .
+docker build -f embedded/esp32-s3/Dockerfile \
+    --build-arg GIT_SHA=$(git rev-parse --short HEAD) -t solectrac-fw .
 ```
+
+The SHA is baked into the build and surfaced as `version` in `/json` so a
+flashed board is identifiable; native `pio run` reads it from the working tree
+automatically. Omit the build-arg to ship `unknown`.
 
 Extract the build artifacts onto the host:
 
@@ -229,6 +234,7 @@ docker build -f embedded/esp32-s3/Dockerfile \
     --build-arg AP_SSID="$AP_SSID" --build-arg AP_PASS="$AP_PASS" \
     --build-arg MDNS_NAME="$MDNS_NAME" \
     --build-arg WIFI_SSID="$WIFI_SSID" --build-arg WIFI_PASS="$WIFI_PASS" \
+    --build-arg GIT_SHA=$(git rev-parse --short HEAD) \
     -t solectrac-fw .
 ```
 
