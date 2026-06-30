@@ -86,6 +86,9 @@ class MainActivity : AppCompatActivity(), BleClient.Listener {
                 pending?.let { pushJsonToWebView(it); pending = null }
             }
         }
+
+        @JavascriptInterface
+        fun appVersion(): String = BuildConfig.GIT_SHA
     }
 
     private fun pushJsonToWebView(json: String) {
