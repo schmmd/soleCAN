@@ -21,7 +21,7 @@ Confidence markers used throughout:
 - [J1939 Decodings](#j1939-decodings)
   - [Source-address map](#source-address-map)
   - [BMS (SA 0xF3)](#bms-sa-0xf3)
-  - [Motor controller (SA 0xCA)](#motor-controller-sa-0xca)
+  - [Motor controller (SA 0xCA)](#motor-controller-curtis-1238e-sa-0xca)
   - [Charger (SA 0xE5)](#charger-sa-0xe5)
   - [Vehicle controller (SA 0xD0)](#vehicle-controller-sa-0xd0)
 - [Instrument cluster hardware](#instrument-cluster-hardware)
@@ -32,7 +32,7 @@ Confidence markers used throughout:
 
 ## Vehicle and pack
 
-The tractor is a **Solectrac 25G** (non-HST variant).
+The tractor is a **Solectrac e25G** (non-HST variant).
 
 "Pack" refers to the tractor's traction battery — the high-voltage lithium-ion
 battery that powers the motor, as distinct from the 12 V accessory battery that
@@ -129,7 +129,7 @@ is NOT on this bus").
 
 ## CAN bus topology
 
-Single shared CAN bus at 250 kbaud. The ODB-2 diagnostic port we capture from
+Single shared CAN bus at 250 kbaud. The OBD-II diagnostic port we capture from
 is on the same bus as the ECUs that run the tractor — it is not a separate
 diagnostic segment.
 
@@ -171,7 +171,9 @@ it's the OBD-II port.
         └─────┘  └─────┘  └─────┘  └─────┘  └─────┘
 ```
 
-- `[120 Ω]` = terminator drawn on schematic 5.10 (MC and Cluster).
+- `[120 Ω]` = terminator drawn on schematic 5.10 (MC and Cluster). A
+  third terminator internal to the BMS is not drawn here; it brings the
+  measured bus resistance to 40 Ω — see "Bus termination" below.
 - OBD = OBD-II capture port (passive tap, no SA).
 - Node order on the schematic is as drawn; physical electrical order
   on the wire is not verified.
@@ -346,12 +348,13 @@ present).
 | 3..4 BE | min cell mV                                        |
 | 5       | max-cell **number, 1-based**                       |
 | 6       | min-cell **number, 1-based**                       |
+| 7       | 0x00 constant (unused)                             |
 | 8       | **cell-voltage spread, mV** (= bytes 1..2 − bytes 3..4) |
 
 **Indexing convention:** byte 5/6 use 1-based cell numbers as the BMS GUI
-displays them ("Max cell #19"). The parser's `cell_index` in `cells.csv` is
-0-based — subtract 1 to map. Cross-validated against contemporaneous per-cell
-PGN snapshots in `recorded-data/charging.csv`.
+displays them ("Max cell #19"). The analyzer emits 0-based cell indices —
+subtract 1 to map. Cross-validated against contemporaneous per-cell PGN
+snapshots from the same capture.
 
 When several cells tie at the max, the BMS reports the lowest-index winner.
 
@@ -411,20 +414,20 @@ active-charging frames).
 at 0.1 A/bit. Convention: positive = drawing from pack, negative = charging
 into pack.
 
-Cross-validation against operator-confirmed dashboard amperage (amp-*.asc
-steady-state captures, 2026-05-09):
+Cross-validation against operator-confirmed dashboard amperage (steady-state
+captures, 2026-05-09):
 
-| File          | data[2..3] range  | mean decoded A | dash A |
-|---------------|-------------------|----------------|--------|
-| amp-1.asc     | 0x7D12 (constant) |   1.8          |   1    |
-| amp-18.asc    | 0x7D9D – 0x7DC5   |  17.6          |  18    |
-| amp-35.asc    | 0x7E53 – 0x7E94   |  37.0          |  35    |
-| amp-42.asc    | 0x7E8E – 0x7EC5   |  41.7          |  42    |
-| amp-58.asc    | 0x7F32 – 0x8061   |  62.1          |  58    |
+| Dashboard reading | data[2..3] range  | mean decoded A |
+|-------------------|-------------------|----------------|
+| 1 A (true idle)   | 0x7D12 (constant) |   1.8          |
+| 18 A              | 0x7D9D – 0x7DC5   |  17.6          |
+| 35 A              | 0x7E53 – 0x7E94   |  37.0          |
+| 42 A              | 0x7E8E – 0x7EC5   |  41.7          |
+| 58 A              | 0x7F32 – 0x8061   |  62.1          |
 
 Mean decoded current matches dashboard to within ~1 A across the full 0–60 A
-range, exercising the 0x7D→0x7E and 0x7F→0x80 high-byte boundaries. amp-1.asc
-is the only true-idle capture: data[2..3] is constant at 0x7D12 = 1.8 A standby
+range, exercising the 0x7D→0x7E and 0x7F→0x80 high-byte boundaries. The 1 A
+reading is the only true-idle capture: data[2..3] is constant at 0x7D12 = 1.8 A standby
 draw (BMS + dashboard + DC-DC). Putting the tractor in DRIVE energizes
 inverter/contactor circuitry that adds ~16 A above standby — earlier captures
 sat at ~17 A "idle" for this reason.
@@ -472,7 +475,7 @@ display margin, not a decode error — anyone merging the diagnostic and main
 buses should treat the two SOCs as distinct signals.
 
 **SOH candidate (data[5])** TENTATIVE. data[5] is 0xFA = 250 across every
-capture (73 captures, all BMS frames swept by `util/soh_byte_sweep.py`). 250
+capture (73 captures, all BMS frames swept for byte-constancy). 250
 raw × 0.4 %/bit decodes to 100 %. The byte-constancy sweep eliminates every
 other plausible SOH location in the visible BMS frames — every other constant
 byte is either already attributed (cell count, voltage, current, SOC) or is a
@@ -710,12 +713,12 @@ one slope, and the pooled-R²=0.04 collapse was caused entirely by the cited
 "idle 0x56–0x59 → 101.7–102.2 V" band, which **does not exist in the real idle
 captures** (they read b5 = 0x61 → 78.5 V, on the line). Those 102 V samples
 were stale boot/transition frames, not a fourth band. Not surfaced as a separate channel — the
-full-precision pack voltage is already on `state.pack_v`.
+full-precision pack voltage is already available from the F100F3 decode.
 
 #### F108F3 — BMS active fault bitmap — CONFIRMED via injection
 
 Active BMS fault flags. All bytes 0x00 in healthy idle (verified
-against `asc/bms-error-codes/idle-no-bms.asc`).
+against a key-on idle capture with no BMS faults present).
 
 Every per-bit assignment below was established by spoofing F108 with
 each bit set in isolation and reading the resulting code off the
@@ -1071,8 +1074,8 @@ BMS current limit:
 - **L2 (240 V AC) — BMS-current-limited.** DC output current holds at
   **38.9 A flat** (matching the 39.0 A ceiling published by 1806E5F4 byte
   3..4) while pack voltage rises 78 → 83 V and delivered power scales
-  **3077 → 3213 W (mean 3144 W, σ = 53 W)**. CONFIRMED in
-  `dual-capture-charging-240.asc` (n=5901 CC samples). Lines up with the
+  **3077 → 3213 W (mean 3144 W, σ = 53 W)**. CONFIRMED across a full L2
+  240 V charge capture (n=5901 CC samples). Lines up with the
   brochure's 3.3 kW rating; mains capacity (~5 kW) is no longer the
   binding constraint, so the BMS cap is.
 
@@ -1142,8 +1145,8 @@ address. Broadcast at ~40 Hz.
 
 Byte 0 is the authoritative OPC (Operator Presence Control) state on
 the CAN bus. The transition is a single clean step in both directions,
-confirmed across three captures (`otp-seatedon-unseatedoff.asc`,
-`otp-unseatedoff-seatedon.asc`, `otp-bouncing-5s.asc`). Other bytes
+confirmed across three seat-switch captures (seated→unseated,
+unseated→seated, and a 5 s bounce test). Other bytes
 remain 0xFF and have not been decoded.
 
 **OPC timer.** The VC does not trip instantly when the operator leaves
@@ -1158,7 +1161,7 @@ by a discrete seat-switch input directly to a cluster pin, not by the
 CAN OPC state. This is consistent with schematic 5.9, which wires the
 seat switch through discrete signals.
 
-**OPC shutdown sequence** (from `otp-seatedon-unseatedoff.asc`,
+**OPC shutdown sequence** (from a seated→unseated capture,
 relative to OPC trip):
 
 ```
