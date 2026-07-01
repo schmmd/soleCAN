@@ -47,11 +47,15 @@ ARG WIFI_PASS=
 ARG AP_SSID=
 ARG AP_PASS=
 ARG MDNS_NAME=
+# Host-resolved git SHA (the build context omits .git). Pass with
+# --build-arg GIT_SHA=$(git rev-parse --short HEAD); falls back to "unknown".
+ARG GIT_SHA=unknown
 ENV WIFI_SSID=${WIFI_SSID}
 ENV WIFI_PASS=${WIFI_PASS}
 ENV AP_SSID=${AP_SSID}
 ENV AP_PASS=${AP_PASS}
 ENV MDNS_NAME=${MDNS_NAME}
+ENV GIT_SHA=${GIT_SHA}
 
 # Optional: pass --build-arg CAN_LISTEN_ONLY=1 to build the CAN controller in
 # listen-only mode — it never transmits (no ACKs / no error frames), for tapping

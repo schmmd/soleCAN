@@ -11,6 +11,25 @@ val copyDashboardAsset by tasks.registering(Copy::class) {
 }
 tasks.named("preBuild") { dependsOn(copyDashboardAsset) }
 
+// Source git SHA. Prefer the GIT_SHA env var (set by the Docker build, whose
+// context has no .git); otherwise shell out. Falls back to "unknown".
+fun gitSha(): String {
+    System.getenv("GIT_SHA")?.takeIf { it.isNotBlank() }?.let { return it }
+    return try {
+        val proc = ProcessBuilder("git", "rev-parse", "--short", "HEAD")
+            .directory(rootProject.projectDir.parentFile)
+            .redirectErrorStream(true)
+            .start()
+        val out = proc.inputStream.bufferedReader().readText().trim()
+        if (proc.waitFor() == 0 && out.isNotEmpty()) {
+            val dirty = ProcessBuilder("git", "diff", "--quiet")
+                .directory(rootProject.projectDir.parentFile)
+                .start().waitFor() != 0
+            out + if (dirty) "-dirty" else ""
+        } else "unknown"
+    } catch (_: Exception) { "unknown" }
+}
+
 android {
     namespace = "com.schmitztech.solectrac.dashboard"
     compileSdk = 34
@@ -20,7 +39,8 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = 1
-        versionName = "1.0"
+        versionName = "1.0+${gitSha()}"
+        buildConfigField("String", "GIT_SHA", "\"${gitSha()}\"")
     }
 
     buildTypes {
@@ -37,6 +57,7 @@ android {
     }
     buildFeatures {
         viewBinding = true
+        buildConfig = true
     }
 }
 

@@ -380,8 +380,13 @@ function update(d){
   document.getElementById('bot').innerHTML=bot;
   var age=can.last_frame_age_s;
   var dot=can.state==='running'?'<span class="ok">●</span>':'<span class="bad">●</span>';
+  var vers=[];
+  if(d.version)vers.push('fw '+d.version);
+  var br=window.DashboardBridge;
+  if(br&&br.appVersion){try{var av=br.appVersion();if(av)vers.push('app '+av);}catch(e){}}
   document.getElementById('foot').innerHTML=
-    dot+' '+can.state+' · '+(can.frames_rx||0)+' rx · age '+(age!=null?age.toFixed(1)+'s':'–')+' · up '+f(d.uptime/3600,1)+'h';
+    dot+' '+can.state+' · '+(can.frames_rx||0)+' rx · age '+(age!=null?age.toFixed(1)+'s':'–')+' · up '+f(d.uptime/3600,1)+'h'+
+    (vers.length?'<br>'+vers.join(' · '):'');
   lastData=d;
   if(detailOpen)renderDetail(d);
 }

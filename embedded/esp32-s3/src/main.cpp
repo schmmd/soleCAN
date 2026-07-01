@@ -714,6 +714,9 @@ String buildJson(bool pretty = true, bool minimal = false) {
     JsonDocument doc;
 
     doc["uptime"] = millis() / 1000.0;
+#ifdef GIT_SHA
+    doc["version"] = GIT_SHA;
+#endif
 
     // CAN bus health
     auto can = doc["can"].to<JsonObject>();
