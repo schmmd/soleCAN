@@ -462,6 +462,15 @@ LSB below it during the captures.
 Raw saturates at 250 (= 99.2 %) at full charge. Linearity holds through the
 full 10–90 % range — no curvature or breakpoint at the low end.
 
+**This is "Shown SOC", not "Real SOC".** The dashboard-anchored F100F3 value
+is the BMS's *shown* SOC. The UDS `0x2800` field (bytes 0..1, documented in
+[`bms/README.md`](bms/README.md)) is its *real* SOC, and the two differ:
+across a time-synced dual-bus charge window the F100F3 decode reads ~0.5–0.8 %
+**below** the `0x2800` real SOC (e.g. F100F3 ≈ 60.4–60.8 % against a real SOC
+of 61.0–61.4 % over the same span). The offset is the expected shown-vs-real
+display margin, not a decode error — anyone merging the diagnostic and main
+buses should treat the two SOCs as distinct signals.
+
 **SOH candidate (data[5])** TENTATIVE. data[5] is 0xFA = 250 across every
 capture (73 captures, all BMS frames swept by `util/soh_byte_sweep.py`). 250
 raw × 0.4 %/bit decodes to 100 %. The byte-constancy sweep eliminates every
