@@ -26,6 +26,7 @@
 #include <BLEUtils.h>
 #include <BLE2902.h>
 #include "driver/twai.h"
+#include <sys/select.h>
 #if defined(BOARD_LILYGO_T2CAN)
   #include <SPI.h>
   #include <ACAN2515.h>
@@ -308,6 +309,8 @@ Dm1State    g_dm1;
 uint32_t    g_frames_rx      = 0;   // total frames received
 uint32_t    g_frames_decoded = 0;   // frames matching a known PGN/source
 uint32_t    g_last_frame_ms  = 0;   // millis() at last received frame
+uint32_t    g_can_recoveries = 0;   // bus-off recoveries initiated since boot
+uint32_t    g_socketcand_tx_dropped = 0;   // frames dropped on full client TCP buffers
 bool        g_can_initialized = false;
 bool        g_ap_running      = false;
 
@@ -477,6 +480,27 @@ static void updateVinSense() {
 }
 #endif
 
+// ── CAN bus-off recovery ──────────────────────────────────────────────────────
+// Sustained bus errors (shorted wiring, bitrate mismatch while transmitting)
+// drive the TWAI controller bus-off, where it stays until software intervenes
+// — without this, capture is dead until a power cycle. Poll the driver state
+// and walk it back: BUS_OFF → initiate recovery (the controller waits out
+// 128×11 recessive bits), which completes into STOPPED → start again.
+
+static void canRecoveryTick() {
+    static uint32_t last_ms = 0;
+    uint32_t now = millis();
+    if (!g_can_initialized || now - last_ms < 1000) return;
+    last_ms = now;
+    twai_status_info_t si;
+    if (twai_get_status_info(&si) != ESP_OK) return;
+    if (si.state == TWAI_STATE_BUS_OFF) {
+        if (twai_initiate_recovery() == ESP_OK) g_can_recoveries++;
+    } else if (si.state == TWAI_STATE_STOPPED) {
+        twai_start();
+    }
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 static inline uint16_t be16(uint8_t hi, uint8_t lo) {
@@ -495,9 +519,6 @@ static bool allZero(const uint8_t* d) {
 // ── CAN decoder ───────────────────────────────────────────────────────────────
 
 void decodeCAN(uint32_t can_id, const uint8_t* raw, uint8_t len) {
-    g_frames_rx++;
-    g_last_frame_ms = millis();
-
     uint8_t d[8] = {};
     memcpy(d, raw, len < 8 ? len : 8);
 
@@ -614,9 +635,10 @@ void decodeCAN(uint32_t can_id, const uint8_t* raw, uint8_t len) {
             g_bms_limit.valid = true;
 
         } else if (pgn == PGN_F108) {
-            if (allZero(d)) return;
+            // F108 is a continuous bitmap broadcast: an all-zero frame means
+            // "no faults" and must clear previously latched codes, so there
+            // is deliberately no allZero() skip here.
             memcpy(g_bms_faults.bytes, d, 8);
-            g_bms_faults.any_fault         = true;
             g_bms_faults.active_codes_mask = 0;
             for (int bi = 0; bi < 7; bi++) {
                 for (int bit = 0; bit < 8; bit++) {
@@ -630,6 +652,7 @@ void decodeCAN(uint32_t can_id, const uint8_t* raw, uint8_t len) {
                 if (code && ((d[7] >> bit) & 1))
                     g_bms_faults.active_codes_mask |= (1ULL << (code - 100));
             }
+            g_bms_faults.any_fault = g_bms_faults.active_codes_mask != 0;
         }
 
     } else if (src == SRC_VEHICLE && pgn == PGN_F100) {
@@ -658,7 +681,12 @@ void decodeCAN(uint32_t can_id, const uint8_t* raw, uint8_t len) {
                        | (((uint32_t)(d[4] >> 5) & 0x07) << 16);
         uint8_t fmi = d[4] & 0x1F;
         bool active = (spn || fmi);
-        if (!d[0] && !d[1] && !active) return;   // healthy idle
+        if (!d[0] && !d[1] && !active) {
+            // Healthy idle — clear any previously latched DTC so the JSON
+            // reports "presently inactive", not "last fault ever observed".
+            g_dm1 = Dm1State();
+            return;
+        }
         g_dm1.lamp_byte0 = d[0];
         g_dm1.lamp_byte1 = d[1];
         g_dm1.dtc_spn    = spn;
@@ -685,12 +713,18 @@ void decodeCAN(uint32_t can_id, const uint8_t* raw, uint8_t len) {
         uint16_t v_set = be16(d[0], d[1]);
         uint16_t i_set = be16(d[2], d[3]);
         g_chgr_cmd.enable = d[4];
-        // Idle frame: V=0, I=0, enable=1 — emit enable only, skip V/I zeros.
         if (v_set || i_set) {
             g_chgr_cmd.voltage_v = v_set * 0.1f;
             g_chgr_cmd.current_a = i_set * 0.1f;
             g_chgr_cmd.v_raw     = v_set;
             g_chgr_cmd.i_raw     = i_set;
+        } else {
+            // Idle frame: V=0, I=0, enable=1 — clear the setpoint so the JSON
+            // emits enable only, instead of freezing on the last active values.
+            g_chgr_cmd.voltage_v = NAN;
+            g_chgr_cmd.current_a = NAN;
+            g_chgr_cmd.v_raw     = 0;
+            g_chgr_cmd.i_raw     = 0;
         }
         g_chgr_cmd.valid = true;
     }
@@ -737,6 +771,7 @@ String buildJson(bool pretty = true, bool minimal = false) {
                 can["rec"]        = si.rx_error_counter;
                 can["rx_missed"]  = si.rx_missed_count;
                 can["bus_errors"] = si.bus_error_count;
+                can["bus_recoveries"] = g_can_recoveries;
             }
         }
     }
@@ -747,6 +782,8 @@ String buildJson(bool pretty = true, bool minimal = false) {
     if (!minimal) can["mode"] = "normal";
 #endif
     if (!minimal) can["frames_decoded"] = g_frames_decoded;
+    if (!minimal && g_socketcand_tx_dropped)
+        can["socketcand_dropped"] = g_socketcand_tx_dropped;
     if (g_frames_rx > 0)
         can["last_frame_age_s"] = (millis() - g_last_frame_ms) / 1000.0;
 #if defined(HAS_MCP2515)
@@ -1002,8 +1039,12 @@ static bool   slcan_open = false;
 void slcanSendFrame(const twai_message_t& msg) {
     if (!slcan_open) return;
     char line[32];
-    int n = snprintf(line, sizeof(line), "T%08" PRIX32 "%u",
-                     msg.identifier, msg.data_length_code);
+    // 'T' + 8 hex ID digits for 29-bit frames, 't' + 3 for 11-bit.
+    int n = msg.extd
+        ? snprintf(line, sizeof(line), "T%08" PRIX32 "%u",
+                   msg.identifier, msg.data_length_code)
+        : snprintf(line, sizeof(line), "t%03" PRIX32 "%u",
+                   msg.identifier, msg.data_length_code);
     for (int i = 0; i < msg.data_length_code; i++)
         n += snprintf(line + n, sizeof(line) - n, "%02X", msg.data[i]);
     line[n++] = '\r';
@@ -1049,6 +1090,9 @@ void slcanPoll() {
 // taken is rejected (the existing clients are kept).
 
 #define SOCKETCAND_PORT 28600
+// A client that connects but never completes the open/rawmode handshake would
+// pin its slot forever; reclaim the slot after this long.
+#define SOCKETCAND_HANDSHAKE_MS 10000
 
 #if defined(HAS_MCP2515)
   #define SOCKETCAND_NUM_CHANNELS 2
@@ -1069,10 +1113,34 @@ struct SocketcandSlot {
     char            buf[64];
     uint8_t         len     = 0;
     int8_t          channel = -1;   // set when `< open canN >` is parsed
+    uint32_t        opened_ms = 0;  // millis() when the TCP connection arrived
 };
 
 static WiFiServer     socketcand_server(SOCKETCAND_PORT);
 static SocketcandSlot socketcand_slots[SOCKETCAND_NUM_CHANNELS];
+
+static void socketcandCloseSlot(SocketcandSlot& slot) {
+    slot.client.stop();
+    slot.state   = SC_DISCONNECTED;
+    slot.len     = 0;
+    slot.channel = -1;
+}
+
+// True if the client's socket can take a write right now. WiFiClient::write
+// has no non-blocking form — on a stalled client (phone out of range, no FIN)
+// it select()s up to 1 s per call, which would stall CAN RX and every other
+// service behind one dead peer. lwIP reports a socket writable only when at
+// least TCP_SNDLOWAT (~half the send buffer) is free, so a whole frame line
+// always fits once this returns true.
+static bool socketcandWritable(WiFiClient& client) {
+    int fd = client.fd();
+    if (fd < 0) return false;
+    fd_set wset;
+    FD_ZERO(&wset);
+    FD_SET(fd, &wset);
+    struct timeval tv = {0, 0};
+    return select(fd + 1, nullptr, &wset, nullptr, &tv) > 0;
+}
 
 #if defined(HAS_MCP2515)
 // MCP2515: external classic-CAN 2.0B controller wired to SPI, run at 250 kbit/s
@@ -1096,8 +1164,12 @@ void socketcandSendFrame(const twai_message_t& msg, int8_t channel) {
         n += snprintf(line + n, sizeof(line) - n, "%02X", msg.data[i]);
     n += snprintf(line + n, sizeof(line) - n, " >");
     for (auto& slot : socketcand_slots) {
-        if (slot.state == SC_RAWMODE && slot.channel == channel)
-            slot.client.write((const uint8_t*)line, n);
+        if (slot.state == SC_RAWMODE && slot.channel == channel) {
+            if (socketcandWritable(slot.client))
+                slot.client.write((const uint8_t*)line, n);
+            else
+                g_socketcand_tx_dropped++;
+        }
     }
 }
 
@@ -1189,16 +1261,18 @@ void socketcandPoll() {
             slot.state   = SC_WAITING_OPEN;
             slot.len     = 0;
             slot.channel = -1;
+            slot.opened_ms = millis();
         } else {
             new_client.stop();   // pool full — keep the existing clients
         }
     }
     for (auto& slot : socketcand_slots) {
         if (slot.state != SC_DISCONNECTED && !slot.client.connected()) {
-            slot.client.stop();
-            slot.state   = SC_DISCONNECTED;
-            slot.len     = 0;
-            slot.channel = -1;
+            socketcandCloseSlot(slot);
+        }
+        if ((slot.state == SC_WAITING_OPEN || slot.state == SC_WAITING_RAWMODE)
+                && millis() - slot.opened_ms > SOCKETCAND_HANDSHAKE_MS) {
+            socketcandCloseSlot(slot);
         }
         while (slot.client && slot.client.available()) {
             char c = slot.client.read();
@@ -1241,7 +1315,7 @@ void socketcandPoll() {
 
 #define BLE_CHUNK_BYTES        180
 #define BLE_PUSH_INTERVAL_MS   200    // diff cadence — actual send only on change
-#define BLE_INTER_CHUNK_DELAY  5
+#define BLE_INTER_CHUNK_DELAY  5      // min ms between chunk notifies (paced by bleTick)
 
 static BLEServer*         g_ble_server = nullptr;
 static BLECharacteristic* g_ble_tx     = nullptr;
@@ -1281,40 +1355,53 @@ void bleInit() {
     BLEDevice::startAdvertising();
 }
 
-static void bleSendFramed(const String& payload) {
-    if (!g_ble_connected || !g_ble_tx) return;
+// In-flight framed payload, drained one chunk per bleTick() call so the loop
+// never sleeps on BLE (the previous blocking send cost ~25 ms per push).
+// 8 KB scratch is plenty: minimal JSON for this dashboard runs ~800 B
+// (incl. the per-cell voltage/temperature arrays).
+static uint8_t  g_ble_tx_buf[2 + 8192];
+static size_t   g_ble_tx_len = 0;   // framed bytes queued; == off when idle
+static size_t   g_ble_tx_off = 0;   // next byte to notify
+static uint32_t g_ble_chunk_ms = 0; // millis() of the last chunk sent
+
+static void bleQueueFramed(const String& payload) {
     size_t total = payload.length();
-    if (total > 65535) return;
-
-    // 8 KB scratch is plenty: minimal JSON for this dashboard runs ~800 B
-    // (incl. the per-cell voltage/temperature arrays).
-    static uint8_t buf[2 + 8192];
-    size_t framed = 2 + total;
-    if (framed > sizeof(buf)) return;
-    buf[0] = (uint8_t)((total >> 8) & 0xFF);
-    buf[1] = (uint8_t)(total & 0xFF);
-    memcpy(buf + 2, payload.c_str(), total);
-
-    size_t off = 0;
-    while (off < framed) {
-        size_t n = framed - off;
-        if (n > BLE_CHUNK_BYTES) n = BLE_CHUNK_BYTES;
-        g_ble_tx->setValue(buf + off, n);
-        g_ble_tx->notify();
-        off += n;
-        if (off < framed) delay(BLE_INTER_CHUNK_DELAY);
-    }
+    if (total > 65535 || total + 2 > sizeof(g_ble_tx_buf)) return;
+    g_ble_tx_buf[0] = (uint8_t)((total >> 8) & 0xFF);
+    g_ble_tx_buf[1] = (uint8_t)(total & 0xFF);
+    memcpy(g_ble_tx_buf + 2, payload.c_str(), total);
+    g_ble_tx_len = 2 + total;
+    g_ble_tx_off = 0;
 }
 
 void bleTick() {
-    if (!g_ble_connected) return;
+    if (!g_ble_connected || !g_ble_tx) {
+        g_ble_tx_len = g_ble_tx_off = 0;   // abort any in-flight frame
+        return;
+    }
     uint32_t now = millis();
+
+    // Drain the in-flight frame first — one chunk per tick, keeping the
+    // 5 ms inter-chunk spacing on the wire. No new payload is built (and
+    // g_ble_last_payload doesn't advance) until the frame completes, so
+    // frames are never interleaved.
+    if (g_ble_tx_off < g_ble_tx_len) {
+        if (now - g_ble_chunk_ms < BLE_INTER_CHUNK_DELAY) return;
+        size_t n = g_ble_tx_len - g_ble_tx_off;
+        if (n > BLE_CHUNK_BYTES) n = BLE_CHUNK_BYTES;
+        g_ble_tx->setValue(g_ble_tx_buf + g_ble_tx_off, n);
+        g_ble_tx->notify();
+        g_ble_tx_off += n;
+        g_ble_chunk_ms = now;
+        return;
+    }
+
     if (now - g_ble_last_push_ms < BLE_PUSH_INTERVAL_MS) return;
     g_ble_last_push_ms = now;
 
     String j = buildJson(false /*pretty*/, true /*minimal*/);
     if (j != g_ble_last_payload) {
-        bleSendFramed(j);
+        bleQueueFramed(j);
         g_ble_last_payload = j;
     }
 }
@@ -1342,8 +1429,10 @@ void setup() {
     for (int i = 0; i < NUM_TEMPS; i++) g_temp_c[i] = NAN;
 
     // CAN at 250 kbit/s (J1939 standard). Default rx_queue_len is 5, which
-    // overflows when server.handleClient() blocks the loop building JSON.
-    // 128 gives ~0.5 s of buffer at full bus utilisation.
+    // overflows whenever the loop stalls — serving the ~26 KB dashboard over
+    // HTTP is the longest single handler. A saturated 250 kbit/s bus is
+    // ~1800 frames/s, so 512 frames buffer ~280 ms of worst-case traffic
+    // (longer at realistic bus load) for ~10 KB of DRAM.
     //
     // Build with -DCAN_LISTEN_ONLY to put the controller in listen-only mode:
     // it never transmits — no ACKs, no error frames — so it is electrically
@@ -1358,7 +1447,7 @@ void setup() {
 #endif
     twai_general_config_t can_cfg = TWAI_GENERAL_CONFIG_DEFAULT(
         CAN_TX_PIN, CAN_RX_PIN, kCanMode);
-    can_cfg.rx_queue_len = 128;
+    can_cfg.rx_queue_len = 512;
     can_cfg.tx_queue_len = 32;
     twai_timing_config_t  tim_cfg = TWAI_TIMING_CONFIG_250KBITS();
     twai_filter_config_t  flt_cfg = TWAI_FILTER_CONFIG_ACCEPT_ALL();
@@ -1430,11 +1519,20 @@ void setup() {
 void loop() {
     twai_message_t msg;
     while (twai_receive(&msg, 0) == ESP_OK) {
-        if (msg.extd) {
+        // Classic CAN allows DLC 9–15 on the wire (still only 8 data bytes)
+        // and the driver passes the raw value through (flagged
+        // TWAI_MSG_FLAG_DLC_NON_COMP). Clamp before fan-out so the SLCAN /
+        // socketcand formatters never index past msg.data[].
+        if (msg.data_length_code > 8) msg.data_length_code = 8;
+        g_frames_rx++;
+        g_last_frame_ms = millis();
+        // J1939 decode applies only to 29-bit frames, but the raw taps
+        // forward 11-bit frames too — the TWAI channel may be tapped onto a
+        // standard-ID bus (e.g. the BMS UDS port at 0x740/0x748).
+        if (msg.extd)
             decodeCAN(msg.identifier, msg.data, msg.data_length_code);
-            slcanSendFrame(msg);
-            socketcandSendFrame(msg, /*channel=*/0);
-        }
+        slcanSendFrame(msg);
+        socketcandSendFrame(msg, /*channel=*/0);
     }
 #if defined(HAS_MCP2515)
     if (g_mcp_initialized) {
@@ -1450,6 +1548,7 @@ void loop() {
         }
     }
 #endif
+    canRecoveryTick();
     slcanPoll();
     socketcandPoll();
     dns_server.processNextRequest();

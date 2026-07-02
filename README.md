@@ -8,7 +8,8 @@ J1939 CAN-bus tooling for a Solectrac electric tractor.
 | --- | --- |
 | `solecan-analyze.py` | Offline batch decoder: CAN log → tidy CSVs. |
 | `solecan-stream.py` | Live / replay dashboard. |
-| `dashboard.html` | The canonical HTML dashboard; used by solectrac-stream.py, the firmware, and Android app. |
+| `solecan_proto.py` | Shared J1939 decode core (SA/PGN map, scalings) — single source of truth for both tools. |
+| `dashboard.html` | The canonical HTML dashboard; used by solecan-stream.py, the firmware, and Android app. |
 | `bms/` | UDS diagnostics for the BMS port (separate bus). |
 | `embedded/esp32-s3/` | ESP32-S3 firmware: WiFi dashboard, JSON, BLE, USB SLCAN, socketcand. |
 | `android/` | Android app that mirrors the ESP32 dashboard over BLE. |
@@ -45,7 +46,7 @@ decoded value back to its source bytes and the formula that produced it:
 * `frames.csv` — what was on the bus (one row per consumed frame, joined to
   signals via `frame_index`)
 * `decoders.csv` — how we decoded it (per-signal formula catalog)
-* `ids.csv` — every unique CAN ID seen, with J1939 breakdown
+* `can_ids.csv` — every unique CAN ID seen, with J1939 breakdown
 
 To re-derive a value by hand: pick a row from `signals.csv`, look up its
 `frame_index` in `frames.csv` to get the raw bytes, then look up its `signal`
@@ -93,7 +94,7 @@ One row per signal name (parametric signals like `cell.NN.voltage_v` use
 `NN` as a placeholder). `bytes` references positions within `frames.csv`'s
 `b0..b7` columns. `confidence` is `verified`, `tentative`, or `unknown`.
 
-#### `ids.csv` — per-unique-CAN-ID J1939 decode
+#### `can_ids.csv` — per-unique-CAN-ID J1939 decode
 
 ```
 id, ext, count, priority, R, DP, PF, PS, SA, PGN, PDU, PS_role, name
@@ -118,8 +119,8 @@ solecan-stream.py --interface socketcan --channel can0 --bitrate 250000
 solecan-stream.py --replay session.log
 ```
 
-Displays pack voltage / current / DC and estimated AC power, SOC estimate
-(NMC OCV curve, taken from the lowest cell), charger output, per-cell voltages
+Displays pack voltage / current / DC and estimated AC power, BMS-published
+SOC, charger output, per-cell voltages
 with min/max/spread, module temperatures, vehicle-controller heartbeat, and
 live alerts (low/high cell, spread, temp, AC budget, stale BMS).
 
