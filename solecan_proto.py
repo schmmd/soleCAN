@@ -195,11 +195,19 @@ def derive_bms_fault_codes(data: list) -> List[int]:
 
 # --- shared decoder --------------------------------------------------------
 
-# F100F3 BMS-published SoC: byte 4 raw → percent. Calibrated from two
-# direct screen readings (raw=202 at 80%, raw=227 at 90%); slope 0.4,
-# intercept -0.8. Saturates at 250 in soc-100-idle.asc.
+# F100F3 BMS-published SoC: byte 4 raw → percent. Slope 10/25 = 0.4,
+# intercept -0.8, validated against nine dashboard anchors at every 10 %
+# step from 10 % to 90 % (all within 0.4 %). This is the dashboard's
+# "Shown SOC"; the UDS 0x2800 "Real SOC" reads ~0.5-0.8 % higher. Raw
+# saturates at 250 (99.2 %) at full charge.
 _SOC_SLOPE = 0.4
 _SOC_INTERCEPT = -0.8
+
+# F100F3 data[5] SOH candidate (TENTATIVE): raw × 0.4 %/bit, 0xFA (250) =
+# 100 %. Constant 0xFA across every capture on this pack. Kept as its own
+# slope (not aliased to _SOC_SLOPE) so a future divergence has one place to
+# change. See DOCUMENTATION.md F100F3 SOH candidate.
+_SOH_SLOPE = 0.4
 
 # F108 idle frames have no bits set; analyze treats that as skipped_zero
 # and stream needs nothing to clear, so the shared decoder handles it as
@@ -288,6 +296,13 @@ def decode(msg, emit, clear=_noop_clear):
             soc_pct = data[4] * _SOC_SLOPE + _SOC_INTERCEPT
             emit("pack.soc_raw", data[4], "")
             emit("pack.soc_pct", soc_pct, "%")
+            # data[5]: SOH candidate (TENTATIVE, 0xFA = 100 % on this pack).
+            # data[6]: series cell count (0x14 = 20). Surfaced for the offline
+            # analyzer; the live dashboard leaves SOH off until the decode is
+            # confirmed against a pack whose SOH differs from 100 %.
+            emit("pack.soh_raw", data[5], "")
+            emit("pack.soh_pct", data[5] * _SOH_SLOPE, "%")
+            emit("pack.series_cell_count", data[6], "")
             return "f100"
 
         if pgn == PGN_F102:
@@ -333,6 +348,11 @@ def decode(msg, emit, clear=_noop_clear):
             emit("bms.state.no_drive", 1 if b1 & 0x04 else 0, "")
             emit("bms.state.drive_mode", 1 if b1 & 0x20 else 0, "")
             emit("bms.state.contactors", 1 if b1 & 0x40 else 0, "")
+            # byte-1 bits 7..6 are a run/init status pair (0b11 = running,
+            # 0b10 = init); bit 6 alone is surfaced above as .contactors
+            # (BMS awake). Emitting the pair also surfaces bit 7, which no
+            # other channel carries.
+            emit("bms.state.run_state", (b1 >> 6) & 0x03, "")
             return "f106"
 
         if pgn == PGN_F107:

@@ -1,7 +1,7 @@
 # Solectrac BMS Diagnostic Port
 
 Reference for the diagnostic CAN port on the UDAN BMS shipped in the
-Solectrac e25 tractor (India 72V 300Ah variant). Covers wire protocol,
+Solectrac e25G tractor (India 72V 300Ah variant). Covers wire protocol,
 session lifecycle, and the Data Identifier (DID) map. Reverse-engineering
 provenance and unresolved investigations are in the Appendix.
 
@@ -148,7 +148,7 @@ for the same physical probe.
 | 6..7   | BE i16  | Signed pack current × 10 (A). **Positive = charging into pack, negative = discharging** — opposite sign convention from J1939 `F100F3` data[2..3] | `0xFFED` = −1.9 A (idle standby draw); +194 (`0x00C2`) during 120 V charging |
 | 8      | u8      | `0x00` padding                       | constant        |
 | 9      | u8      | Cell-mV spread (max − min)           | 4–15 mV; r ≈ 0.83 vs `0x2820`/`0x2828`; exact match ≈ 76 % of the time (small skew from staggered polls) |
-| 10     | u8      | Pack-current state code — CONFIRMED. Three observed values: **50 = discharging (drive)**, **51 = idle / brief transient**, **52 = actively charging**. Drive captures are dominated by 50 with 51 between current bursts; a multi-hour L1 charge is dominated by 52 (~87 %), 51 the remainder. Mirrored 99.9 % by `0x2810` byte 9. Also rules out max-temp raw (r = 0.0 vs `0x2830` top-1) | charging → mostly 52; discharge → mostly 50; idle → mostly 51 |
+| 10     | u8      | Raw state code — meaning **UNKNOWN**. Values 50–54 seen across the dual captures; it does **not** map cleanly to charge/discharge direction or to current magnitude. Examples: 52 appears in both ~19 A charging (L1 10→100 %) and ~19 A discharging (mowing); 50 only under heavier discharge; 53 under both 38 A L2 charging **and** idle (0 A) at high SOC/voltage (97.5 %, 82.7 V); 54 near-idle on L2. Derive charge/discharge from the signed current (bytes 6..7) instead. An earlier CONFIRMED {50 = discharge, 51 = idle, 52 = charge} reading fit the two short early captures but is contradicted by the longer L1/L2/idle ones. Mirrored 99.9 % by `0x2810` byte 9. | 50–54; not a clean direction/level indicator |
 | 11     | u8      | `0x06` constant (struct version tag) | constant        |
 
 ### Peak data — DID cluster `0x2820`/`0x2828`/`0x2830`/`0x2838` (UDAN `0x06`)
@@ -207,10 +207,9 @@ column in the iBMS System-state CSV.
 31 data bytes. The original interpretation (31 severity-level enums, one
 per fault category) **does not fit the wire data**: active-charge dual
 captures show several bytes carrying numeric measurements and counters, not
-severity enums. This was first visible in
-`data/dual-capture/dual-capture-charging-120.asc` (~215 s of L1/120 V
-charging at ~19 A), then repeated across 30,235 diagnostic polls in
-`dual-capture-charging-120-10p-to-100p.asc` (9.6% to 99.2% SOC).
+severity enums. This was first visible in a short ~215 s L1/120 V charge
+capture (~19 A), then repeated across 30,235 diagnostic polls in the full
+L1 10→100 % charge capture (9.6% to 99.2% SOC).
 
 Observed structure (144 polls in the short dual capture, no broadcast fault
 on F108F3, charger delivering ~19 A throughout; same byte roles in the long
@@ -263,7 +262,7 @@ incrementing past `0x02`) is needed to pin it down. The newer XLSX
 export *does* contain rich alarm-history data — 2,942 rows with
 `Alarm number > 0` spanning **8 distinct categories** (LowSoc Lvl 3,
 ChgOV, ChgPackOV, DchgTdiff, DchgOV, DchgPackOV, ChargerComm,
-ChgTdiff) — but the iBMS RTC is unset (see [[project_ibms_clock]])
+ChgTdiff) — but the iBMS RTC is unset,
 so XLSX timestamps cannot be aligned to a wire-trace clock. Resolving
 the byte-to-column order still requires a *time-aligned* dual capture
 where a fault transitions live on both the diagnostic-port frame and
@@ -423,7 +422,7 @@ returns an empty list when count is zero.
 ### Battery config — DID `0x0100` (CONFIRMED layout, partial field names)
 
 35-byte static payload, read once per session. Defines the pack's nameplate
-ratings and topology. Sample from `dual-capture-charging-120-10p-to-100p.asc`:
+ratings and topology. Sample from the full L1 10→100 % charge capture:
 
 ```
 06 0B B8 13 88 02 D0 05 DC 01 A0 00 14 00 14 00 07
@@ -489,7 +488,7 @@ capture):
 | BMS-internal DID (diag port)               | Broadcast PGN (vehicle bus)          | Quantity                                  |
 |--------------------------------------------|--------------------------------------|-------------------------------------------|
 | `0x2800` bytes 0..1 BE (SOC × 10)          | `F100F3` data[4]                     | SOC                                       |
-| `0x2800` bytes 4..5 BE (HV1 / pack V × 10) | `F100F3` data[1]                     | Pack terminal voltage                     |
+| `0x2800` bytes 4..5 BE (HV1 / pack V × 10) | `F100F3` data[0..1] BE                     | Pack terminal voltage                     |
 | `0x2800` bytes 6..7 BE (pack current)      | `F100F3` data[2..3], `FF2112` data[0]| Signed pack current (motor ctlr mirrors)  |
 | `0x0101` (20 × cell mV, BE u16)            | `F113F3`..`F13CF3` (per-cell PGNs)   | Per-cell voltages                         |
 | `0x0102` (7 × probe T)                     | `F155F3`..`F15EF3` (per-probe PGNs)  | Module temperatures                       |
@@ -878,15 +877,15 @@ System state 0x93.csv             — maps to DID 0x2800
 Temperatures 0x09.csv             — maps to DID 0x0102
 Voltages 0x08.csv                 — maps to DID 0x0101
 Device info. 0x92.csv             — Calibrating-mode + firmware/burn IDs + Charging-cycles counter + Up-time
-Device list 0x82.csv              — VIN, hardware-device count, per-device HWID + FWVerion
+Device list 0x82.csv              — VIN, hardware-device count, per-device HWID + FWVersion
 ```
 
 The two `Device …` sheets appear in newer XLSX exports
 (`<pack-serial>_<timestamp>.xlsx`) and are sampled at much lower
 cadence (~45 rows over a 7-day window) than the per-second telemetry
 sheets above. The XLSX export carries all 10 sheets in one file — the
-loose per-tag `.csv` form is the live "Data Storage" toggle (see
-[[project-ibms-csv-login]]).
+loose per-tag `.csv` form is the live "Data Storage" toggle (login-gated,
+unlike the History → XLSX export).
 
 ---
 
@@ -922,7 +921,7 @@ before any UI polling. The payload is too small to be firmware.
 
 The payload is **static across sessions** (CONFIRMED): the first frames of
 each `TransferData` chunk are byte-identical across five separate
-connection captures (`bms-connection.asc`, `-2`, `-3`, `-4`, `-5`):
+connection captures:
 
 ```
 36 01 → 01 00 3A BC ...
@@ -961,9 +960,8 @@ Cell volt / Temp) that wasn't screenshotted.
 - **`0x94 Charging` cluster — closed as decoded to the extent the iBMS
   itself decodes it.** All four CONFIRMED bits (`0x0900` byte 0 =
   "AC Chg"; `0x0901` bytes 10..13 = CC/CC2 Resistance sentinels;
-  `0x0902` all-zero) hold on L1 and L2 across full-sweep captures
-  (`dual-capture-charging-120-10p-to-100p.asc`,
-  `dual-capture-charging-240.asc`). The dynamic u16s at `0x0901` bytes
+  `0x0902` all-zero) hold on L1 and L2 across the full L1 10→100 % and
+  L2 240 V charge captures. The dynamic u16s at `0x0901` bytes
   0..1 BE / 4..5 BE don't map to any field the iBMS surfaces from this
   cluster — they're treated as opaque BMS-internal ADC counts. Further
   decode would require firmware reverse engineering, a separate research
@@ -979,7 +977,7 @@ Cell volt / Temp) that wasn't screenshotted.
   newer XLSX export *does* contain rich alarm history (2,942 rows
   with `Alarm number > 0` across 8 categories: LowSoc Lvl 3, ChgOV,
   ChgPackOV, DchgTdiff, DchgOV, DchgPackOV, ChargerComm, ChgTdiff),
-  but iBMS RTC drift (see [[project_ibms_clock]]) blocks
+  but iBMS RTC drift blocks
   timestamp-based alignment to a wire trace. Resolving the byte
   order requires a *time-aligned* dual capture where a fault
   transitions live on both the diagnostic-port frame and either

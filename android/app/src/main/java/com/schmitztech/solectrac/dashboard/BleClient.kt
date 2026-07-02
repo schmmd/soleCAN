@@ -14,6 +14,7 @@ import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelUuid
@@ -29,6 +30,11 @@ import java.util.UUID
  * reassembles length-prefixed framed messages from the notification stream.
  *
  * Reconnects automatically when disconnected, with exponential backoff.
+ *
+ * Threading: GATT callbacks arrive on binder threads, so all mutable state
+ * (gatt, rxBuffer, reconnectAttempts, wantConnected) is confined to the main
+ * thread — callbacks post to [handler] before touching it. Public methods
+ * must be called from the main thread.
  */
 @SuppressLint("MissingPermission")
 class BleClient(
@@ -43,20 +49,18 @@ class BleClient(
         fun onJson(json: String)
     }
 
-    enum class State { IDLE, SCANNING, CONNECTING, CONNECTED, DISCONNECTED, ERROR }
+    enum class State { IDLE, SCANNING, CONNECTING, CONNECTED, DISCONNECTED, BT_OFF, ERROR }
 
     private val handler = Handler(Looper.getMainLooper())
-    private val btManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
-    private val adapter: BluetoothAdapter? = btManager.adapter
+    private val adapter: BluetoothAdapter? =
+        (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
 
     private var scanCallback: ScanCallback? = null
     private var gatt: BluetoothGatt? = null
-    private var txChar: BluetoothGattCharacteristic? = null
 
     private val rxBuffer = ByteArrayBuilder()
     private var reconnectAttempts = 0
     private var wantConnected = false
-    private var lastDevice: BluetoothDevice? = null
 
     fun start() {
         wantConnected = true
@@ -65,23 +69,22 @@ class BleClient(
 
     fun stop() {
         wantConnected = false
+        handler.removeCallbacks(reconnectRunnable)
         stopScanInternal()
         gatt?.disconnect()
         gatt?.close()
         gatt = null
-        txChar = null
         rxBuffer.reset()
         notifyState(State.IDLE, "Stopped")
     }
 
     /** User-triggered: cancel any in-flight connection and start a fresh scan. */
     fun rescan() {
+        handler.removeCallbacks(reconnectRunnable)
         gatt?.disconnect()
         gatt?.close()
         gatt = null
-        txChar = null
         rxBuffer.reset()
-        lastDevice = null
         reconnectAttempts = 0
         wantConnected = true
         beginScan()
@@ -94,7 +97,8 @@ class BleClient(
         // invalidate the cached reference, leading to silent scan failures.
         val s = adapter?.bluetoothLeScanner
         if (adapter?.isEnabled != true || s == null) {
-            notifyState(State.ERROR, "Bluetooth off")
+            wantConnected = false
+            notifyState(State.BT_OFF, "Bluetooth is off")
             return
         }
         stopScanInternal()
@@ -159,7 +163,6 @@ class BleClient(
     // ── Connect & GATT ────────────────────────────────────────────────────────
 
     private fun connectTo(device: BluetoothDevice) {
-        lastDevice = device
         notifyState(State.CONNECTING, "Connecting to ${device.address}")
         gatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
     }
@@ -173,33 +176,54 @@ class BleClient(
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     g.close()
-                    gatt = null
-                    txChar = null
-                    rxBuffer.reset()
-                    notifyState(State.DISCONNECTED, "Disconnected (status $status)")
-                    if (wantConnected) scheduleReconnect()
+                    handler.post {
+                        // A stop()/rescan() may already have replaced this gatt;
+                        // only clean up if it's still ours.
+                        if (gatt === g) {
+                            gatt = null
+                            rxBuffer.reset()
+                            listener.onStateChange(
+                                State.DISCONNECTED, "Disconnected (status $status)"
+                            )
+                            if (wantConnected) scheduleReconnect()
+                        }
+                    }
                 }
             }
         }
 
         override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) {
+            // Proceed regardless of status: a failed negotiation just leaves the
+            // default 23-byte MTU, and frame reassembly copes with any chunk size.
             Log.i(TAG, "MTU=$mtu status=$status")
             g.discoverServices()
         }
 
         override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
-            val svc = g.getService(NUS_SVC)
-            val tx = svc?.getCharacteristic(NUS_TX)
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                notifyState(State.ERROR, "Service discovery failed ($status)")
+                g.disconnect()
+                return
+            }
+            val tx = g.getService(NUS_SVC)?.getCharacteristic(NUS_TX)
             if (tx == null) {
                 notifyState(State.ERROR, "NUS service not found")
                 g.disconnect()
                 return
             }
-            txChar = tx
-            g.setCharacteristicNotification(tx, true)
             val cccd = tx.getDescriptor(CCCD_UUID)
-            if (cccd != null) {
+            if (cccd == null) {
+                notifyState(State.ERROR, "CCCD descriptor missing")
+                g.disconnect()
+                return
+            }
+            g.setCharacteristicNotification(tx, true)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                g.writeDescriptor(cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+            } else {
+                @Suppress("DEPRECATION")
                 cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                @Suppress("DEPRECATION")
                 g.writeDescriptor(cccd)
             }
         }
@@ -207,22 +231,50 @@ class BleClient(
         override fun onDescriptorWrite(
             g: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int
         ) {
-            if (descriptor.uuid == CCCD_UUID) {
-                reconnectAttempts = 0
-                notifyState(State.CONNECTED, "Connected")
+            if (descriptor.uuid != CCCD_UUID) return
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                // Without notifications the connection is useless; drop it and
+                // let the reconnect path retry from a fresh scan.
+                notifyState(State.ERROR, "Notify subscribe failed ($status)")
+                g.disconnect()
+                return
             }
+            handler.post { reconnectAttempts = 0 }
+            notifyState(State.CONNECTED, "Connected")
         }
 
+        // API 33+ hands the payload straight to the callback. The two-arg
+        // overload below also still fires there, so it must bail out on 33+
+        // to avoid double-processing.
+        override fun onCharacteristicChanged(
+            g: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray
+        ) {
+            onNotification(characteristic, value)
+        }
+
+        @Deprecated("Deprecated in Java")
         override fun onCharacteristicChanged(
             g: BluetoothGatt, characteristic: BluetoothGattCharacteristic
         ) {
-            if (characteristic.uuid != NUS_TX) return
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) return
+            // Pre-33 the payload must be read out of the characteristic, which
+            // the stack reuses across notifications — copy it before the next
+            // notification overwrites it.
+            @Suppress("DEPRECATION")
             val value = characteristic.value ?: return
+            onNotification(characteristic, value.copyOf())
+        }
+    }
+
+    private fun onNotification(characteristic: BluetoothGattCharacteristic, value: ByteArray) {
+        if (characteristic.uuid != NUS_TX) return
+        handler.post {
             rxBuffer.append(value)
             drainFrames()
         }
     }
 
+    /** Main thread only. */
     private fun drainFrames() {
         while (true) {
             val frame = rxBuffer.takeFrame() ?: return
@@ -238,22 +290,24 @@ class BleClient(
                 rxBuffer.reset()
                 return
             }
-            handler.post { listener.onJson(s) }
+            listener.onJson(s)
         }
     }
 
     // ── Backoff ───────────────────────────────────────────────────────────────
+
+    private val reconnectRunnable = Runnable {
+        // Prefer fresh scan over reusing cached device — handles MAC randomization.
+        if (wantConnected) beginScan()
+    }
 
     private fun scheduleReconnect() {
         if (!wantConnected) return
         reconnectAttempts++
         // 1s, 2s, 4s, 8s, capped at 15s.
         val delayMs = (1000L shl minOf(reconnectAttempts - 1, 4)).coerceAtMost(15_000L)
-        handler.postDelayed({
-            if (!wantConnected) return@postDelayed
-            // Prefer fresh scan over reusing cached device — handles MAC randomization.
-            beginScan()
-        }, delayMs)
+        handler.removeCallbacks(reconnectRunnable)
+        handler.postDelayed(reconnectRunnable, delayMs)
     }
 
     private fun notifyState(state: State, detail: String) {
@@ -273,6 +327,7 @@ class BleClient(
  *
  * Wire format: [u16 big-endian length] [length bytes of payload].
  * Notifications may carry any byte boundary, so we buffer and emit whole frames.
+ * Not thread-safe: confined to the main thread by BleClient.
  */
 private class ByteArrayBuilder {
     private var buf = ByteArray(4096)

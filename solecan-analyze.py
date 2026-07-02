@@ -337,6 +337,7 @@ _ROUND_PRECISION = {
     "pack.current_a": 1,
     "pack.power_w": 1,
     "pack.soc_pct": 1,
+    "pack.soh_pct": 1,
     "pack.v_estimate": 3,
     "bms.limit.discharge_a": 2,
     "bms.limit.charge_a": 2,

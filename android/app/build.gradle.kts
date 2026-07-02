@@ -29,6 +29,7 @@ fun gitSha(): String {
         } else "unknown"
     } catch (_: Exception) { "unknown" }
 }
+val gitShaValue = gitSha()
 
 android {
     namespace = "com.schmitztech.solectrac.dashboard"
@@ -39,8 +40,8 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = 1
-        versionName = "1.0+${gitSha()}"
-        buildConfigField("String", "GIT_SHA", "\"${gitSha()}\"")
+        versionName = "1.0+$gitShaValue"
+        buildConfigField("String", "GIT_SHA", "\"$gitShaValue\"")
     }
 
     buildTypes {
@@ -66,5 +67,4 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.activity:activity-ktx:1.9.2")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.4")
 }

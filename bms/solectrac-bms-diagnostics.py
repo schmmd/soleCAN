@@ -427,8 +427,8 @@ class BmsState:
     pack_a: Optional[float] = None
     cell_spread_mv: Optional[int] = None    # 0x2800 byte 9 — mirrored by 0x2810 byte 8
     state_extra: tuple = ()                 # 0x2800 bytes 8, 10 (byte 8 padding)
-    state_code: Optional[int] = None        # 0x2800 byte 10 raw
-    state_name: Optional[str] = None        # decoded: charging / idle / discharging
+    state_code: Optional[int] = None        # 0x2800 byte 10 raw — meaning UNKNOWN (50–54)
+    flow: Optional[str] = None              # charging / discharging / idle, from pack_a sign
 
     # Counters
     lifetime_counter: Optional[int] = None
@@ -439,11 +439,20 @@ class BmsState:
 
     # Energy (DID 0x2810)
     cell_count: Optional[int] = None
-    cycle_count: Optional[int] = None
+    cycles_raw: Optional[int] = None        # 0x2810 bytes 2..3 BE (= 7); vendor
+                                            # "Charging cycles" = 0 contradicts a
+                                            # cycle-count reading — meaning UNKNOWN
     avg_cell_mv: Optional[int] = None       # 0x2810 bytes 4..5 BE
     avg_cell_temp_c: Optional[int] = None   # 0x2810 byte 6, °C = raw − 50
-    charge_ah: Optional[float] = None
-    discharge_ah: Optional[float] = None
+    charge_ah: Optional[float] = None       # lifetime accumulator, ×1 Ah/LSB
+    discharge_ah: Optional[float] = None    # lifetime accumulator, ×1 Ah/LSB
+
+    # Session baselines: first value of each lifetime counter seen this
+    # connection, so the UI can show a per-session delta, not just the total.
+    charge_ah_base: Optional[float] = None
+    discharge_ah_base: Optional[float] = None
+    charge_time_s_base: Optional[int] = None
+    discharge_time_s_base: Optional[int] = None
 
     # Cells (DID 0x0101) and temps (DID 0x0102)
     cell_mv: list = field(default_factory=list)
@@ -554,15 +563,19 @@ class BmsState:
                 "avg_cell_temp_c": self.avg_cell_temp_c,
                 "state_extra": list(self.state_extra),
                 "state_code": self.state_code,
-                "state_name": self.state_name,
+                "flow": self.flow,
                 "cell_count": self.cell_count,
-                "cycle_count": self.cycle_count,
+                "cycles_raw": self.cycles_raw,
                 "charge_ah": self.charge_ah,
                 "discharge_ah": self.discharge_ah,
+                "charge_ah_session": _delta(self.charge_ah, self.charge_ah_base, 1),
+                "discharge_ah_session": _delta(self.discharge_ah, self.discharge_ah_base, 1),
                 "lifetime_counter": self.lifetime_counter,
                 "session_uptime_s": self.session_uptime_s,
                 "charge_time_s": self.charge_time_s,
                 "discharge_time_s": self.discharge_time_s,
+                "charge_time_s_session": _delta(self.charge_time_s, self.charge_time_s_base, None),
+                "discharge_time_s_session": _delta(self.discharge_time_s, self.discharge_time_s_base, None),
                 "heartbeat": self.heartbeat,
             },
             "cells": {
@@ -625,13 +638,40 @@ def _be_u32(data: bytes, off: int) -> int:
     return (data[off] << 24) | (data[off + 1] << 16) | (data[off + 2] << 8) | data[off + 3]
 
 
-STATE_CODE_NAMES = {50: "discharging", 51: "idle", 52: "charging"}
-# iBMS XLSX `System state 0x93` exposes three vendor-labeled values:
-# `Charging` (= code 52 here), `Discharging` (= code 50), and `Self Check`
-# (1 row in 14,979 — a one-shot boot/init state; wire code value unobserved
-# in our captures). Wire code 51 ("idle") doesn't map to a distinct iBMS
-# label — the iBMS appears to fold brief 51 transitions into the previous
-# Charging or Discharging display.
+def _delta(current, base, ndigits):
+    """current - base, or None if either is missing. Rounds to ``ndigits``
+    (pass None to keep an integer)."""
+    if current is None or base is None:
+        return None
+    d = current - base
+    return d if ndigits is None else round(d, ndigits)
+
+
+# 0x2800 byte 10 is a raw "state code" whose meaning is UNKNOWN. Across the
+# dual captures it takes 50–54 and does NOT map to charge/discharge direction:
+# code 52 appears in both ~19 A charging (L1 10→100 %) and ~19 A discharging
+# (mowing); 53/54 appear only under L2 (240 V) charging; 50 only under heavier
+# discharge; 51 near idle. The pattern tracks current magnitude / charge stage,
+# not direction. An earlier {50: discharging, 51: idle, 52: charging} mapping
+# fit the two short early captures but is contradicted by the longer/L2 ones.
+# Charge/discharge/idle is therefore derived from the signed pack current
+# (0x2800 bytes 6..7 = pack_a) instead — see current_flow().
+
+# Below this magnitude (A) the pack is treated as idle rather than actively
+# charging or discharging.
+FLOW_IDLE_THRESHOLD_A = 2.0
+
+
+def current_flow(pack_a):
+    """Charge / discharge / idle from the signed pack current (positive =
+    into pack = charging). Reliable, unlike the byte-10 state code."""
+    if pack_a is None:
+        return None
+    if pack_a > FLOW_IDLE_THRESHOLD_A:
+        return "charging"
+    if pack_a < -FLOW_IDLE_THRESHOLD_A:
+        return "discharging"
+    return "idle"
 
 
 def decode_pack_state(data: bytes, st: BmsState):
@@ -643,8 +683,8 @@ def decode_pack_state(data: bytes, st: BmsState):
     #                 negative = discharging (opposite of F100F3 J1939)
     #   8     u8      0x00 padding
     #   9     u8      cell-mV spread (max − min); r ≈ 0.83 vs 0x2820/0x2828
-    #   10    u8      Pack-current state code (TENTATIVE): 50 = discharging,
-    #                 51 = idle / brief transient, 52 = actively charging.
+    #   10    u8      Raw state code, meaning UNKNOWN (50–54 observed; does not
+    #                 map to charge/discharge — see current_flow() note above).
     #                 Mirrored 99.9 % by 0x2810 byte 9.
     #   11    u8      0x06 constant (struct version tag)
     if len(data) < 12:
@@ -656,7 +696,7 @@ def decode_pack_state(data: bytes, st: BmsState):
     st.cell_spread_mv = data[9]
     st.state_extra = (data[8], data[10])
     st.state_code = data[10]
-    st.state_name = STATE_CODE_NAMES.get(data[10], f"unknown({data[10]})")
+    st.flow = current_flow(st.pack_a)
 
 
 def decode_times(data: bytes, st: BmsState):
@@ -667,12 +707,17 @@ def decode_times(data: bytes, st: BmsState):
     st.charge_time_s = _be_u32(data, 8)
     st.discharge_time_s = _be_u32(data, 12)
     st.heartbeat = data[3]
+    if st.charge_time_s_base is None:
+        st.charge_time_s_base = st.charge_time_s
+    if st.discharge_time_s_base is None:
+        st.discharge_time_s_base = st.discharge_time_s
 
 
 def decode_energy(data: bytes, st: BmsState):
     # 0x2810 — 20 data bytes:
     #   0..1   BE u16  cell count (= 20)
-    #   2..3   BE u16  cycle count (= 7)
+    #   2..3   BE u16  UNKNOWN (= 7; vendor "Charging cycles" = 0 contradicts a
+    #                   cycle-count reading)
     #   4..5   BE u16  average cell voltage (mV)  — r ≈ 1.0 vs mean(0x0101)
     #   6      u8      average cell temperature (°C = raw − 50)
     #   7      u8      0x00 padding
@@ -685,13 +730,17 @@ def decode_energy(data: bytes, st: BmsState):
     if len(data) < 20:
         return
     st.cell_count = _be_u16(data, 0)
-    st.cycle_count = _be_u16(data, 2)
+    st.cycles_raw = _be_u16(data, 2)
     st.avg_cell_mv = _be_u16(data, 4)
     st.avg_cell_temp_c = data[6] - 50
     if st.cell_spread_mv is None:
         st.cell_spread_mv = data[8]
     st.charge_ah = float(_be_u32(data, 12))
     st.discharge_ah = float(_be_u32(data, 16))
+    if st.charge_ah_base is None:
+        st.charge_ah_base = st.charge_ah
+    if st.discharge_ah_base is None:
+        st.discharge_ah_base = st.discharge_ah
 
 
 def decode_cells(data: bytes, st: BmsState):
@@ -1297,9 +1346,9 @@ function renderOverview(s) {
   // Power: pack_v × pack_a, signed (positive while charging).
   const powerW = (p.pack_v != null && p.pack_a != null)
     ? p.pack_v * p.pack_a : null;
-  const stateLabel = p.state_name
-    ? `<span class="badge ${p.state_name === 'charging' ? 'ok'
-          : p.state_name === 'discharging' ? 'warn' : ''}">${p.state_name}</span>`
+  const stateLabel = p.flow
+    ? `<span class="badge ${p.flow === 'charging' ? 'ok'
+          : p.flow === 'discharging' ? 'warn' : ''}">${p.flow}</span>`
     : dash;
   $('ov-bignums').innerHTML = [
     bigNum('SOC', fmtNum(p.soc_pct, 1), '%', stateLabel),
@@ -1311,12 +1360,17 @@ function renderOverview(s) {
 
   $('ov-counters').innerHTML = [
     row('Cells', fmtInt(p.cell_count)),
-    row('Cycles', fmtInt(p.cycle_count)),
+    row('State code', p.state_code == null ? dash : `${p.state_code} (raw, meaning unknown)`),
+    row('Charged (session)', fmtNum(p.charge_ah_session, 1, 'Ah')),
+    row('Discharged (session)', fmtNum(p.discharge_ah_session, 1, 'Ah')),
     row('Charged (lifetime)', fmtNum(p.charge_ah, 0, 'Ah')),
     row('Discharged (lifetime)', fmtNum(p.discharge_ah, 0, 'Ah')),
     row('Session uptime', fmtDur(p.session_uptime_s)),
+    row('Charge time (session)', fmtDur(p.charge_time_s_session)),
+    row('Discharge time (session)', fmtDur(p.discharge_time_s_session)),
     row('Charge time (Σ)', fmtDur(p.charge_time_s)),
     row('Discharge time (Σ)', fmtDur(p.discharge_time_s)),
+    row('Cycles (raw, unverified)', fmtInt(p.cycles_raw)),
     row('Heartbeat', p.heartbeat == null ? dash : '0x' + p.heartbeat.toString(16).padStart(2, '0').toUpperCase()),
   ].join('');
 
