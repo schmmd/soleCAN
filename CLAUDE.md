@@ -53,6 +53,16 @@ presentation in the consumer.
   serves a localhost dashboard. Independent of the main-bus tools and the proto
   module; its DID map is in `bms/README.md`.
 
+### Kelly e-hydraulic serial monitor (`kelly/`)
+- `solectrac-kelly-monitor.py` — read-only monitor for the e-hydraulic **Kelly
+  KLS pump controller**, which is *not* on either CAN bus. It polls the Kelly
+  "ETS" serial protocol over a USB-serial adapter (SM-4P port) and decodes the
+  live telemetry, with plain-text, JSON, and `--tui` output. Independent of the
+  proto module and every other tool. Read-only by construction: a single
+  transmit choke-point allows only the monitor/version query commands, so it
+  cannot write controller config. Connector pinout, wire protocol, and field
+  map are in `kelly/README.md`.
+
 ### Embedded firmware (`embedded/esp32-s3/`)
 ESP32-S3 firmware that re-implements the main-bus J1939 decode in C++ and
 exposes it four ways: WiFi HTML dashboard, JSON endpoint, BLE (Nordic UART
@@ -88,9 +98,9 @@ source isn't present in the build context.
 ## Commands
 
 ### Python tooling
-`pyproject.toml` (managed with `uv`) is the full dependency set, including BLE
-(`bless`) and the Canalyst-II interface. `requirements.txt` is the lighter set
-sufficient for the analyzer and stream TUI (`python-can`, `pyserial`, `rich`).
+`pyproject.toml` (managed with `uv`) is the dependency set: `python-can`,
+`pyserial`, and `rich` for the analyzer and stream TUI, plus optional extras
+for BLE (`bless`) and the Canalyst-II interface.
 
 ```bash
 # Offline decode of captures -> CSVs in OUTDIR
@@ -150,3 +160,5 @@ validated against real captures and live injection on the tractor.
   cluster hardware, vendor error-code tables.
 - `bms/README.md` — BMS UDS diagnostic port: wire protocol, session lifecycle,
   DID map.
+- `kelly/README.md` — e-hydraulic Kelly KLS serial diagnostic port: SM-4P
+  pinout, ETS wire protocol, monitor field map, and live findings.
