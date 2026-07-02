@@ -202,6 +202,53 @@ Clutch"); the wet clutch requires hydraulic pressure from the e-hydraulic pump
 to engage and oil flow for cooling, which is why the pump must be on for PTO
 operation.
 
+#### E-hydraulic Kelly serial diagnostics — CONFIRMED
+
+The KLS's 4-pin diagnostic connector is an **RS-232 serial port** speaking
+Kelly's proprietary protocol, not CAN. Kelly's Bluetooth serial adapter plus
+the Kelly Android app ("AC Monitor" screen) gives the same live telemetry as
+the Windows "KLS User Program". Representative snapshot, pump running at
+the low speed setpoint:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ AC Calibration                AC Monitor                        │
+├─────────────────────────────────────────────────────────────────┤
+│ Error Status   (empty — no active faults)                       │
+├──────────────────────┬─────────────────────┬────────────────────┤
+│ TPS Pedel        253 │ Hall A            1 │ Setting Dir      0 │
+│ Brake Pedel        0 │ Hall B            1 │ Actual Dir       0 │
+│ Brake Switch       1 │ Hall C            0 │ Brake Switch2    0 │
+│ Foot Switch        0 │ B+ Volt          77 │ Low Speed        1 │
+│ Forward Switch     1 │ Motor Temp       17 │ Motor Speed   2427 │
+│ Reversed           0 │ Controller Temp   7 │ Phase Current   25 │
+└──────────────────────┴─────────────────────┴────────────────────┘
+```
+
+Facts established from live monitoring:
+
+- **Powered from the traction pack.** B+ reads pack voltage (77 V observed
+  mid-SOC), consistent with the F100F3 pack-voltage decode on the main bus.
+- **Two-setpoint speed control, not throttle-modulated.** The dash
+  hydraulic on/off switch works through the throttle-pot input (TPS):
+  it reads 0 with the switch off (pump stopped) and a fixed ~253/255
+  full-scale command with it on. Pump speed is selected by the Kelly
+  **"Low Speed" digital input**: Low Speed asserted → **~2400 RPM**;
+  deasserted → **~2800 RPM** (overshoots on the upward step before the
+  speed loop settles).
+- **The dash lift switch is the speed selector.** Flipping the lift switch
+  deasserts Low Speed and moves the pump to the high setpoint — this is the
+  "LOW/HIGH speed-selection switch" of schematic 5.11.
+- **Direction is fixed forward** (Forward Switch asserted; commanded and
+  actual direction always agree).
+- **Motor and controller temperature sensors are fitted and live** (both
+  track warm-up in °C).
+- Steady-state phase current with the pump unloaded is **22–25 A** at both
+  setpoints.
+- The Kelly **Brake Switch input reads asserted** whenever the controller
+  is awake — including with the hydraulic switch off and the pump stopped,
+  which rules out the hydraulic-motor on/off switch as its source.
+
 ### Bus termination
 
 Bus measures **40 Ω** across CAN_H/CAN_L at the OBD-II port (key off, all nodes
