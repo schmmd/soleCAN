@@ -31,13 +31,14 @@ telemetry block. Flash config is a separate 512-byte read/write command set.
 The community `kelly-connect-oss` project reimplements this protocol and
 documents the field offsets.
 
-**Signal levels are TENTATIVE.** The manual routes the SM-4P through a separate
-Kelly "RS232 converter" to reach a DB9, and the Tx pin idles at a positive
-~3–5 V — both point to a logic-level UART rather than bipolar RS-232. Scope
-pin 2 before wiring a reader: positive idle means TTL (use a 5 V↔3.3 V level
-shifter into an ESP32); negative idle means true RS-232 (use a MAX3232). The
-controller only talks with PWR above ~18 V, so telemetry is available only when
-the tractor is powered.
+**Signal level is logic-level (TTL) UART, not bipolar RS-232 — CONFIRMED.** A
+full bidirectional monitor session succeeded through a bare CH340 (TTL)
+USB-serial adapter: the controller received the query commands and returned
+valid checksummed frames, which a TTL adapter could not do against an RS-232
+port. So a plain TTL USB-UART works directly and no MAX3232 is needed. The exact
+swing (3.3 V vs 5 V) is unmeasured and matters only when driving an ESP32 GPIO —
+level-shift if it turns out to be 5 V. The controller only talks with PWR above
+~18 V, so telemetry is available only when the tractor is powered.
 
 The protocol is single-master request/response — sniff passively or be the only
 talker. The flash-write command set can misconfigure the controller; capture
