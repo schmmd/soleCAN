@@ -131,8 +131,8 @@ stays asserted (1) as it does whenever the controller is awake.
 ## The monitor tool
 
 `solectrac-kelly-monitor.py` polls the three monitor commands over a USB-serial
-adapter and prints the decoded block — as plain text, JSON, or a `--tui` view
-laid out like the AC Monitor screen above.
+**or Bluetooth** adapter and prints the decoded block — as plain text, JSON, or
+a `--tui` view laid out like the AC Monitor screen above.
 
 ### Read-only by design
 
@@ -163,6 +163,34 @@ python3 solectrac-kelly-monitor.py --port /dev/cu.usbserial-XXXX --json
 
 Needs `pyserial`; `--tui` also needs `rich`. Both are declared in
 `../pyproject.toml` (`uv sync`, or `pip install pyserial rich`).
+
+### Bluetooth (SPP)
+
+The Kelly Bluetooth adapter is a Classic **SPP** serial bridge, so no special
+mode is needed — on macOS it appears as a serial port named after the device
+(e.g. `/dev/cu.26061702`); just pass it as `--port`. Confirmed working
+end-to-end (a CH340 USB adapter and this SPP adapter decode identically).
+
+Bluetooth links are less steady than USB, so the reader is built to cope:
+
+- **Warmup.** Opening the port brings the SPP link up, which takes a second or
+  two; the first few polls miss and are tolerated silently (a one-line "waiting
+  for controller…" note, not an error). `--once` waits through warmup.
+- **Auto-reconnect.** If the link drops mid-session, the reader reopens the port
+  and continues rather than crashing.
+
+macOS gotchas, learned the hard way:
+
+- **Find the right port.** The adapter's port is named after its device name
+  (e.g. `/dev/cu.26061702`, from `ls /dev/cu.*`).
+- **The dashboard's "Connected → Not Connected" flicker is normal.** A macOS SPP
+  link is only held while an app has the port open, so clicking Connect in
+  Bluetooth Settings shows Connected for a second and then drops. Don't fight it
+  — the link comes up (and stays up) when the tool opens the port; the Settings
+  pane can't hold it.
+- **One host at a time.** These adapters accept a single connection, so
+  disconnect the phone / Kelly app (turn the phone's Bluetooth off) before the
+  Mac can use it.
 
 ### Validate before trusting the decode
 

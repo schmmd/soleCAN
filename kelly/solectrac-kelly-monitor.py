@@ -157,15 +157,36 @@ class Monitor:
 
 class KellyReader:
     def __init__(self, port: str, baud: int = BAUD, read_timeout: float = 0.6):
+        self.port = port
+        self.baud = baud
         self.read_timeout = read_timeout
-        self.ser = serial.Serial(
-            port=port,
-            baudrate=baud,
+        self.ser = self._open()
+
+    def _open(self) -> "serial.Serial":
+        return serial.Serial(
+            port=self.port,
+            baudrate=self.baud,
             bytesize=serial.EIGHTBITS,
             parity=serial.PARITY_NONE,
             stopbits=serial.STOPBITS_ONE,
             timeout=0.15,
         )
+
+    def reopen(self, retries: int = 5, delay: float = 1.0) -> None:
+        """Close and reopen the port — used to recover a dropped Bluetooth link."""
+        try:
+            self.ser.close()
+        except Exception:
+            pass
+        last = None
+        for _ in range(retries):
+            try:
+                self.ser = self._open()
+                return
+            except serial.SerialException as e:
+                last = e
+                time.sleep(delay)
+        raise KellyError(f"could not reopen {self.port}: {last}")
 
     def close(self) -> None:
         self.ser.close()
@@ -220,6 +241,17 @@ class KellyReader:
         for cmd in MONITOR_COMMANDS:
             block += self._query(cmd)
         return Monitor.decode(block)
+
+    def read_monitor_safe(self) -> Monitor:
+        """read_monitor, but transparently reopen the port if the underlying
+        link dropped (Bluetooth SPP in particular). A dropped link surfaces as
+        a serial error; a merely-late/garbled frame surfaces as KellyError.
+        Either way the caller just retries — the reconnect happens here."""
+        try:
+            return self.read_monitor()
+        except serial.SerialException as e:
+            self.reopen()  # raises KellyError if it truly can't come back
+            raise KellyError(f"link reset ({e}); reconnected") from e
 
 
 def format_block(mon: Monitor, version: str, when: float) -> str:
@@ -297,17 +329,22 @@ def run_tui(reader: "KellyReader", interval: float, once: bool) -> int:
 
     version = ""
     try:
-        version = reader.code_version()
-    except KellyError:
-        pass
-
-    try:
         with Live(console=console, screen=not once, auto_refresh=False) as live:
             while True:
                 try:
-                    live.update(render(reader.read_monitor(), version), refresh=True)
+                    mon = reader.read_monitor_safe()
                 except KellyError as e:
-                    live.update(Text(f"read error: {e}", style="red"), refresh=True)
+                    # warmup / dropped-and-reconnecting link — keep waiting
+                    live.update(Text(f"waiting for controller… ({e})",
+                                     style="yellow"), refresh=True)
+                    time.sleep(interval)
+                    continue
+                if not version:
+                    try:
+                        version = reader.code_version()
+                    except (KellyError, serial.SerialException):
+                        version = ""
+                live.update(render(mon, version), refresh=True)
                 if once:
                     break
                 time.sleep(interval)
@@ -329,11 +366,12 @@ def list_serial_ports() -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Read-only live monitor for the Solectrac Kelly KLS "
-        "e-hydraulic pump controller over USB serial.",
+        "e-hydraulic pump controller over a USB-serial or Bluetooth-SPP adapter.",
     )
     parser.add_argument(
         "-p", "--port",
-        help="serial device (e.g. /dev/cu.usbserial-XXXX). "
+        help="serial device — a USB adapter (e.g. /dev/cu.usbserial-XXXX) or a "
+        "Bluetooth SPP adapter, which appears as /dev/cu.<name>. "
         "Omit to list available ports.",
     )
     parser.add_argument("-b", "--baud", type=int, default=BAUD,
@@ -374,25 +412,47 @@ def main() -> int:
 
     try:
         version = ""
-        try:
-            version = reader.code_version()
-        except KellyError:
-            pass  # version is a nicety; keep going for telemetry
-
+        misses = 0
         while True:
             now = time.time()
             try:
-                mon = reader.read_monitor()
+                mon = reader.read_monitor_safe()
             except KellyError as e:
-                print(f"read error: {e}", file=sys.stderr)
+                # Bluetooth links take a moment to come up, and can open "silent"
+                # (port opens but no bytes flow). Show progress, and after a
+                # stretch of silence reopen the port to re-establish the link.
+                misses += 1
+                secs = misses * args.interval
+                if misses == 3:
+                    print("waiting for controller frames (a Bluetooth link "
+                          "takes a moment to come up)…", file=sys.stderr)
+                elif not args.once and misses % 20 == 0:
+                    print(f"still no frames after ~{secs:.0f}s — reopening the "
+                          "port to re-establish the link…", file=sys.stderr)
+                    try:
+                        reader.reopen()
+                    except KellyError:
+                        pass
+                if args.once and misses >= 20:
+                    print(f"no valid frames after {misses} tries: {e}",
+                          file=sys.stderr)
+                    return 1
+                time.sleep(args.interval)
+                continue
+
+            misses = 0
+            if not version:  # fetch lazily, once the link is up
+                try:
+                    version = reader.code_version()
+                except (KellyError, serial.SerialException):
+                    version = ""
+            if args.json:
+                print(to_json(mon, version, now), flush=True)
             else:
-                if args.json:
-                    print(to_json(mon, version, now), flush=True)
-                else:
-                    print(format_block(mon, version, now), flush=True)
-                    if args.raw:
-                        print(f"  raw             : {mon.raw.hex()}", flush=True)
-                    print(flush=True)
+                print(format_block(mon, version, now), flush=True)
+                if args.raw:
+                    print(f"  raw             : {mon.raw.hex()}", flush=True)
+                print(flush=True)
             if args.once:
                 break
             time.sleep(args.interval)
