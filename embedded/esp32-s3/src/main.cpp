@@ -237,21 +237,11 @@ struct PackState {
     int8_t  temp_spread_c = -1;
 };
 
+// Raw F106 state bitmaps. The individual bits are decoded downstream (see
+// dashboard.html B0_NAMES/B1_NAMES and solecan_proto F106), not here.
 struct BmsStateFlags {
     uint8_t byte0 = 0, byte1 = 0;
-    bool output_enable   : 1;
-    bool main_contactor  : 1;
-    bool operating       : 1;
-    bool standby         : 1;
-    bool charging        : 1;
-    bool no_drive        : 1;
-    bool drive_mode      : 1;
-    bool awake           : 1;
-    bool valid           : 1;
-    BmsStateFlags() : output_enable(false), main_contactor(false),
-        operating(false), standby(false), charging(false),
-        no_drive(false), drive_mode(false), awake(false),
-        valid(false) {}
+    bool    valid = false;
 };
 
 struct BmsLimits {
@@ -275,7 +265,9 @@ struct MotorState {
     uint16_t rpm_magnitude = 0;
     int8_t   direction     = 0;
     uint8_t  range    = 1;
-    uint8_t  torque_raw  = 0;
+    // LE u16: commanded effort magnitude; peaks past 255 under hard
+    // acceleration (observed 262), so a single byte would wrap.
+    uint16_t torque_raw  = 0;
     int8_t   controller_temp_c = INT8_MIN;
     int8_t   motor_temp_c      = INT8_MIN;
     bool     valid             = false;
@@ -642,17 +634,9 @@ void decodeCAN(uint32_t can_id, const uint8_t* raw, uint8_t len) {
 
         } else if (pgn == PGN_F106) {
             if (allZero(d)) return;
-            g_bms_state.byte0          = d[0];
-            g_bms_state.byte1          = d[1];
-            g_bms_state.output_enable  = (d[0] & 0x01) != 0;
-            g_bms_state.main_contactor = (d[0] & 0x04) != 0;
-            g_bms_state.operating      = (d[0] & 0x40) != 0;
-            g_bms_state.standby        = (d[0] & 0x80) != 0;
-            g_bms_state.charging       = (d[1] & 0x08) != 0;
-            g_bms_state.no_drive       = (d[1] & 0x04) != 0;
-            g_bms_state.drive_mode     = (d[1] & 0x20) != 0;
-            g_bms_state.awake          = (d[1] & 0x40) != 0;
-            g_bms_state.valid          = true;
+            g_bms_state.byte0 = d[0];
+            g_bms_state.byte1 = d[1];
+            g_bms_state.valid = true;
 
         } else if (pgn == PGN_F107) {
             if (allZero(d)) return;
@@ -701,7 +685,7 @@ void decodeCAN(uint32_t can_id, const uint8_t* raw, uint8_t len) {
         g_motor.rpm_signed         = dir * rpm_mag;
         g_motor.direction          = dir;
         g_motor.range         = ((d[7] >> 4) & 0x0F) + 1;
-        g_motor.torque_raw       = d[0];
+        g_motor.torque_raw       = le16(d[0], d[1]);
         if (d[4]) g_motor.controller_temp_c = (int8_t)(d[4] - TEMP_OFFSET_C);
         if (d[5]) g_motor.motor_temp_c      = (int8_t)(d[5] - TEMP_OFFSET_C);
         g_motor.valid = true;
@@ -919,19 +903,12 @@ String buildJson(bool pretty = true, bool minimal = false) {
 
     // BMS state
     if (g_bms_state.valid) {
+        // Raw F106 bitmaps; the dashboard decodes the individual bits. Sent
+        // in the minimal (BLE) payload too — the dashboard's BMS State panel
+        // reads only these two bytes.
         auto st = doc["bms"]["state"].to<JsonObject>();
-        if (!minimal) {
-            st["byte0"] = g_bms_state.byte0;
-            st["byte1"] = g_bms_state.byte1;
-        }
-        st["output_enable"]  = g_bms_state.output_enable  ? 1 : 0;
-        st["main_contactor"] = g_bms_state.main_contactor ? 1 : 0;
-        st["operating"]      = g_bms_state.operating      ? 1 : 0;
-        st["precharge"]      = g_bms_state.standby        ? 1 : 0;
-        st["charging"]       = g_bms_state.charging       ? 1 : 0;
-        st["no_drive"]       = g_bms_state.no_drive       ? 1 : 0;
-        st["drive_mode"]     = g_bms_state.drive_mode     ? 1 : 0;
-        st["awake"]          = g_bms_state.awake          ? 1 : 0;
+        st["byte0"] = g_bms_state.byte0;
+        st["byte1"] = g_bms_state.byte1;
     }
 
     // BMS current limits
@@ -975,16 +952,6 @@ String buildJson(bool pretty = true, bool minimal = false) {
             mot["direction"]     = g_motor.direction;
             mot["range"]    = g_motor.range;
             mot["torque_raw"] = g_motor.torque_raw;
-            // Ground speed from RPM × range (Turf/Industrial tire calibration,
-            // per Operator Manual p34; Agri tires would need different coeffs).
-            if (g_motor.range >= 1 && g_motor.range <= 3) {
-                static const float KMH_PER_RPM[3] = {
-                    5.7f / 2800.0f, 8.6f / 2800.0f, 17.0f / 2800.0f
-                };
-                float kmh = g_motor.rpm_magnitude * KMH_PER_RPM[g_motor.range - 1];
-                addFloat(mot, "speed_kmh", kmh, 2);
-                addFloat(mot, "speed_mph", kmh * 0.6213712f, 2);
-            }
             if (g_motor.controller_temp_c != INT8_MIN)
                 mot["controller_temp_c"] = g_motor.controller_temp_c;
             if (g_motor.motor_temp_c != INT8_MIN)
