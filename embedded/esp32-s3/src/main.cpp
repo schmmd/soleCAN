@@ -679,6 +679,10 @@ void decodeCAN(uint32_t can_id, const uint8_t* raw, uint8_t len) {
     } else if (src == SRC_MOTOR && pgn == PGN_FF21) {
         uint16_t rpm_raw  = le16(d[2], d[3]);
         int      rpm_mag  = (int)rpm_raw - RPM_BIAS;
+        // Raw can jitter a bit below the zero-RPM bias at standstill; without
+        // the clamp the uint16_t cast below would wrap a small negative to
+        // ~65000 RPM (and a garbage speed).
+        if (rpm_mag < 0) rpm_mag = 0;
         uint8_t  fnr      = d[7] & 0x0F;
         int8_t   dir      = (fnr == 0x4) ? 1 : (fnr == 0x8) ? -1 : 0;
         g_motor.rpm_magnitude      = (uint16_t)rpm_mag;
