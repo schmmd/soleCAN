@@ -1415,7 +1415,7 @@ class BleServerCb : public BLEServerCallbacks {
 };
 
 void bleInit() {
-    BLEDevice::init("tractor");
+    BLEDevice::init(MDNS_NAME);
     BLEDevice::setMTU(517);
 
     g_ble_server = BLEDevice::createServer();
