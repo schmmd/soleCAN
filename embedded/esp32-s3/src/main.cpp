@@ -225,13 +225,12 @@ struct BmsStateFlags {
     bool operating       : 1;
     bool standby         : 1;
     bool charging        : 1;
-    bool no_drive        : 1;
     bool drive_mode      : 1;
     bool awake           : 1;
     bool valid           : 1;
     BmsStateFlags() : output_enable(false), main_contactor(false),
         operating(false), standby(false), charging(false),
-        no_drive(false), drive_mode(false), awake(false),
+        drive_mode(false), awake(false),
         valid(false) {}
 };
 
@@ -621,7 +620,6 @@ void decodeCAN(uint32_t can_id, const uint8_t* raw, uint8_t len) {
             g_bms_state.operating      = (d[0] & 0x40) != 0;
             g_bms_state.standby        = (d[0] & 0x80) != 0;
             g_bms_state.charging       = (d[1] & 0x08) != 0;
-            g_bms_state.no_drive       = (d[1] & 0x04) != 0;
             g_bms_state.drive_mode     = (d[1] & 0x20) != 0;
             g_bms_state.awake          = (d[1] & 0x40) != 0;
             g_bms_state.valid          = true;
@@ -892,7 +890,6 @@ String buildJson(bool pretty = true, bool minimal = false) {
         st["operating"]      = g_bms_state.operating      ? 1 : 0;
         st["precharge"]      = g_bms_state.standby        ? 1 : 0;
         st["charging"]       = g_bms_state.charging       ? 1 : 0;
-        st["no_drive"]       = g_bms_state.no_drive       ? 1 : 0;
         st["drive_mode"]     = g_bms_state.drive_mode     ? 1 : 0;
         st["awake"]          = g_bms_state.awake          ? 1 : 0;
     }
