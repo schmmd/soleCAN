@@ -44,6 +44,24 @@
 #define WIFI_PASS ""
 #endif
 
+// ── CAN transmit / bus mode ───────────────────────────────────────────────────
+// Safe by default: both CAN controllers come up in *listen-only* mode, so the
+// hardware physically cannot drive the bus — no ACKs, no error frames, no
+// injection. This makes the stock firmware a true passive tap; a bug in a
+// transmit path can't perturb the bus because the silicon never drives a bit.
+//
+// Build with -DCAN_ALLOW_TX to switch both controllers to NORMAL mode. That
+// makes them ACK received frames AND arms every transmit path — SLCAN t/T
+// injection over USB and socketcand `< send >` over WiFi. Only build this way
+// when you intend to write to the bus. Note: in listen-only mode a two-node
+// bench setup gets no ACKs (the lone talker retransmits and eventually goes
+// bus-off); on the tractor's four-ECU bus the real nodes ACK each other.
+#if defined(CAN_ALLOW_TX)
+  #define CAN_TX_ENABLED 1
+#else
+  #define CAN_TX_ENABLED 0
+#endif
+
 // Per-board pin map. Selected via -DBOARD_* in platformio.ini.
 #if defined(BOARD_ADAFRUIT_FEATHER_S3)
   #define CAN_TX_PIN       GPIO_NUM_8
@@ -776,11 +794,7 @@ String buildJson(bool pretty = true, bool minimal = false) {
         }
     }
     can["frames_rx"]      = g_frames_rx;
-#if defined(CAN_LISTEN_ONLY)
-    if (!minimal) can["mode"] = "listen_only";
-#else
-    if (!minimal) can["mode"] = "normal";
-#endif
+    if (!minimal) can["mode"] = CAN_TX_ENABLED ? "normal" : "listen_only";
     if (!minimal) can["frames_decoded"] = g_frames_decoded;
     if (!minimal && g_socketcand_tx_dropped)
         can["socketcand_dropped"] = g_socketcand_tx_dropped;
@@ -1031,6 +1045,10 @@ void handleRoot() {
 // ── SLCAN ─────────────────────────────────────────────────────────────────────
 // Presents the CAN bus as an SLCAN device over USB CDC serial.
 // python-can: interface='slcan', channel='/dev/cu.usbmodem...'
+// Receive always works; transmit (t/T commands) is gated on -DCAN_ALLOW_TX and
+// routes to can0 (the native TWAI controller) only — SLCAN has no channel
+// concept, so it never reaches the MCP2515 (can1). A listen-only build answers
+// every t/T with BELL.
 
 static char   slcan_buf[32];
 static uint8_t slcan_len = 0;
@@ -1051,6 +1069,29 @@ void slcanSendFrame(const twai_message_t& msg) {
     Serial.write((uint8_t*)line, n);
 }
 
+// Single hex digit -> 0..15, or -1 if not a hex character.
+static int hexNibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+#if CAN_TX_ENABLED
+// Inject a frame onto can0 (native TWAI). Shared by the SLCAN t/T handler and
+// the socketcand channel-0 `< send >` so the two TX paths can't drift. Returns
+// true if the driver queued the frame. Only compiled when TX is enabled — in a
+// listen-only build there is no code that can reach the bus.
+static bool canTransmit0(uint32_t id, bool extd, uint8_t dlc, const uint8_t* data) {
+    twai_message_t tx = {};
+    tx.identifier       = id;
+    tx.extd             = extd ? 1 : 0;
+    tx.data_length_code = dlc;
+    memcpy(tx.data, data, dlc);
+    return twai_transmit(&tx, pdMS_TO_TICKS(10)) == ESP_OK;
+}
+#endif
+
 void slcanHandleCommand(const char* cmd) {
     switch (cmd[0]) {
         case 'O': slcan_open = true;  Serial.write('\r'); break;
@@ -1059,6 +1100,41 @@ void slcanHandleCommand(const char* cmd) {
         case 'V': Serial.print("V1013\r"); break;
         case 'N': Serial.print("NA000\r"); break;
         case 'F': Serial.print("F00\r");   break;
+        // Transmit: t<iii><l><dd..> (11-bit) / T<iiiiiiii><l><dd..> (29-bit).
+        // Reply CR on success, BELL (\a) on any parse/TX error — the Lawicel
+        // convention python-can tolerates. Only functional when built with
+        // -DCAN_ALLOW_TX; a listen-only build rejects every frame with BELL.
+        case 't':
+        case 'T': {
+#if !CAN_TX_ENABLED
+            Serial.write('\a');   // listen-only build: injection disabled
+#else
+            if (!slcan_open) { Serial.write('\a'); break; }
+            bool extd = (cmd[0] == 'T');
+            int idlen = extd ? 8 : 3;
+            size_t len = strlen(cmd);
+            if (len < (size_t)(1 + idlen + 1)) { Serial.write('\a'); break; }
+            bool bad = false;
+            uint32_t id = 0;
+            for (int i = 0; i < idlen && !bad; i++) {
+                int nib = hexNibble(cmd[1 + i]);
+                if (nib < 0) bad = true; else id = (id << 4) | (uint32_t)nib;
+            }
+            int dlc = hexNibble(cmd[1 + idlen]);
+            if (bad || dlc < 0 || dlc > 8) { Serial.write('\a'); break; }
+            if (len < (size_t)(1 + idlen + 1 + dlc * 2)) { Serial.write('\a'); break; }
+            id &= extd ? 0x1FFFFFFFUL : 0x7FFUL;
+            uint8_t data[8] = {0};
+            const char* dp = cmd + 1 + idlen + 1;
+            for (int i = 0; i < dlc && !bad; i++) {
+                int hi = hexNibble(dp[i * 2]), lo = hexNibble(dp[i * 2 + 1]);
+                if (hi < 0 || lo < 0) bad = true; else data[i] = (uint8_t)((hi << 4) | lo);
+            }
+            if (bad) { Serial.write('\a'); break; }
+            Serial.write(canTransmit0(id, extd, (uint8_t)dlc, data) ? '\r' : '\a');
+#endif
+            break;
+        }
         default:  Serial.write('\r'); break;
     }
 }
@@ -1181,6 +1257,9 @@ void socketcandSendFrame(const twai_message_t& msg, int8_t channel) {
 // extended here. Byte tokens may be 1 or 2 hex digits; the dlc (0..8) reads the
 // same in decimal or hex. Anything unparseable is dropped, like a real daemon.
 static void socketcandHandleSend(SocketcandSlot& slot, const char* cmd) {
+#if !CAN_TX_ENABLED
+    (void)slot; (void)cmd;              // listen-only build: injection disabled
+#else
     const char* p = cmd + 7;            // past "< send "
     char* end = nullptr;
     unsigned long id_val = strtoul(p, &end, 16);
@@ -1202,12 +1281,7 @@ static void socketcandHandleSend(SocketcandSlot& slot, const char* cmd) {
     uint32_t id = extended ? (id_val & 0x1FFFFFFFUL) : (id_val & 0x7FFUL);
 
     if (slot.channel == 0) {
-        twai_message_t tx = {};
-        tx.identifier       = id;
-        tx.extd             = extended ? 1 : 0;
-        tx.data_length_code = (uint8_t)dlc;
-        memcpy(tx.data, data, (size_t)dlc);
-        twai_transmit(&tx, pdMS_TO_TICKS(10));
+        canTransmit0(id, extended, (uint8_t)dlc, data);
     }
 #if defined(HAS_MCP2515)
     else if (slot.channel == 1 && g_mcp_initialized) {
@@ -1220,6 +1294,7 @@ static void socketcandHandleSend(SocketcandSlot& slot, const char* cmd) {
         g_mcp.tryToSend(tx);
     }
 #endif
+#endif  // CAN_TX_ENABLED
 }
 
 static void socketcandHandleCommand(SocketcandSlot& slot, const char* cmd) {
@@ -1434,16 +1509,16 @@ void setup() {
     // ~1800 frames/s, so 512 frames buffer ~280 ms of worst-case traffic
     // (longer at realistic bus load) for ~10 KB of DRAM.
     //
-    // Build with -DCAN_LISTEN_ONLY to put the controller in listen-only mode:
-    // it never transmits — no ACKs, no error frames — so it is electrically
-    // incapable of perturbing other nodes. Use this when tapping a bus shared
-    // with a device you must not disturb (e.g. a fleet/compliance logger).
-    // Trade-off: ALL transmit is disabled (SLCAN injection, socketcand
-    // client->bus send, UDS polling). Default is NORMAL, which ACKs frames.
-#if defined(CAN_LISTEN_ONLY)
-    const twai_mode_t kCanMode = TWAI_MODE_LISTEN_ONLY;
-#else
+    // Bus mode is set by CAN_TX_ENABLED (see -DCAN_ALLOW_TX up top). Default is
+    // LISTEN_ONLY: the controller never transmits — no ACKs, no error frames —
+    // so it is electrically incapable of perturbing other nodes, and every TX
+    // path (SLCAN injection, socketcand client->bus send) is dead at the
+    // silicon level. -DCAN_ALLOW_TX selects NORMAL, which ACKs frames and arms
+    // those TX paths.
+#if CAN_TX_ENABLED
     const twai_mode_t kCanMode = TWAI_MODE_NORMAL;
+#else
+    const twai_mode_t kCanMode = TWAI_MODE_LISTEN_ONLY;
 #endif
     twai_general_config_t can_cfg = TWAI_GENERAL_CONFIG_DEFAULT(
         CAN_TX_PIN, CAN_RX_PIN, kCanMode);
@@ -1506,9 +1581,14 @@ void setup() {
     // ACAN2515Settings(quartz_Hz, bitrate). begin() issues the MCP2515 reset,
     // configures bit timing, installs the ISR, and returns 0 on success (a
     // non-zero code is a bitmask of configuration errors — e.g. an impossible
-    // bitrate for the given crystal). Default mode is NormalMode (2.0B); the
-    // default filters accept every frame, which is what we want for a sniffer.
+    // bitrate for the given crystal). Default filters accept every frame, which
+    // is what we want for a sniffer. Mode tracks CAN_TX_ENABLED so can1 gets the
+    // same passive-tap guarantee as can0: ListenOnly by default, Normal only
+    // under -DCAN_ALLOW_TX.
     ACAN2515Settings mcp_cfg(MCP2515_QUARTZ_HZ, 250UL * 1000UL);
+#if !CAN_TX_ENABLED
+    mcp_cfg.mRequestedMode = ACAN2515Settings::ListenOnlyMode;
+#endif
     g_mcp_init_err    = g_mcp.begin(mcp_cfg, [] { g_mcp.isr(); });
     g_mcp_initialized = (g_mcp_init_err == 0);
 #endif

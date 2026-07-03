@@ -98,30 +98,39 @@ two options:
 > The tractor's nominal 12 V accessory rail is fine; do not wire it to a higher
 > traction-pack rail.
 
-## Sharing the bus with another device (listen-only)
+## Bus mode: passive tap by default, transmit is opt-in
 
-If the OBD-II port is already occupied by a device you must not disturb — e.g. a
-fleet or grant-compliance telematics logger — tap the same bus in parallel (a
-passive OBD-II Y-splitter is the simplest way) and build the firmware in
-**listen-only** mode so this board never transmits. The flag is board-agnostic
-and works on all three envs (`adafruit_feather_s3`, `lilygo_t2can`, `rejsacan`):
+The default firmware is a **hardware-enforced passive tap**: both CAN
+controllers (native TWAI on can0, MCP2515 on can1) come up in listen-only mode,
+so the silicon never drives a bit — no ACKs, no error frames, no injection. A
+bug in a transmit path cannot perturb the bus, because there is no path from
+code to the wire. This is the right default for tapping a bus already occupied
+by a device you must not disturb (e.g. a fleet or grant-compliance telematics
+logger); a passive OBD-II Y-splitter taps the same bus in parallel.
+
+To write to the bus, build with **`-DCAN_ALLOW_TX`**. That switches both
+controllers to NORMAL mode, so they ACK received frames *and* arm every
+transmit path: SLCAN `t`/`T` injection over USB and socketcand `< send >` over
+WiFi. The flag is board-agnostic (works on `adafruit_feather_s3`,
+`lilygo_t2can`, `rejsacan`):
 
 ```bash
 # Native PlatformIO (substitute your env)
-pio run -e <env>                                            # NORMAL: ACKs frames (default)
-PLATFORMIO_BUILD_FLAGS=-DCAN_LISTEN_ONLY pio run -e <env>   # listen-only
+pio run -e <env>                                          # listen-only passive tap (default)
+PLATFORMIO_BUILD_FLAGS=-DCAN_ALLOW_TX pio run -e <env>    # NORMAL: ACKs + transmit
 
-# Docker (reproducible build): add the build-arg; omit it for NORMAL
-docker build -f embedded/esp32-s3/Dockerfile --build-arg CAN_LISTEN_ONLY=1 -t solectrac-fw .
+# Docker (reproducible build): add the build-arg; omit it for the passive tap
+docker build -f embedded/esp32-s3/Dockerfile --build-arg CAN_ALLOW_TX=1 -t solectrac-fw .
 ```
 
-In listen-only mode the TWAI controller emits nothing — no ACKs, no error
-frames — so it cannot perturb the other device's traffic (beyond what CAN's
-error-confinement already guarantees). The tractor's other nodes (MC, BMS,
-charger, cluster) handle ACKing, so monitoring still works. **Trade-off:** all
-transmit is disabled — SLCAN injection, socketcand client→bus send, and UDS
-polling will not function. Confirm which mode is running via `can.mode`
-(`normal` / `listen_only`) in `/json`.
+Confirm which mode is running via `can.mode` (`normal` / `listen_only`) in
+`/json`.
+
+**Gotcha with the default (listen-only):** on the tractor's four-ECU bus the
+real nodes ACK each other, so monitoring works unchanged. But on a bare
+two-node bench setup — one talker plus this board — nothing ACKs the talker, so
+it retransmits and eventually goes bus-off. Build with `-DCAN_ALLOW_TX` for
+bench work where this board must provide the ACK.
 
 ## What the LED tells you
 
