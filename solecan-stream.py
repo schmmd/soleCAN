@@ -142,7 +142,7 @@ MC_FAULT_DESCRIPTIONS: dict = {
     23: ["B+ Undervoltage Cutback"],
     24: ["B+ Overvoltage Cutback"],
     25: ["+5V Supply Failure"],
-    26: ["Motor Temp Hot Cutback"],
+    28: ["Motor Temp Hot Cutback"],
     29: ["Motor Temp Sensor Fault"],
     31: ["Coil1 Driver Open/Short", "Main Open/Short"],
     32: ["Coil2 Driver Open/Short", "EM Brake Open/Short"],
