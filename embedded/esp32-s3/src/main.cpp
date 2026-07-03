@@ -218,20 +218,11 @@ struct PackState {
     int8_t  temp_spread_c = -1;
 };
 
+// Raw F106 state bitmaps. The individual bits are decoded downstream (see
+// dashboard.html B0_NAMES/B1_NAMES and solecan_proto F106), not here.
 struct BmsStateFlags {
     uint8_t byte0 = 0, byte1 = 0;
-    bool output_enable   : 1;
-    bool main_contactor  : 1;
-    bool operating       : 1;
-    bool standby         : 1;
-    bool charging        : 1;
-    bool drive_mode      : 1;
-    bool awake           : 1;
-    bool valid           : 1;
-    BmsStateFlags() : output_enable(false), main_contactor(false),
-        operating(false), standby(false), charging(false),
-        drive_mode(false), awake(false),
-        valid(false) {}
+    bool    valid = false;
 };
 
 struct BmsLimits {
@@ -613,16 +604,9 @@ void decodeCAN(uint32_t can_id, const uint8_t* raw, uint8_t len) {
 
         } else if (pgn == PGN_F106) {
             if (allZero(d)) return;
-            g_bms_state.byte0          = d[0];
-            g_bms_state.byte1          = d[1];
-            g_bms_state.output_enable  = (d[0] & 0x01) != 0;
-            g_bms_state.main_contactor = (d[0] & 0x04) != 0;
-            g_bms_state.operating      = (d[0] & 0x40) != 0;
-            g_bms_state.standby        = (d[0] & 0x80) != 0;
-            g_bms_state.charging       = (d[1] & 0x08) != 0;
-            g_bms_state.drive_mode     = (d[1] & 0x20) != 0;
-            g_bms_state.awake          = (d[1] & 0x40) != 0;
-            g_bms_state.valid          = true;
+            g_bms_state.byte0 = d[0];
+            g_bms_state.byte1 = d[1];
+            g_bms_state.valid = true;
 
         } else if (pgn == PGN_F107) {
             if (allZero(d)) return;
@@ -880,18 +864,12 @@ String buildJson(bool pretty = true, bool minimal = false) {
 
     // BMS state
     if (g_bms_state.valid) {
+        // Raw F106 bitmaps; the dashboard decodes the individual bits. Sent
+        // in the minimal (BLE) payload too — the dashboard's BMS State panel
+        // reads only these two bytes.
         auto st = doc["bms"]["state"].to<JsonObject>();
-        if (!minimal) {
-            st["byte0"] = g_bms_state.byte0;
-            st["byte1"] = g_bms_state.byte1;
-        }
-        st["output_enable"]  = g_bms_state.output_enable  ? 1 : 0;
-        st["main_contactor"] = g_bms_state.main_contactor ? 1 : 0;
-        st["operating"]      = g_bms_state.operating      ? 1 : 0;
-        st["precharge"]      = g_bms_state.standby        ? 1 : 0;
-        st["charging"]       = g_bms_state.charging       ? 1 : 0;
-        st["drive_mode"]     = g_bms_state.drive_mode     ? 1 : 0;
-        st["awake"]          = g_bms_state.awake          ? 1 : 0;
+        st["byte0"] = g_bms_state.byte0;
+        st["byte1"] = g_bms_state.byte1;
     }
 
     // BMS current limits

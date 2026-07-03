@@ -1603,21 +1603,13 @@ def state_to_json(state: State, now: float, mode: str) -> dict:
             sess["eta_to_zero_s"] = int(eta_zero)
     out["session"] = sess
 
-    # BMS state pills. Firmware names the b1 bit 6 channel "awake" (matches the
-    # dashboard label); stream.py's internal field is bms_contactors but the
-    # bit decoded is the same one (see decode() PGN_F106).
+    # Raw F106 state bitmaps; the dashboard decodes the individual bits. Mirrors
+    # the firmware's buildJson shape (byte0/byte1 only).
     bms_block: dict = {}
     if state.bms_state_byte0.value is not None:
         bms_block["state"] = {
-            "byte0":          int(state.bms_state_byte0.value),
-            "byte1":          int(state.bms_state_byte1.value or 0),
-            "output_enable":  int(bool(state.bms_output_enable.value)),
-            "main_contactor": int(bool(state.bms_main_contactor.value)),
-            "operating":      int(bool(state.bms_operating.value)),
-            "precharge":      int(bool(state.bms_standby.value)),
-            "charging":       int(bool(state.bms_charging.value)),
-            "drive_mode":     int(bool(state.bms_drive_mode.value)),
-            "awake":          int(bool(state.bms_contactors.value)),
+            "byte0": int(state.bms_state_byte0.value),
+            "byte1": int(state.bms_state_byte1.value or 0),
         }
     if (state.limit_discharge_a.value is not None
             or state.limit_charge_a.value is not None
