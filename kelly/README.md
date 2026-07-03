@@ -128,6 +128,23 @@ stays asserted (1) as it does whenever the controller is awake.
 └─────────────────────┴─────────────────────┴─────────────────────┘
 ```
 
+## Under load — single-session observations
+
+From one ~9-minute capture of a real work cycle (loader and driving, then PTO
+mowing, all at the low speed setpoint) — TENTATIVE:
+
+- **~25 A standing draw whenever the pump is on**, with hydraulic demand stacked
+  on top: steering and bucket lifts spike phase current to ~70 A, while
+  sustained PTO mowing sits around 25–30 A. The pump runs continuously through
+  the cycle — stopping or reversing the tractor doesn't unload it, since it
+  keeps serving steering and the PTO wet-clutch pressure and cooling. (Tractor
+  reverse doesn't appear here at all: the pump direction is fixed, and travel
+  direction is the separate traction motor on the CAN bus.)
+- **The motor is the thermally-limited part.** Under continuous running the
+  controller temperature levels off near 18 °C, while the motor temperature
+  keeps climbing (past 40 °C over the run, still rising) — where it plateaus is
+  not yet captured.
+
 ## The monitor tool
 
 `solectrac-kelly-monitor.py` polls the three monitor commands over a USB-serial
