@@ -256,7 +256,9 @@ struct MotorState {
     uint16_t rpm_magnitude = 0;
     int8_t   direction     = 0;
     uint8_t  range    = 1;
-    uint8_t  torque_raw  = 0;
+    // LE u16: commanded effort magnitude; peaks past 255 under hard
+    // acceleration (observed 262), so a single byte would wrap.
+    uint16_t torque_raw  = 0;
     int8_t   controller_temp_c = INT8_MIN;
     int8_t   motor_temp_c      = INT8_MIN;
     bool     valid             = false;
@@ -667,7 +669,7 @@ void decodeCAN(uint32_t can_id, const uint8_t* raw, uint8_t len) {
         g_motor.rpm_signed         = dir * rpm_mag;
         g_motor.direction          = dir;
         g_motor.range         = ((d[7] >> 4) & 0x0F) + 1;
-        g_motor.torque_raw       = d[0];
+        g_motor.torque_raw       = le16(d[0], d[1]);
         if (d[4]) g_motor.controller_temp_c = (int8_t)(d[4] - TEMP_OFFSET_C);
         if (d[5]) g_motor.motor_temp_c      = (int8_t)(d[5] - TEMP_OFFSET_C);
         g_motor.valid = true;
@@ -936,16 +938,6 @@ String buildJson(bool pretty = true, bool minimal = false) {
             mot["direction"]     = g_motor.direction;
             mot["range"]    = g_motor.range;
             mot["torque_raw"] = g_motor.torque_raw;
-            // Ground speed from RPM × range (Turf/Industrial tire calibration,
-            // per Operator Manual p34; Agri tires would need different coeffs).
-            if (g_motor.range >= 1 && g_motor.range <= 3) {
-                static const float KMH_PER_RPM[3] = {
-                    5.7f / 2800.0f, 8.6f / 2800.0f, 17.0f / 2800.0f
-                };
-                float kmh = g_motor.rpm_magnitude * KMH_PER_RPM[g_motor.range - 1];
-                addFloat(mot, "speed_kmh", kmh, 2);
-                addFloat(mot, "speed_mph", kmh * 0.6213712f, 2);
-            }
             if (g_motor.controller_temp_c != INT8_MIN)
                 mot["controller_temp_c"] = g_motor.controller_temp_c;
             if (g_motor.motor_temp_c != INT8_MIN)

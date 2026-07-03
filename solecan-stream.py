@@ -34,6 +34,7 @@ Examples:
 import argparse
 import asyncio
 import json
+import re
 import struct
 import sys
 import threading
@@ -399,11 +400,7 @@ def primary_pack_v(state: State) -> Channel:
     return state.pack_v_est
 
 
-# --- decoder ----------------------------------------------------------------
-
-import re
-
-# --- decoder routing -------------------------------------------------------
+# --- decoder routing ---------------------------------------------------------
 
 # Canonical signal name (as emitted by solecan_proto.decode) → State
 # attribute that owns the Channel. Unknown names are silently ignored so
@@ -1420,7 +1417,7 @@ def render_alerts(alerts: List[Tuple[str, str]]) -> Panel:
     return Panel(t, title="Alerts", border_style=border)
 
 
-def build_layout(state: State, args, now: float, mode: str = "live") -> Layout:
+def build_layout(state: State, now: float, mode: str = "live") -> Layout:
     layout = Layout()
     layout.split_column(
         Layout(name="header", size=3),
@@ -1964,16 +1961,16 @@ def main() -> int:
             while reader.is_alive() and not stop_evt.is_set():
                 reader.join(timeout=1.0)
         else:
-            with Live(build_layout(state, args, time.monotonic(), mode),
+            with Live(build_layout(state, time.monotonic(), mode),
                       refresh_per_second=args.refresh_hz,
                       screen=True) as live:
                 tick = 1.0 / max(args.refresh_hz, 1.0)
                 while reader.is_alive() and not stop_evt.is_set():
-                    live.update(build_layout(state, args, time.monotonic(), mode))
+                    live.update(build_layout(state, time.monotonic(), mode))
                     time.sleep(tick)
                 # Keep the final frame visible briefly when replay ends.
                 if args.replay:
-                    live.update(build_layout(state, args, time.monotonic(), mode))
+                    live.update(build_layout(state, time.monotonic(), mode))
                     time.sleep(0.5)
     except KeyboardInterrupt:
         pass
