@@ -1371,8 +1371,12 @@ void socketcandPoll() {
 }
 
 // ── BLE (Nordic UART Service) ─────────────────────────────────────────────────
-// Pushes a compact (minimal) JSON snapshot to a single BLE central whenever it
-// differs from what we last sent. Framing on the wire is:
+// Pushes a compact (minimal) JSON snapshot to a single BLE central — every
+// BLE_PUSH_INTERVAL_MS while CAN frames are arriving, dropping to a slow
+// BLE_HEARTBEAT_MS cadence on a quiet bus. The heartbeat exists because some
+// fields change with time rather than with frames (uptime, last_frame_age_s,
+// the tractor on/off flag): the client must still see those move after the
+// bus goes silent. Framing on the wire is:
 //
 //     [u16 big-endian length] [length bytes of JSON]
 //
@@ -1393,23 +1397,27 @@ void socketcandPoll() {
 #define NUS_RX_UUID   "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
 
 #define BLE_CHUNK_BYTES        180
-#define BLE_PUSH_INTERVAL_MS   200    // diff cadence — actual send only on change
+#define BLE_PUSH_INTERVAL_MS   200    // push cadence while CAN frames are arriving
+#define BLE_HEARTBEAT_MS       2000   // idle cadence — keeps time-derived fields fresh
+
 #define BLE_INTER_CHUNK_DELAY  5      // min ms between chunk notifies (paced by bleTick)
 
 static BLEServer*         g_ble_server = nullptr;
 static BLECharacteristic* g_ble_tx     = nullptr;
-static volatile bool      g_ble_connected = false;
-static String             g_ble_last_payload;
+static volatile bool      g_ble_connected  = false;
+static volatile bool      g_ble_force_push = false;
 static uint32_t           g_ble_last_push_ms = 0;
+static uint32_t           g_ble_frames_at_push = 0;   // g_frames_rx at last push
 
 class BleServerCb : public BLEServerCallbacks {
+    // These callbacks run on the Bluedroid task, not loop() — they may only
+    // touch the volatile flags, never heap-backed state the loop task owns.
     void onConnect(BLEServer*) override {
-        g_ble_connected   = true;
-        g_ble_last_payload = "";   // force a full resend on (re)connect
+        g_ble_connected  = true;
+        g_ble_force_push = true;   // full snapshot immediately on (re)connect
     }
     void onDisconnect(BLEServer* s) override {
-        g_ble_connected   = false;
-        g_ble_last_payload = "";
+        g_ble_connected = false;
         s->getAdvertising()->start();   // resume advertising for the next client
     }
 };
@@ -1461,9 +1469,8 @@ void bleTick() {
     uint32_t now = millis();
 
     // Drain the in-flight frame first — one chunk per tick, keeping the
-    // 5 ms inter-chunk spacing on the wire. No new payload is built (and
-    // g_ble_last_payload doesn't advance) until the frame completes, so
-    // frames are never interleaved.
+    // 5 ms inter-chunk spacing on the wire. No new payload is built until
+    // the frame completes, so frames are never interleaved.
     if (g_ble_tx_off < g_ble_tx_len) {
         if (now - g_ble_chunk_ms < BLE_INTER_CHUNK_DELAY) return;
         size_t n = g_ble_tx_len - g_ble_tx_off;
@@ -1475,14 +1482,16 @@ void bleTick() {
         return;
     }
 
-    if (now - g_ble_last_push_ms < BLE_PUSH_INTERVAL_MS) return;
-    g_ble_last_push_ms = now;
-
-    String j = buildJson(false /*pretty*/, true /*minimal*/);
-    if (j != g_ble_last_payload) {
-        bleQueueFramed(j);
-        g_ble_last_payload = j;
-    }
+    // Adaptive cadence, keyed on frame arrival rather than a payload diff —
+    // frames_rx is in the payload, so any received frame changes the JSON
+    // and a diff could never suppress a push on an active bus anyway.
+    bool bus_active = g_frames_rx != g_ble_frames_at_push;
+    uint32_t interval = bus_active ? BLE_PUSH_INTERVAL_MS : BLE_HEARTBEAT_MS;
+    if (!g_ble_force_push && now - g_ble_last_push_ms < interval) return;
+    g_ble_force_push     = false;
+    g_ble_last_push_ms   = now;
+    g_ble_frames_at_push = g_frames_rx;
+    bleQueueFramed(buildJson(false /*pretty*/, true /*minimal*/));
 }
 
 // ── Setup & loop ──────────────────────────────────────────────────────────────
