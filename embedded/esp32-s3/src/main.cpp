@@ -336,6 +336,11 @@ bool        g_ap_running      = false;
 bool        g_mcp_initialized = false;
 uint32_t    g_mcp_init_err    = 0xFFFFFFFFUL;   // sentinel: never attempted
 uint32_t    g_mcp_frames_rx   = 0;
+// MCP2515: external classic-CAN 2.0B controller wired to SPI, run at 250 kbit/s
+// to match the J1939 main bus. The library's RX buffers are drained from
+// loop(); frames are forwarded to socketcand as channel can1. Crystal frequency
+// is board-dependent — see MCP2515_QUARTZ_HZ if can1 stays silent.
+static ACAN2515 g_mcp(MCP2515_CS_PIN, SPI, MCP2515_INT_PIN);
 #endif
 
 #if defined(HAS_VIN_SENSE)
@@ -504,6 +509,12 @@ static void updateVinSense() {
 // — without this, capture is dead until a power cycle. Poll the driver state
 // and walk it back: BUS_OFF → initiate recovery (the controller waits out
 // 128×11 recessive bits), which completes into STOPPED → start again.
+//
+// The MCP2515 (can1) deliberately has no equivalent: bus-off is driven by the
+// *transmit* error counter, so a listen-only controller can never reach it,
+// and in a -DCAN_ALLOW_TX build the MCP2515 — unlike the TWAI peripheral —
+// recovers from bus-off automatically in hardware. Its error state is
+// observable via tec/rec/eflg in the /json mcp2515 block.
 
 static void canRecoveryTick() {
     static uint32_t last_ms = 0;
@@ -809,6 +820,15 @@ String buildJson(bool pretty = true, bool minimal = false) {
     mcp["initialized"] = g_mcp_initialized;
     mcp["init_err"]    = g_mcp_init_err;
     mcp["frames_rx"]   = g_mcp_frames_rx;
+    if (!minimal && g_mcp_initialized) {
+        // Error-state visibility for can1, matching can0's tec/rec above.
+        // Each accessor is one short SPI register read. eflg is the raw EFLG
+        // register: bit 5 TXBO (bus-off), bits 4/3 TXEP/RXEP (error-passive),
+        // bits 7/6 RX1OVR/RX0OVR (RX buffer overflow).
+        mcp["tec"]  = g_mcp.transmitErrorCounter();
+        mcp["rec"]  = g_mcp.receiveErrorCounter();
+        mcp["eflg"] = g_mcp.errorFlagRegister();
+    }
 #endif
 
     // Pack
@@ -1221,14 +1241,6 @@ static bool socketcandWritable(WiFiClient& client) {
     struct timeval tv = {0, 0};
     return select(fd + 1, nullptr, &wset, nullptr, &tv) > 0;
 }
-
-#if defined(HAS_MCP2515)
-// MCP2515: external classic-CAN 2.0B controller wired to SPI, run at 250 kbit/s
-// to match the J1939 main bus. The library's RX buffers are drained from
-// loop(); frames are forwarded to socketcand as channel can1. Crystal frequency
-// is board-dependent — see MCP2515_QUARTZ_HZ if can1 stays silent.
-static ACAN2515 g_mcp(MCP2515_CS_PIN, SPI, MCP2515_INT_PIN);
-#endif
 
 void socketcandSendFrame(const twai_message_t& msg, int8_t channel) {
     uint32_t now_ms = millis();
