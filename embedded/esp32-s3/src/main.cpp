@@ -13,6 +13,7 @@
  * Endpoints:
  *   GET /       — mobile-friendly dashboard (auto-refreshing)
  *   GET /json   — raw JSON
+ *   anything else 302-redirects to / (captive-portal auto-open on the AP)
  */
 
 #include <Arduino.h>
@@ -1066,6 +1067,18 @@ void handleRoot() {
     server.send_P(200, "text/html", (PGM_P)dashboard_html_start, len);
 }
 
+void handleNotFound() {
+    // The soft-AP's wildcard DNS lands every hostname here, including phone
+    // connectivity probes (generate_204 / hotspot-detect.html). Answering
+    // those with a redirect — not a 404 — makes the OS classify the AP as a
+    // captive portal and auto-open the dashboard when someone joins.
+    // localIP() is the board's address on whichever interface (AP or STA)
+    // the request arrived on, so bench-network clients redirect sensibly too.
+    server.sendHeader("Location",
+                      "http://" + server.client().localIP().toString() + "/");
+    server.send(302, "text/plain", "");
+}
+
 // ── SLCAN ─────────────────────────────────────────────────────────────────────
 // Presents the CAN bus as an SLCAN device over USB CDC serial.
 // python-can: interface='slcan', channel='/dev/cu.usbmodem...'
@@ -1087,7 +1100,11 @@ void slcanSendFrame(const twai_message_t& msg) {
                    msg.identifier, msg.data_length_code)
         : snprintf(line, sizeof(line), "t%03" PRIX32 "%u",
                    msg.identifier, msg.data_length_code);
-    for (int i = 0; i < msg.data_length_code; i++)
+    // Bound n so the two hex digits and the trailing '\r' always fit: if n
+    // ever passed sizeof(line), the sizeof(line) - n below would underflow
+    // and line[n++] would land out of bounds. Unreachable while loop()
+    // clamps DLC to 8, but the formatter shouldn't lean on that.
+    for (int i = 0; i < msg.data_length_code && n < (int)sizeof(line) - 3; i++)
         n += snprintf(line + n, sizeof(line) - n, "%02X", msg.data[i]);
     line[n++] = '\r';
     Serial.write((uint8_t*)line, n);
@@ -1581,6 +1598,7 @@ void setup() {
 
     server.on("/",     handleRoot);
     server.on("/json", handleJson);
+    server.onNotFound(handleNotFound);
     server.begin();
     MDNS.addService("http", "tcp", 80);
 
