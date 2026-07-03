@@ -74,8 +74,7 @@ wiring, and flashing guide.
 ### Android app (`android/`)
 Mirrors the ESP32 web dashboard over BLE so the phone doesn't need to join the
 tractor's WiFi. Loads the dashboard HTML in a WebView and pipes JSON snapshots
-from the NUS characteristic. `android/README.md` has details (note: it still
-refers to the firmware as `esp32/`; the real path is `embedded/esp32-s3/`).
+from the NUS characteristic. `android/README.md` has details.
 
 ### Shared dashboard HTML
 `dashboard.html` at the repo root is the **single tracked copy**. Both

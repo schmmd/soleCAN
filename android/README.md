@@ -54,9 +54,9 @@ working tree automatically; omit the build-arg to ship `unknown`.
   advertiser, negotiates MTU 517, subscribes to TX notifications, and
   reassembles framed messages (`[u16 BE length][payload]`).
 - `MainActivity.kt` — hosts the WebView, manages runtime permissions, shows a
-  status bar that auto-hides on connect, exposes the `SolectracBridge` JS
+  status bar that auto-hides on connect, exposes the `DashboardBridge` JS
   interface, and forwards each JSON message via
-  `window.dispatchSolectracUpdate(...)`.
+  `window.dispatchDashboardUpdate(...)`.
 - `assets/dashboard.html` — copied in from the repo-root canonical
   `dashboard.html` by the `copyDashboardAsset` Gradle task before each build.
   The destination is gitignored; edit the root file, not this one.
