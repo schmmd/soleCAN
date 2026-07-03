@@ -69,8 +69,8 @@ wide = df.pivot_table(index="timestamp", columns="signal", values="value")
 Signal names use a `domain.name` (or `domain.NN.name`) convention —
 `cell.NN.voltage_v`, `pack.voltage_v`, `motor.rpm_signed`, `bms.fault.code_NNN`,
 `dm1.dtc.spn`, etc. The complete list with formulas, byte positions, and
-confidence levels lives in `decoders.csv`; the module docstring at the top of
-`solecan-analyze.py` documents each signal in detail.
+confidence levels lives in `decoders.csv` (generated from the `DECODERS`
+table in `solecan-analyze.py`); the decode itself is in `solecan_proto.py`.
 
 [tidy]: https://vita.had.co.nz/papers/tidy-data.pdf
 
