@@ -115,13 +115,13 @@ BMS_FAULT_DESCRIPTIONS: dict = {
     121: "Internal total voltage detection fault",
     122: "External total voltage detection fault",
     123: "Insulation monitoring fault",
-    124: "Pre-charging fault",
+    124: "Clock fault",
     125: "Internal CAN communication fault",
     126: "Serious insulation fault",
     127: "Slight insulation fault",
-    140: "System fault: kvst",
-    141: "BMS fault need maintenance",
-    142: "BMS fault (manual omits 142)",  # tentative; bit-3 capture observation
+    140: "System fault level",
+    # 141 is reserved (not in the manual) and has no F108 bit.
+    142: "BMS fault need maintenance",
     143: "Battery fault need maintenance",
     144: "Battery system fault needs maintenance",
     145: "Needs full charge/discharge maintenance",
