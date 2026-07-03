@@ -309,19 +309,9 @@ except ImportError:
     sys.exit(1)
 
 from solecan_proto import (
-    SRC_BMS, SRC_BMS_CHGR_IF, SRC_CHARGER, SRC_VEHICLE, SRC_MOTOR, SRC_DASH,
     PGN_CELL_FIRST, PGN_CELL_LAST, PGN_TEMP_FIRST, PGN_TEMP_LAST,
-    PGN_F100, PGN_F102, PGN_F104, PGN_F106, PGN_F107, PGN_F108,
-    PGN_FF50, PGN_FF21, PGN_FECA, PGN_PROP_0600,
-    DM1_LAMP_NAMES, VC_STATE_NAMES,
-    NUM_CELLS, NUM_TEMPS, TEMP_OFFSET_C,
-    PACK_CAPACITY_AH, PACK_NOMINAL_V, PACK_CAPACITY_WH,
-    PACK_CURRENT_LSB_A, PACK_CURRENT_BIAS_RAW,
-    PACK_VOLTAGE_LSB_V,
-    CHARGER_V_LSB_V, CHARGER_I_LSB_A,
-    RPM_BIAS, LIMIT_CURRENT_LSB_A,
-    BMS_FAULT_CODES_BYTE7, BMS_FAULT_CODES_BYTES_0_TO_6,
-    parse_id, be16, le16, data_bytes, c_to_f,
+    DM1_LAMP_NAMES, PACK_CAPACITY_WH,
+    parse_id, data_bytes, c_to_f,
     decode as proto_decode,
 )
 
@@ -372,16 +362,6 @@ def _make_emit(emissions: list):
 
 
 # --- script-local protocol tables -------------------------------------------
-
-# DM1 lamp-status enum per J1939-73 (2 bits per lamp, same encoding for byte 0
-# "lamp on/off" and byte 1 "flash status"):
-#   0b00 = off / no flash
-#   0b01 = on  / slow flash (1 Hz)
-#   0b10 = reserved / fast flash (2 Hz)
-#   0b11 = not available
-DM1_LAMP_STATE = {0: "off", 1: "on", 2: "reserved", 3: "n/a"}
-DM1_FLASH_STATE = {0: "no_flash", 1: "slow_1hz", 2: "fast_2hz", 3: "n/a"}
-
 
 # Known PGN descriptions (SAE-defined plus what we've identified locally).
 PGN_NAMES = {

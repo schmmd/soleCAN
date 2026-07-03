@@ -62,19 +62,11 @@ except ImportError:
     sys.exit(1)
 
 from solecan_proto import (
-    SRC_BMS, SRC_BMS_CHGR_IF, SRC_CHARGER, SRC_VEHICLE, SRC_MOTOR, SRC_DASH,
-    PGN_CELL_FIRST, PGN_CELL_LAST, PGN_TEMP_FIRST, PGN_TEMP_LAST,
-    PGN_F100, PGN_F102, PGN_F104, PGN_F106, PGN_F107, PGN_F108,
-    PGN_FF50, PGN_FF21, PGN_FECA, PGN_PROP_0600,
     DM1_LAMP_NAMES, VC_STATE_NAMES,
-    NUM_CELLS, NUM_TEMPS, TEMP_OFFSET_C,
-    PACK_CAPACITY_AH, PACK_NOMINAL_V, PACK_CAPACITY_WH,
-    PACK_CURRENT_LSB_A, PACK_CURRENT_BIAS_RAW,
-    PACK_VOLTAGE_LSB_V,
-    CHARGER_V_LSB_V, CHARGER_I_LSB_A, CHGR_FLAG_NAMES,
-    RPM_BIAS, LIMIT_CURRENT_LSB_A,
+    NUM_CELLS, NUM_TEMPS, PACK_CAPACITY_WH,
+    CHGR_FLAG_NAMES,
     BMS_FAULT_CODES_BYTE7, BMS_FAULT_CODES_BYTES_0_TO_6,
-    parse_id, be16, le16, c_to_f,
+    c_to_f,
     decode as proto_decode,
 )
 
@@ -213,28 +205,6 @@ def describe_mc_code(code: int) -> str:
 # TPS_dead_low concept from the hydraulic pump doc).
 TORQUE_DEAD_LOW = 3                          # idle resting offset (subtracted from raw)
 TORQUE_PCT_PER_BIT = 100.0 / (0xFF - TORQUE_DEAD_LOW)  # raw 0xFF = 100%
-# Motor RPM -> ground speed coefficients per range, calibrated for the
-# Turf/Industrial tire option (23x8.5-12 front, 33x13.5-16.5 rear).
-# Source: CET Operator Manual page 34 travel-speed table
-# (https://solectracsupport.com/FT25GUSAOPM.pdf), at the max-RPM column:
-# Low 5.7 km/h @ 2800 RPM, Medium 8.6 km/h @ 2800 RPM, High 17.0 km/h @
-# 2800 RPM. Relationship is linear in motor RPM within each range. The
-# range switch (R1/R2/R3) is a motor-RPM cap, not a gear stage, and does
-# not affect this calibration. The Agri tire option uses different
-# coefficients (5x12 / 8.0x18) — swap in 4.6/8.8/17.5 if those tires are
-# fitted.
-#
-# NOTE: this lookup keys off the range-switch value, which does NOT
-# correspond to the mechanical L/M/H lever — the mechanical gear is
-# sensor-less. See DOCUMENTATION.md §FF21CA "Ground speed is NOT
-# derivable from CAN" for why these coefficients are unsafe for live
-# decoding.
-KMH_PER_RPM_HIGH_TURF = {
-    1: 5.7 / 2800,
-    2: 8.6 / 2800,
-    3: 17.0 / 2800,
-}
-KMH_TO_MPH = 0.6213712
 
 # Charger fault flags (FF50E5 byte 4, Elcon/TC protocol). 0x00 means the
 # OBC is actively delivering charge; any set bit names why it isn't.
@@ -1258,22 +1228,6 @@ def render_motor(state: State, now: float) -> Panel:
         rg_text = Text(f"R{int(rg)}")
     t.add_row("range", rg_text)
 
-    rpm_signed = state.motor_rpm.value
-    if rpm_signed is None or rg is None:
-        gs_text = Text("---", style="dim")
-    else:
-        coef = KMH_PER_RPM_HIGH_TURF.get(int(rg))
-        if coef is None:
-            gs_text = Text("---", style="dim")
-        else:
-            kmh = rpm_signed * coef
-            mph = kmh * KMH_TO_MPH
-            gs_text = Text(f"{kmh:+5.1f} km/h  ({mph:+5.1f} mph)")
-            if state.motor_rpm.is_stale(now):
-                gs_text = Text(f"{kmh:+5.1f} km/h  ({mph:+5.1f} mph)  (stale)",
-                               style="yellow dim")
-    t.add_row("ground speed", gs_text)
-
     def _temp_text(ch: Channel) -> Text:
         if ch.value is None:
             return Text("---", style="dim")
@@ -1565,10 +1519,6 @@ def open_source(args):
 # state_to_json mirrors the firmware's buildJson(minimal=false) shape closely
 # enough that the dashboard reads the same fields.
 
-KMH_PER_RPM = (5.7 / 2800.0, 8.6 / 2800.0, 17.0 / 2800.0)
-MPH_PER_KMH = 0.6213712
-
-
 def _ch(c: Channel, ndigits: Optional[int] = None):
     if c.value is None:
         return None
@@ -1705,12 +1655,7 @@ def state_to_json(state: State, now: float, mode: str) -> dict:
         if state.motor_torque.value is not None:
             mot["torque_raw"] = int(state.motor_torque.value)
         if state.motor_range.value is not None:
-            rg = int(state.motor_range.value)
-            mot["range"] = rg
-            if 1 <= rg <= 3:
-                kmh = state.motor_rpm_mag.value * KMH_PER_RPM[rg - 1]
-                mot["speed_kmh"] = round(kmh, 2)
-                mot["speed_mph"] = round(kmh * MPH_PER_KMH, 2)
+            mot["range"] = int(state.motor_range.value)
         if state.controller_temp_c.value is not None:
             mot["controller_temp_c"] = int(state.controller_temp_c.value)
         if state.motor_temp_c.value is not None:

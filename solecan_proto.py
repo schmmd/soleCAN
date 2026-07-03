@@ -388,7 +388,7 @@ def decode(msg, emit, clear=_noop_clear):
         return "vc"
 
     if src == SRC_MOTOR and pgn == PGN_FF21:
-        rpm_mag = ((data[3] << 8) | data[2]) - RPM_BIAS
+        rpm_mag = le16(data[2], data[3]) - RPM_BIAS
         fnr = data[7] & 0x0F
         if fnr == 0x4:
             direction = 1
@@ -401,7 +401,7 @@ def decode(msg, emit, clear=_noop_clear):
         emit("motor.rpm_magnitude", rpm_mag, "rpm")
         emit("motor.direction", direction, "")
         emit("motor.range", range_, "")
-        emit("motor.torque_raw", data[0] | (data[1] << 8), "")
+        emit("motor.torque_raw", le16(data[0], data[1]), "")
         if data[4]:
             emit("motor.controller_temp_c", data[4] - TEMP_OFFSET_C, "c")
         if data[5]:
