@@ -26,7 +26,7 @@ Wiring (see DOCUMENTATION.md "E-hydraulic Kelly serial diagnostics")
     Kelly SM-4P pin 2 (Tx) -> USB-serial RX
     Kelly SM-4P pin 3 (Rx) -> USB-serial TX
     Kelly SM-4P pin 4 (V-) -> USB-serial GND
-    Kelly SM-4P pin 1 (V+, ~5 V) -> leave unconnected
+    Kelly SM-4P pin 1 (V+, ~12 V) -> leave unconnected
 Confirm the SM-4P signal level before wiring: true bipolar RS-232 needs a
 MAX3232-class adapter; a logic-level port needs a plain 3.3/5 V USB-UART.
 
@@ -77,6 +77,37 @@ GRID_ROWS = (
     ("Reversed", "reverse_switch", "Controller Temp", "controller_temp_c", "Phase Current", "phase_current_a"),
 )
 
+# Fault names by bit position in the 16-bit error_status word (monitor offset 16,
+# big-endian). Display-only. Verified two independent ways: the kelly-connect-oss
+# reimplementation's error-name array — whose unit tests fix this bit order
+# (bit 0 "Identify Err", bit 1 "Over Volt", bit 15 "Current Meter Err") — and the
+# KLS-M/N manual's Table 1 buzzer codes, whose row-major order 1,1..4,4 lines up
+# with these bit positions. No non-zero error_status has been observed on this
+# tractor, so the labels are cross-validated against those sources, not seen live.
+ERROR_NAMES = (
+    "Identify Err",        # bit 0  — manual 1,1 auto-identify (phase/hall wiring)
+    "Over Volt",           # bit 1  — 1,2
+    "Low Volt",            # bit 2  — 1,3
+    "Reserved",            # bit 3  — 1,4
+    "Locking",             # bit 4  — 2,1 motor did not start
+    "V+ Err",              # bit 5  — 2,2 internal volts fault
+    "Overtemp",            # bit 6  — 2,3 controller over-temperature
+    "High Pedel",          # bit 7  — 2,4 throttle high at power-up
+    "Reserved",            # bit 8  — 3,1
+    "Reset Error",         # bit 9  — 3,2 internal reset
+    "Pedel Error",         # bit 10 — 3,3 hall throttle open/short
+    "Hall Sensor Error",   # bit 11 — 3,4 angle/speed sensor
+    "Reserved",            # bit 12 — 4,1
+    "Emergency Rev Err",   # bit 13 — 4,2 (manual: reserved)
+    "Motor OverTemp Err",  # bit 14 — 4,3 motor over-temperature
+    "Current Meter Err",   # bit 15 — 4,4 hall galvanometer
+)
+
+
+def error_names(error_status: int) -> list[str]:
+    """Names of the faults flagged in the 16-bit error_status bitmask."""
+    return [ERROR_NAMES[b] for b in range(16) if error_status & (1 << b)]
+
 
 class KellyError(Exception):
     """A read or framing failure talking to the controller."""
@@ -118,7 +149,7 @@ class Monitor:
     actual_direction: int   # 0 = forward
     brake_switch2: int
     low_speed: int          # low-speed mode select
-    error_status: int       # 16-bit fault bitmask
+    error_status: int       # 16-bit fault bitmask (bit -> ERROR_NAMES)
     motor_speed_rpm: int
     phase_current_a: int
     raw: bytes
@@ -256,8 +287,9 @@ class KellyReader:
 
 def format_block(mon: Monitor, version: str, when: float) -> str:
     ts = time.strftime("%H:%M:%S", time.localtime(when))
-    faults = "no faults" if mon.error_status == 0 else (
-        "bits " + ",".join(str(i) for i in range(16) if mon.error_status & (1 << i))
+    faults = "no faults" if mon.error_status == 0 else ", ".join(
+        f"bit{b} {ERROR_NAMES[b]}"
+        for b in range(16) if mon.error_status & (1 << b)
     )
     direction = "FWD" if mon.actual_direction == 0 else "REV"
     lines = [
@@ -283,6 +315,7 @@ def format_block(mon: Monitor, version: str, when: float) -> str:
 def to_json(mon: Monitor, version: str, when: float) -> str:
     d = asdict(mon)
     d["raw"] = mon.raw.hex()
+    d["errors"] = error_names(mon.error_status)
     d["code_version"] = version
     d["timestamp"] = when
     return json.dumps(d)
@@ -313,8 +346,9 @@ def run_tui(reader: "KellyReader", interval: float, once: bool) -> int:
         if mon.error_status == 0:
             err = Text("Error Status:   (none)", style="green")
         else:
-            bits = ",".join(str(i) for i in range(16) if mon.error_status & (1 << i))
-            err = Text(f"Error Status:   0x{mon.error_status:04X}  bits {bits}",
+            faults = ", ".join(f"bit{b} {ERROR_NAMES[b]}"
+                               for b in range(16) if mon.error_status & (1 << b))
+            err = Text(f"Error Status:   0x{mon.error_status:04X}  {faults}",
                        style="bold red")
 
         grid = Table(box=box.SQUARE, show_header=False, pad_edge=False)
