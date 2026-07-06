@@ -16,12 +16,26 @@ The 4-pin port is an **SM-4P connector** speaking Kelly's proprietary "ETS"
 serial protocol, not CAN. Pin functions from the KLS-S manual (Figure 13) —
 CONFIRMED:
 
-| Pin | Signal | Direction / wiring                                       |
-|-----|--------|----------------------------------------------------------|
-| 1   | V+     | ~5 V supply out of the controller; leave unconnected     |
-| 2   | Tx     | Controller → host; wire to the adapter's **RX**          |
-| 3   | Rx     | Host → controller; wire to the adapter's **TX**          |
-| 4   | V−     | Ground / signal return; wire to the adapter's **GND**    |
+| Pin | Signal | Wire color | Direction / wiring                                       |
+|-----|--------|------------|----------------------------------------------------------|
+| 1   | V+     | red        | ~12 V supply out of the controller; leave unconnected    |
+| 2   | Tx     | green      | Controller → host; wire to the adapter's **RX**          |
+| 3   | Rx     | blue       | Host → controller; wire to the adapter's **TX**          |
+| 4   | V−     | black      | Ground / signal return; wire to the adapter's **GND**    |
+
+Wire colors on this tractor's harness run **red, green, blue, black** in pin
+order — all four CONFIRMED. **Red = V+ (12 V)** and **black = V− (ground)** are
+metered (the supply pair) and sit at pins 1 and 4, the two ends. **Green = Tx
+(pin 2)** and **blue = Rx (pin 3)** are confirmed by a live decode: with green
+driving the host's RX (through the series resistor) and blue on the host's TX,
+the controller returns valid checksummed telemetry.
+
+Pin 1's supply measures **~12 V** across V+/V− on this tractor — CONFIRMED by
+meter, not the ~5 V the pin was previously assumed to carry. Leave it
+unconnected, and in particular never wire it to a TTL adapter's VCC or a
+level-shifter's HV reference: 12 V there will destroy the part. This is a
+low-voltage supply rail and is unrelated to the Tx/Rx logic swing (5 V TTL —
+see below).
 
 Wire protocol is **19200 baud, 8N1**, framed as
 `[CMD][LEN][DATA 0..16][CHECKSUM]` in 19-byte frames, checksum
@@ -35,10 +49,18 @@ documents the field offsets.
 full bidirectional monitor session succeeded through a bare CH340 (TTL)
 USB-serial adapter: the controller received the query commands and returned
 valid checksummed frames, which a TTL adapter could not do against an RS-232
-port. So a plain TTL USB-UART works directly and no MAX3232 is needed. The exact
-swing (3.3 V vs 5 V) is unmeasured and matters only when driving an ESP32 GPIO —
-level-shift if it turns out to be 5 V. The controller only talks with PWR above
-~18 V, so telemetry is available only when the tractor is powered.
+port. So a plain TTL USB-UART works directly and no MAX3232 is needed.
+
+The logic swing measures **~5 V** on Tx and Rx (to V−) under active traffic —
+CONFIRMED, so this is **5 V TTL**. The line idles high near 5 V and pulses to
+0 V. That's fine for a 5 V-friendly CH340, but it matters when driving a 3.3 V
+ESP32 GPIO, which is not 5 V-tolerant: put a **~1–2.2 kΩ resistor in series** on
+the Kelly-Tx → ESP32-RX line (or a BSS138 level-shifter on that line). The
+resistor is not a divider — the ESP32's internal clamp diode holds the pin at
+3.3 V and the series resistor limits clamp current to <1 mA. The other direction
+(ESP32-TX → Kelly-Rx) is a plain wire; 3.3 V clears the Kelly's input-high
+threshold. The controller only talks with PWR above ~18 V, so telemetry is
+available only when the tractor is powered.
 
 The protocol is single-master request/response — sniff passively or be the only
 talker. The flash-write command set can misconfigure the controller; capture
