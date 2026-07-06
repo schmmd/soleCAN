@@ -197,7 +197,7 @@ function feta(s){
 }
 var detailOpen=false,lastData=null;
 function update(d){
-  const p=d.pack||{},m=d.motor||{},can=d.can||{};
+  const p=d.pack||{},m=d.motor||{},can=d.can||{},k=d.kelly||{};
   const pc=p.cells||{},pt=pc.temp_summary||{};
   const bst=(d.bms&&d.bms.state)||{};
   const fts=d.faults||{},chg=d.charger||{},cmd=d.chgr_cmd||{};
@@ -209,6 +209,7 @@ function update(d){
   (fts.mc||[]).forEach(function(c){
     al.push('MC '+c+(MC_FAULTS[c]?' ('+MC_FAULTS[c]+')':''));
   });
+  (k.errors||[]).forEach(function(c){al.push('Kelly pump: '+c);});
   document.getElementById('al').innerHTML=al.length
     ? '<div class="alert">⚠ '+al.join('<br>⚠ ')+'</div>'
     : '';
@@ -373,6 +374,20 @@ function update(d){
     kv('Charger current',chg.current_a!=null?chg.current_a.toFixed(1)+' A':'–')+
     kv('Charger power',dcw)+
     kv('BMS setpoint V / A',f(cmd.voltage_v)+' / '+f(cmd.current_a))+'</div>';
+  // Kelly e-hydraulic pump controller (RejsaCAN ENABLE_KELLY build only). The
+  // card renders only when the firmware is emitting `kelly`; absent otherwise,
+  // so non-Kelly tractors/boards are unaffected. Freshness is gated firmware-
+  // side, so a present object is a live reading.
+  if(d.kelly){
+    bot+='<div class="card" style="grid-column:1/-1"><h3>Hydraulic Pump (Kelly)</h3>'+
+      kv('B+ voltage',k.b_plus_v!=null?k.b_plus_v+' V':'–')+
+      kv('Pump RPM',k.motor_speed_rpm!=null?k.motor_speed_rpm:'–')+
+      kv('Phase current',k.phase_current_a!=null?k.phase_current_a+' A':'–')+
+      kv('Motor temp',ftemp(k.motor_temp_c))+
+      kv('Controller temp',ftemp(k.controller_temp_c))+
+      kv('Speed mode',k.low_speed?'Low (~2400 RPM)':'High (~2800 RPM)')+
+      kv('Faults',(k.errors&&k.errors.length)?k.errors.join(', '):'none')+'</div>';
+  }
   document.getElementById('bot').innerHTML=bot;
   var age=can.last_frame_age_s;
   var dot=can.state==='running'?'<span class="ok">●</span>':'<span class="bad">●</span>';

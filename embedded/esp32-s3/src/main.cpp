@@ -120,12 +120,26 @@
   #define VIN_DIVIDER_NUM  153    // (R18 + R6) in kΩ
   #define VIN_DIVIDER_DEN  33     // R6 in kΩ
   #define HAS_VIN_SENSE    1
+  // Kelly e-hydraulic pump controller serial port (opt-in, -DENABLE_KELLY).
+  // Wired to the board's rear "RXD"/"TXD" pads = the ESP32-S3 UART0 pins, which
+  // are free here because the console/SLCAN runs over native USB. The Kelly is
+  // 5 V TTL: the green (Kelly Tx) wire needs a ~1–2.2 kΩ series resistor into
+  // KELLY_RXD_PIN (see kelly/README.md); blue (Kelly Rx) drives KELLY_TXD_PIN
+  // directly, black to GND, red (12 V) left unconnected.
+  #define KELLY_RXD_PIN    GPIO_NUM_44   // "RXD" pad <- Kelly Tx (green), via resistor
+  #define KELLY_TXD_PIN    GPIO_NUM_43   // "TXD" pad -> Kelly Rx (blue)
 #else
   #error "Define a board: BOARD_ADAFRUIT_FEATHER_S3, BOARD_LILYGO_T2CAN, or BOARD_REJSACAN"
 #endif
 
 #ifndef LED_IS_DUAL_GPIO
   #define LED_IS_DUAL_GPIO 0
+#endif
+
+// Kelly e-hydraulic pump monitor is RejsaCAN-only (it needs the RXD/TXD pads
+// wired to the controller's serial port). Fail loudly if enabled elsewhere.
+#if defined(ENABLE_KELLY) && !defined(BOARD_REJSACAN)
+  #error "ENABLE_KELLY requires BOARD_REJSACAN"
 #endif
 
 // WiFi runs in dual AP+STA mode: the board always broadcasts its own hotspot
@@ -299,6 +313,27 @@ struct Dm1State {
     bool     valid      = false;
 };
 
+#if defined(ENABLE_KELLY)
+// Decoded Kelly monitor block. Field offsets and raw semantics mirror
+// kelly/solectrac-kelly-monitor.py Monitor.decode (offsets 0..21 defined; the
+// rest of the 48-byte block is unknown). Values are kept raw, no scaling, to
+// match the Python decode — see kelly/README.md for what's CONFIRMED vs
+// TENTATIVE. `valid`/`last_seen_ms` drive JSON freshness like the CAN states.
+struct KellyState {
+    uint8_t  tps_pedal         = 0;
+    uint8_t  b_plus_v          = 0;   // battery volts (raw byte)
+    int16_t  motor_temp_c      = 0;
+    int16_t  controller_temp_c = 0;
+    uint8_t  forward_switch    = 0;
+    uint8_t  low_speed         = 0;   // 1 = low setpoint (~2400), 0 = high (~2800)
+    uint16_t error_status      = 0;   // 16-bit fault bitmask (bit -> KELLY_ERROR_NAMES)
+    uint16_t motor_speed_rpm   = 0;
+    uint16_t phase_current_a   = 0;
+    bool     valid             = false;
+    uint32_t last_seen_ms      = 0;
+};
+#endif
+
 // ── Global state ──────────────────────────────────────────────────────────────
 // All updated from the CAN decode path inside loop(), read when building JSON
 // from the same thread — no locking needed.
@@ -312,6 +347,9 @@ BmsFaults   g_bms_faults;
 MotorState  g_motor;
 ChargerState g_charger;
 ChgrCmdState g_chgr_cmd;
+#if defined(ENABLE_KELLY)
+KellyState  g_kelly;   // updated by kellyPoll() in loop(), read when building JSON
+#endif
 uint8_t     g_vc_state   = 0xFF;   // 0xFF = never seen
 uint8_t     g_dash_alive = 0xFF;
 Dm1State    g_dm1;
@@ -748,6 +786,114 @@ void decodeCAN(uint32_t can_id, const uint8_t* raw, uint8_t len) {
     }
 }
 
+// ── Kelly e-hydraulic pump monitor (opt-in) ─────────────────────────────────────
+#if defined(ENABLE_KELLY)
+// Read-only serial monitor for the Kelly KLS pump controller on UART1. Ports the
+// ETS protocol from kelly/solectrac-kelly-monitor.py: 19200 8N1, three zero-data
+// monitor queries 0x3A/0x3B/0x3C, each answered by [CMD,0x10,<16 data>,CHK]; the
+// three 16-byte replies concatenate into a 48-byte block. Polling is a
+// cooperative state machine so loop() never blocks. See kelly/README.md.
+
+static const uint32_t KELLY_BAUD             = 19200;
+static const uint8_t  KELLY_MON_CMDS[3]      = {0x3A, 0x3B, 0x3C};
+static const uint32_t KELLY_POLL_INTERVAL_MS = 500;    // gap between full cycles
+static const uint32_t KELLY_CMD_TIMEOUT_MS   = 150;    // per-command reply wait
+static const uint32_t KELLY_STALE_MS         = 3000;   // JSON freshness window
+
+// Display-only fault names by error_status bit (0..15). Kept in the renderer per
+// project convention; the encoding (BE u16 @ block offset 16) is the protocol
+// fact. Mirrors ERROR_NAMES in solectrac-kelly-monitor.py.
+static const char* const KELLY_ERROR_NAMES[16] = {
+    "Identify Err", "Over Volt", "Low Volt", "Reserved",
+    "Locking", "V+ Err", "Overtemp", "High Pedel",
+    "Reserved", "Reset Error", "Pedel Error", "Hall Sensor Error",
+    "Reserved", "Emergency Rev Err", "Motor OverTemp Err", "Current Meter Err",
+};
+
+// Read-only transmit chokepoint: only the three zero-data monitor queries are
+// ever put on the wire (mirrors READ_ONLY_COMMANDS in the Python monitor). No
+// flash session is opened, so the firmware cannot write or reconfigure the
+// controller — read-only by construction.
+static bool kellyIsMonitorCmd(uint8_t cmd) {
+    return cmd == 0x3A || cmd == 0x3B || cmd == 0x3C;
+}
+static void kellySendQuery(uint8_t cmd) {
+    if (!kellyIsMonitorCmd(cmd)) return;          // refuse anything else
+    const uint8_t frame[3] = {cmd, 0x00, cmd};    // [CMD, LEN=0, CHK=CMD]
+    Serial1.write(frame, sizeof(frame));
+}
+
+// Decode the 48-byte block into g_kelly. Offsets and raw (unscaled) semantics
+// mirror Monitor.decode; only offsets 0..21 are defined by the protocol.
+static void kellyDecodeBlock(const uint8_t* b) {
+    g_kelly.tps_pedal         = b[0];
+    g_kelly.forward_switch    = b[4];
+    g_kelly.b_plus_v          = b[9];
+    g_kelly.motor_temp_c      = b[10];   // raw byte, as the Python decode leaves it
+    g_kelly.controller_temp_c = b[11];
+    g_kelly.low_speed         = b[15];
+    g_kelly.error_status      = (uint16_t(b[16]) << 8) | b[17];   // big-endian
+    g_kelly.motor_speed_rpm   = (uint16_t(b[18]) << 8) | b[19];
+    g_kelly.phase_current_a   = (uint16_t(b[20]) << 8) | b[21];
+    g_kelly.valid             = true;
+    g_kelly.last_seen_ms      = millis();
+}
+
+void kellyInit() {
+    Serial1.begin(KELLY_BAUD, SERIAL_8N1, KELLY_RXD_PIN, KELLY_TXD_PIN);
+}
+
+// Advance the poll state machine by one loop() tick. Sends one monitor query,
+// accumulates its reply across ticks, and on the third good reply decodes the
+// block. A per-command timeout aborts the cycle and lets g_kelly go stale.
+void kellyPoll() {
+    static enum { KIDLE, KWAIT } state = KIDLE;
+    static uint8_t  block[48];
+    static uint8_t  rxbuf[32];
+    static uint8_t  rxlen     = 0;
+    static uint8_t  cmd_index = 0;
+    static uint32_t cycle_ms  = 0;   // last cycle start
+    static uint32_t cmd_ms    = 0;   // current query send time
+
+    uint32_t now = millis();
+
+    if (state == KIDLE) {
+        if (now - cycle_ms < KELLY_POLL_INTERVAL_MS) return;
+        cycle_ms  = now;
+        cmd_index = 0;
+        rxlen     = 0;
+        while (Serial1.available()) Serial1.read();   // drop stale bytes
+        kellySendQuery(KELLY_MON_CMDS[0]);
+        cmd_ms = now;
+        state  = KWAIT;
+        return;
+    }
+
+    // KWAIT: gather this command's reply, resync on [CMD, 0x10, <16>, CHK].
+    uint8_t cmd = KELLY_MON_CMDS[cmd_index];
+    while (Serial1.available() && rxlen < sizeof(rxbuf)) {
+        rxbuf[rxlen++] = (uint8_t)Serial1.read();
+    }
+    for (int i = 0; i + 19 <= rxlen; i++) {
+        if (rxbuf[i] != cmd || rxbuf[i + 1] != 0x10) continue;
+        uint16_t sum = cmd + 0x10;
+        for (int j = 0; j < 16; j++) sum += rxbuf[i + 2 + j];
+        if ((sum & 0xFF) != rxbuf[i + 18]) continue;
+        memcpy(&block[cmd_index * 16], &rxbuf[i + 2], 16);
+        rxlen = 0;
+        if (++cmd_index >= 3) {
+            kellyDecodeBlock(block);
+            state = KIDLE;
+            return;
+        }
+        kellySendQuery(KELLY_MON_CMDS[cmd_index]);
+        cmd_ms = now;
+        return;
+    }
+    if (now - cmd_ms > KELLY_CMD_TIMEOUT_MS) state = KIDLE;   // give up this cycle
+}
+#endif  // ENABLE_KELLY
+
 // ── JSON builder ──────────────────────────────────────────────────────────────
 
 static void addFloat(JsonObject& obj, const char* key, float v, int decimals = 2) {
@@ -993,6 +1139,30 @@ String buildJson(bool pretty = true, bool minimal = false) {
         if (!minimal && g_chgr_cmd.v_raw) cmd["v_raw"] = g_chgr_cmd.v_raw;
         if (!minimal && g_chgr_cmd.i_raw) cmd["i_raw"] = g_chgr_cmd.i_raw;
     }
+
+#if defined(ENABLE_KELLY)
+    // Kelly e-hydraulic pump controller. Emitted only while fresh; when the pump
+    // system is unpowered the controller goes silent and the object drops out
+    // (the dashboard then hides its card). Key names match dashboard.html.
+    if (g_kelly.valid && (millis() - g_kelly.last_seen_ms) < KELLY_STALE_MS) {
+        auto k = doc["kelly"].to<JsonObject>();
+        k["b_plus_v"]          = g_kelly.b_plus_v;
+        k["motor_speed_rpm"]   = g_kelly.motor_speed_rpm;
+        k["phase_current_a"]   = g_kelly.phase_current_a;
+        k["motor_temp_c"]      = g_kelly.motor_temp_c;
+        k["controller_temp_c"] = g_kelly.controller_temp_c;
+        k["low_speed"]         = g_kelly.low_speed;
+        k["error_status"]      = g_kelly.error_status;
+        if (!minimal) {
+            k["tps_pedal"]      = g_kelly.tps_pedal;
+            k["forward_switch"] = g_kelly.forward_switch;
+        }
+        auto errs = k["errors"].to<JsonArray>();
+        for (int b = 0; b < 16; b++) {
+            if (g_kelly.error_status & (1 << b)) errs.add(KELLY_ERROR_NAMES[b]);
+        }
+    }
+#endif
 
     if (!minimal) {
         // Vehicle controller
@@ -1509,6 +1679,10 @@ void setup() {
     digitalWrite(FORCE_ON_PIN, HIGH);
 #endif
 
+#if defined(ENABLE_KELLY)
+    kellyInit();   // Kelly pump monitor on UART1 (RXD/TXD pads)
+#endif
+
     for (int i = 0; i < NUM_CELLS; i++) g_cell_v[i] = NAN;
     for (int i = 0; i < NUM_TEMPS; i++) g_temp_c[i] = NAN;
 
@@ -1647,5 +1821,8 @@ void loop() {
     updateLed();
 #if defined(HAS_VIN_SENSE)
     updateVinSense();
+#endif
+#if defined(ENABLE_KELLY)
+    kellyPoll();   // non-blocking: advances the Kelly monitor state machine
 #endif
 }

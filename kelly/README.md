@@ -10,6 +10,11 @@ topology and why the hydraulics don't appear there live in
 This directory documents the Kelly's **4-pin serial diagnostic port** and
 provides `solectrac-kelly-monitor.py`, a read-only live monitor for it.
 
+The RejsaCAN firmware can also read this port directly and add the pump
+telemetry to the tractor dashboard — build with `-DENABLE_KELLY`, wiring the
+controller's Tx/Rx to the board's RXD/TXD pads (with the 5 V-TTL series resistor
+below). See `../embedded/esp32-s3/README.md` §"Kelly e-hydraulic pump monitor".
+
 ## Connector and wire protocol
 
 The 4-pin port is an **SM-4P connector** speaking Kelly's proprietary "ETS"
