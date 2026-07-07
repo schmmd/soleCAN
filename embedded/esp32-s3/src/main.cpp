@@ -141,6 +141,11 @@
 #if defined(ENABLE_KELLY) && !defined(BOARD_REJSACAN)
   #error "ENABLE_KELLY requires BOARD_REJSACAN"
 #endif
+// Bench-only: turn the board into a transparent USB<->Kelly-UART bridge so the
+// Python monitor can validate the RXD/TXD wiring through the real hardware.
+#if defined(KELLY_PASSTHROUGH) && !defined(ENABLE_KELLY)
+  #error "KELLY_PASSTHROUGH requires ENABLE_KELLY (it needs the UART pins/init)"
+#endif
 
 // WiFi runs in dual AP+STA mode: the board always broadcasts its own hotspot
 // (so it's reachable in the field), and concurrently tries to join the
@@ -349,6 +354,21 @@ ChargerState g_charger;
 ChgrCmdState g_chgr_cmd;
 #if defined(ENABLE_KELLY)
 KellyState  g_kelly;   // updated by kellyPoll() in loop(), read when building JSON
+// Debug counters, always exposed in /json under "kelly_dbg" so we can see the
+// serial path even when no valid frame decodes: how many polls fired, how many
+// bytes came back, and the raw hex of the last chunk received.
+uint32_t    g_kelly_polls    = 0;   // query cycles started
+uint32_t    g_kelly_rx_total = 0;   // total bytes ever read from Serial1
+uint8_t     g_kelly_last_rx[32];    // last raw chunk received
+uint8_t     g_kelly_last_rx_len = 0;
+uint8_t     g_kelly_baud_idx    = 0;      // index into KELLY_BAUDS being tried
+bool        g_kelly_baud_locked = false;  // set once a reply checksums
+// Flicker/reliability counters: how cleanly frames land at the current baud.
+uint32_t    g_kelly_frames_ok   = 0;      // replies that checksummed
+uint32_t    g_kelly_frames_bad  = 0;      // header seen but checksum failed
+uint32_t    g_kelly_blocks_ok   = 0;      // full 48-byte blocks decoded (a card update)
+uint32_t    g_kelly_last_block_ms    = 0; // millis() of last full decode
+uint32_t    g_kelly_block_gap_max_ms = 0; // worst gap between full decodes (worst flicker)
 #endif
 uint8_t     g_vc_state   = 0xFF;   // 0xFF = never seen
 uint8_t     g_dash_alive = 0xFF;
@@ -794,11 +814,37 @@ void decodeCAN(uint32_t can_id, const uint8_t* raw, uint8_t len) {
 // three 16-byte replies concatenate into a 48-byte block. Polling is a
 // cooperative state machine so loop() never blocks. See kelly/README.md.
 
-static const uint32_t KELLY_BAUD             = 19200;
+// The Kelly runs at 19200, but this RejsaCAN's UART1 clock measures ~4% slow, so
+// a nominal 20000 lands the actual line rate on the Kelly's real 19200 (verified
+// on the tractor at ~99% frame success). The loopback never caught this because
+// TX and RX shared that same slow clock. So 20000 is pinned by default — no
+// sweep, which avoids ever mis-locking on a near-miss rate.
+//   -DKELLY_BAUD_HZ=N  pin a different single rate.
+//   -DKELLY_BAUD_SWEEP auto-detect on a board whose clock error is unknown:
+//                      try each rate until a full reading assembles, then lock.
+#if defined(KELLY_BAUD_HZ)
+static const uint32_t KELLY_BAUDS[] = { KELLY_BAUD_HZ };
+#elif defined(KELLY_BAUD_SWEEP)
+static const uint32_t KELLY_BAUDS[] = {
+    20000, 19600, 20400, 19200, 20800, 18800, 21200, 18400,
+    21600, 18000, 22050, 17280, 22500, 16000, 24000, 14400,
+    9600, 38400,
+};
+#else
+static const uint32_t KELLY_BAUDS[] = { 20000 };
+#endif
+static const uint8_t  KELLY_N_BAUDS          = sizeof(KELLY_BAUDS) / sizeof(KELLY_BAUDS[0]);
 static const uint8_t  KELLY_MON_CMDS[3]      = {0x3A, 0x3B, 0x3C};
-static const uint32_t KELLY_POLL_INTERVAL_MS = 500;    // gap between full cycles
-static const uint32_t KELLY_CMD_TIMEOUT_MS   = 150;    // per-command reply wait
-static const uint32_t KELLY_STALE_MS         = 3000;   // JSON freshness window
+static const uint32_t KELLY_POLL_INTERVAL_MS = 40;     // gap between individual queries
+static const uint32_t KELLY_CMD_TIMEOUT_MS   = 600;    // per-command reply wait
+                                                       // (matches the Python
+                                                       // monitor's 0.6 s; the
+                                                       // Kelly's turnaround plus
+                                                       // loop latency exceeds a
+                                                       // short window)
+static const uint32_t KELLY_STALE_MS         = 5000;   // JSON freshness window (a
+                                                       // little headroom over the
+                                                       // observed worst-case gap)
 
 // Display-only fault names by error_status bit (0..15). Kept in the renderer per
 // project convention; the encoding (BE u16 @ block offset 16) is the protocol
@@ -840,57 +886,98 @@ static void kellyDecodeBlock(const uint8_t* b) {
 }
 
 void kellyInit() {
-    Serial1.begin(KELLY_BAUD, SERIAL_8N1, KELLY_RXD_PIN, KELLY_TXD_PIN);
+    // Serial1.begin(baud, config, rxPin, txPin). Baud is the first sweep
+    // candidate; kellyPoll() steps through the rest until a reply checksums.
+    Serial1.begin(KELLY_BAUDS[0], SERIAL_8N1, KELLY_RXD_PIN, KELLY_TXD_PIN);
 }
 
-// Advance the poll state machine by one loop() tick. Sends one monitor query,
-// accumulates its reply across ticks, and on the third good reply decodes the
-// block. A per-command timeout aborts the cycle and lets g_kelly go stale.
+// Fault-tolerant poller. Rotates through the monitor commands one at a time,
+// caching each good reply in its own 16-byte slot with a timestamp. The decoded
+// reading is rebuilt whenever every needed slot is recently fresh — so a single
+// corrupted reply (EMI, a marginally-off baud) only delays that one slot instead
+// of dropping the whole reading and flickering the card. Only 0x3A and 0x3B are
+// polled: their 32 bytes carry every field kellyDecodeBlock reads (offsets
+// 0..21); 0x3C's bytes are unused, so skipping it halves the frames per reading.
+static const uint8_t KELLY_N_POLL = 2;   // poll KELLY_MON_CMDS[0..1] = 0x3A, 0x3B
 void kellyPoll() {
     static enum { KIDLE, KWAIT } state = KIDLE;
-    static uint8_t  block[48];
-    static uint8_t  rxbuf[32];
-    static uint8_t  rxlen     = 0;
-    static uint8_t  cmd_index = 0;
-    static uint32_t cycle_ms  = 0;   // last cycle start
-    static uint32_t cmd_ms    = 0;   // current query send time
+    static uint8_t  block[KELLY_N_POLL * 16];
+    static uint32_t slot_ms[KELLY_N_POLL] = {0};   // when each slot last refreshed
+    static uint8_t  rxbuf[40];
+    static uint8_t  rxlen  = 0;
+    static uint8_t  cur    = 0;      // command index currently in flight
+    static uint32_t next_ms = 0;     // earliest time to send the next query
+    static uint32_t sent_ms = 0;     // when the current query went out
+    static uint16_t tries  = 0;      // attempts since last full block (auto-baud)
 
     uint32_t now = millis();
 
     if (state == KIDLE) {
-        if (now - cycle_ms < KELLY_POLL_INTERVAL_MS) return;
-        cycle_ms  = now;
-        cmd_index = 0;
-        rxlen     = 0;
+        if (now < next_ms) return;
+        // Auto-baud (sweep builds only): step to the next candidate if this one
+        // hasn't produced a full reading in a while. Locking waits for a whole
+        // block, not a single lucky frame, so a near-miss rate can't stick.
+        if (!g_kelly_baud_locked && KELLY_N_BAUDS > 1 && tries >= 8) {
+            tries = 0;
+            g_kelly_baud_idx = (g_kelly_baud_idx + 1) % KELLY_N_BAUDS;
+            Serial1.updateBaudRate(KELLY_BAUDS[g_kelly_baud_idx]);
+        }
+        rxlen = 0;
         while (Serial1.available()) Serial1.read();   // drop stale bytes
-        kellySendQuery(KELLY_MON_CMDS[0]);
-        cmd_ms = now;
-        state  = KWAIT;
+        g_kelly_polls++;
+        if (!g_kelly_baud_locked) tries++;   // reset only when a block decodes
+        kellySendQuery(KELLY_MON_CMDS[cur]);
+        sent_ms = now;
+        state   = KWAIT;
         return;
     }
 
-    // KWAIT: gather this command's reply, resync on [CMD, 0x10, <16>, CHK].
-    uint8_t cmd = KELLY_MON_CMDS[cmd_index];
+    // KWAIT: gather the reply for command `cur`, resync on [CMD, 0x10, <16>, CHK].
     while (Serial1.available() && rxlen < sizeof(rxbuf)) {
         rxbuf[rxlen++] = (uint8_t)Serial1.read();
+        g_kelly_rx_total++;
     }
+    if (rxlen > 0) {   // snapshot for /json kelly_dbg
+        g_kelly_last_rx_len = rxlen < 32 ? rxlen : 32;
+        memcpy(g_kelly_last_rx, rxbuf, g_kelly_last_rx_len);
+    }
+    uint8_t cmd = KELLY_MON_CMDS[cur];
     for (int i = 0; i + 19 <= rxlen; i++) {
         if (rxbuf[i] != cmd || rxbuf[i + 1] != 0x10) continue;
         uint16_t sum = cmd + 0x10;
         for (int j = 0; j < 16; j++) sum += rxbuf[i + 2 + j];
-        if ((sum & 0xFF) != rxbuf[i + 18]) continue;
-        memcpy(&block[cmd_index * 16], &rxbuf[i + 2], 16);
-        rxlen = 0;
-        if (++cmd_index >= 3) {
+        if ((sum & 0xFF) != rxbuf[i + 18]) continue;   // bad frame: keep scanning
+        // Good reply — cache this slot. (Don't lock yet: a single frame can
+        // fluke a checksum at a near-miss baud; only a full block locks.)
+        g_kelly_frames_ok++;
+        memcpy(&block[cur * 16], &rxbuf[i + 2], 16);
+        slot_ms[cur] = now ? now : 1;
+        // Rebuild the reading if every slot is populated and recently fresh.
+        bool all_fresh = true;
+        for (uint8_t s = 0; s < KELLY_N_POLL; s++)
+            if (!slot_ms[s] || (now - slot_ms[s]) >= KELLY_STALE_MS) all_fresh = false;
+        if (all_fresh) {
             kellyDecodeBlock(block);
-            state = KIDLE;
-            return;
+            g_kelly_baud_locked = true;   // a full reading assembled — rate is right
+            tries = 0;
+            g_kelly_blocks_ok++;
+            if (g_kelly_last_block_ms != 0) {
+                uint32_t gap = now - g_kelly_last_block_ms;
+                if (gap > g_kelly_block_gap_max_ms) g_kelly_block_gap_max_ms = gap;
+            }
+            g_kelly_last_block_ms = now;
         }
-        kellySendQuery(KELLY_MON_CMDS[cmd_index]);
-        cmd_ms = now;
+        cur     = (cur + 1) % KELLY_N_POLL;   // next command
+        next_ms = now + KELLY_POLL_INTERVAL_MS;
+        state   = KIDLE;
         return;
     }
-    if (now - cmd_ms > KELLY_CMD_TIMEOUT_MS) state = KIDLE;   // give up this cycle
+    if (now - sent_ms > KELLY_CMD_TIMEOUT_MS) {   // no valid reply this attempt
+        g_kelly_frames_bad++;                     // one clean count per failed attempt
+        cur     = (cur + 1) % KELLY_N_POLL;       // advance so a dead slot can't stall
+        next_ms = now + KELLY_POLL_INTERVAL_MS;
+        state   = KIDLE;
+    }
 }
 #endif  // ENABLE_KELLY
 
@@ -1162,7 +1249,31 @@ String buildJson(bool pretty = true, bool minimal = false) {
             if (g_kelly.error_status & (1 << b)) errs.add(KELLY_ERROR_NAMES[b]);
         }
     }
-#endif
+#if defined(KELLY_DEBUG)
+    // Serial-path diagnostics (build with -DKELLY_DEBUG). polls should climb
+    // (board is querying); rx_total > 0 means the Kelly is answering; frames_ok
+    // vs frames_bad is the per-attempt success rate; block_gap_max_ms is the
+    // worst flicker; last_rx shows raw bytes for framing/baud checks.
+    if (!minimal) {
+        auto kd = doc["kelly_dbg"].to<JsonObject>();
+        kd["polls"]       = g_kelly_polls;
+        kd["rx_total"]    = g_kelly_rx_total;
+        kd["baud"]        = KELLY_BAUDS[g_kelly_baud_idx];
+        kd["baud_locked"] = g_kelly_baud_locked;
+        kd["frames_ok"]   = g_kelly_frames_ok;
+        kd["frames_bad"]  = g_kelly_frames_bad;
+        kd["blocks_ok"]   = g_kelly_blocks_ok;
+        kd["block_gap_max_ms"] = g_kelly_block_gap_max_ms;
+        kd["block_gap_ms"]     = g_kelly_last_block_ms ? (millis() - g_kelly_last_block_ms) : 0;
+        kd["last_rx_len"] = g_kelly_last_rx_len;
+        char hex[65];
+        uint8_t n = g_kelly_last_rx_len < 32 ? g_kelly_last_rx_len : 32;
+        for (uint8_t i = 0; i < n; i++) sprintf(hex + i * 2, "%02X", g_kelly_last_rx[i]);
+        hex[n * 2] = '\0';
+        kd["last_rx"] = hex;
+    }
+#endif  // KELLY_DEBUG
+#endif  // ENABLE_KELLY
 
     if (!minimal) {
         // Vehicle controller
@@ -1781,6 +1892,15 @@ void setup() {
 }
 
 void loop() {
+#if defined(KELLY_PASSTHROUGH)
+    // Bench passthrough: transparent native-USB <-> Kelly-UART bridge. Lets the
+    // Python monitor (solectrac-kelly-monitor.py --port <this board>) talk to the
+    // controller through the board to validate the RXD/TXD wiring and 5 V-TTL
+    // series resistor. Nothing else runs — no CAN, no decode, no SLCAN.
+    while (Serial.available())  Serial1.write(Serial.read());
+    while (Serial1.available()) Serial.write(Serial1.read());
+    return;
+#endif
     twai_message_t msg;
     while (twai_receive(&msg, 0) == ESP_OK) {
         // Classic CAN allows DLC 9–15 on the wire (still only 8 data bytes)
