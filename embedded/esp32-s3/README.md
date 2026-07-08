@@ -344,6 +344,50 @@ uv run python -m can.logger -i socketcand -c can1 --bus-kwargs host=tractor.loca
 One client per channel is allowed; a new connection on a busy channel is
 refused so the existing clients aren't disturbed.
 
+## SD-card session logging (RejsaCAN only)
+
+The RejsaCAN-ESP32-S3 has an onboard microSD reader (SPI: SCK 39, MOSI 40,
+MISO 41, CS 45 — pins that dodge the N16R8 module's octal-PSRAM lines). When a
+FAT-formatted card is present **at boot**, the firmware records the whole
+session to it; with no card it runs exactly as a card-less tap (zero overhead,
+no writer task). A card inserted after boot is *not* picked up — reboot to use
+it. The two other boards have no card reader and are unaffected.
+
+Each power-on is one session directory `/sNNNNN/` (index = highest existing + 1),
+containing two streams, split into 64 MB parts:
+
+| File | Contents |
+|---|---|
+| `raw_PP.asc` | every received CAN frame, Vector ASCII — replayable by the Python tools unchanged |
+| `data_PP.jsonl` | one full `/json` snapshot per line at `SD_JSON_HZ` (default **1 Hz**) |
+
+- **Crash-safe-ish:** the writer `fsync`s every ~1 s (`SD_FLUSH_MS`), so any
+  power cut, reset, or crash loses at most ~1 s of not-yet-synced data.
+- **Never fills the card:** when free space drops below `SD_MIN_FREE_BYTES`
+  (default 512 MB) the writer deletes the **oldest** session directory (never
+  the active one) until it's back above the threshold.
+- **Never stalls the bus:** all SD I/O runs on a dedicated core-0 task fed by
+  PSRAM ring buffers; `loop()` only enqueues bytes. If a card stall fills a
+  ring, whole lines are dropped and counted (`sd.raw_dropped` / `sd.json_dropped`
+  in `/json`) rather than blocking the CAN receive path.
+
+Logging status shows in `/json` under `sd` (state, session, MB written, free MB,
+drops) and on the dashboard footer. Tunables are `#define`s at the top of the
+"SD-card session logging" section in `main.cpp` (`SD_JSON_HZ`, `SD_FLUSH_MS`,
+`SD_MAX_PART_BYTES`, `SD_MIN_FREE_BYTES`, ring sizes).
+
+**Pulling data off and replaying it** — pop the card into a reader, then the raw
+log feeds the existing tools directly:
+
+```bash
+python3 solecan-analyze.py -o out /Volumes/SD/s00007/raw_00.asc   # decode → CSVs
+python3 solecan-stream.py --replay /Volumes/SD/s00007/raw_00.asc  # TUI replay
+jq . /Volumes/SD/s00007/data_00.jsonl | less                       # decoded timeline
+```
+
+The `.jsonl` is a convenience timeline; the `.asc` is the full-fidelity record
+(you can always regenerate the decoded view from it with `solecan-analyze.py`).
+
 ## Source layout
 
 ```
