@@ -161,51 +161,6 @@ the `kelly` object appears only while the controller is powered and answering.
 Connector pinout, wire protocol, field map, and the series-resistor rationale
 are in [`../../kelly/README.md`](../../kelly/README.md).
 
-### Diagnosing the baud offset (`-DKELLY_BAUD_MEASURE`)
-
-An earlier reading from this diagnostic (**~19,900 baud**) was taken through a
-doubly-corrupted receive path — the Arduino core 2.0.x firmware bug on top of
-the noisy RXD0 console pad — and is void; spurious edges shorten the apparent
-bit period. With both fixed, the controller runs at its documented **19200**,
-which the firmware pins (see `../../kelly/README.md` §"Actual line rate" for
-the full account). The build stays useful for re-checking a different
-controller, temperature drift, or a suspect board: GPIO edge interrupts time
-the waveform on both UART pins against the board's 40 MHz crystal (accurate to
-parts per million) and serve the results in `/json` as a `kelly_baud` object.
-It only snoops the pins; polling keeps running.
-
-```bash
-PLATFORMIO_BUILD_FLAGS="-DENABLE_KELLY -DKELLY_DEBUG -DKELLY_BAUD_MEASURE" pio run -e rejsacan
-```
-
-Reading `kelly_baud`:
-
-- `rx.baud` — the measured line rate of the **Kelly's transmitter**. Valid even
-  while frames fail to decode, since it times raw edges, not decoded bytes. A
-  noisy receive pin biases it high, as the retired ~19,900 reading did.
-- `tx.baud` — the measured line rate of **this board's transmitter**; compare
-  against `nominal` to see whether the UART generates what it was asked for.
-- `sclk` / `sclk_div_num` / `clkdiv_int` / `clkdiv_frag` / `calc_baud` — the
-  UART's clock-source and divisor registers and the rate they compute to.
-  `sclk` should read `XTAL` (crystal-derived, exact); `RC_FAST` would mean the
-  baud generator runs from an RC oscillator that is off by several percent and
-  drifts with temperature.
-- `edges_total` — every edge seen on the pin since boot; zero means the line is
-  unwired or silent, not that the fit failed.
-- `bit_us`, `used`/`singles`, `windows` — the fitted bit time, the sample
-  counts behind it, and how many fits have passed the quality gates.
-- `pulses`, `noise`, `p25_us`/`p50_us`/`p90_us`, `fails` — what the last
-  analyzed window looked like, fit accepted or not: total pulse widths, how
-  many were sub-bit spikes (< 30 µs — the powered pump controller couples
-  these into the receive line; a UART receiver ignores them, the edge timer
-  must filter them), the width percentiles (a clean capture puts `p25_us`
-  near one bit time), and how many fits the gates refused. A climbing `fails`
-  with sub-bit `p25_us` means the line is too noisy to time, not that the
-  rate is wrong.
-
-With no Kelly attached, `tx` still measures — the poller keeps sending queries
-— so the board's own UART accuracy can be checked on the bench with no wiring.
-
 ## What the LED tells you
 
 The LilyGo T-2CAN has no user LED, so its LED calls are no-ops.

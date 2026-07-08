@@ -149,11 +149,6 @@
 #if defined(KELLY_PASSTHROUGH) && !defined(ENABLE_KELLY)
   #error "KELLY_PASSTHROUGH requires ENABLE_KELLY (it needs the UART pins/init)"
 #endif
-// Diagnostic: measure the true line rate of both Kelly UART pins against the
-// crystal and expose the UART's divisor/clock-source registers in /json.
-#if defined(KELLY_BAUD_MEASURE) && !defined(ENABLE_KELLY)
-  #error "KELLY_BAUD_MEASURE requires ENABLE_KELLY (it measures the Kelly UART pins)"
-#endif
 
 // WiFi runs in dual AP+STA mode: the board always broadcasts its own hotspot
 // (so it's reachable in the field), and concurrently tries to join the
@@ -826,11 +821,11 @@ void decodeCAN(uint32_t can_id, const uint8_t* raw, uint8_t len) {
 
 // The Kelly transmits at its documented 19200 baud — fixed, no sweep; CONFIRMED
 // by sustained ~99% frame success. An earlier ~19,900 figure (crystal-referenced
-// edge timing, -DKELLY_BAUD_MEASURE, below) was measured through a
-// doubly-corrupted receive path — an Arduino core 2.0.x firmware bug (fixed by
-// the pioarduino/core-3.x platform, see platformio.ini) on top of the noisy
-// RXD0 console pad (GPIO44, since moved to GPIO47/48) — and is void. The full
-// story is in kelly/README.md §"Actual line rate".
+// edge timing) was measured through a doubly-corrupted receive path — an
+// Arduino core 2.0.x firmware bug (fixed by the pioarduino/core-3.x platform,
+// see platformio.ini) on top of the noisy RXD0 console pad (GPIO44, since
+// moved to GPIO47/48) — and is void. The full story is in kelly/README.md
+// §"Actual line rate".
 static const uint32_t KELLY_BAUD = 19200;
 static const uint8_t  KELLY_MON_CMDS[3]      = {0x3A, 0x3B, 0x3C};
 static const uint32_t KELLY_POLL_INTERVAL_MS = 40;     // gap between individual queries
@@ -883,195 +878,10 @@ static void kellyDecodeBlock(const uint8_t* b) {
     g_kelly.last_seen_ms      = millis();
 }
 
-#if defined(KELLY_BAUD_MEASURE)
-// ── Kelly baud measurement (build with -DKELLY_BAUD_MEASURE) ────────────────
-// Settles which side of the Kelly link owns the ~4% baud offset by timing the
-// actual waveform on both pins against the crystal. A GPIO change-interrupt on
-// each pin records the width of every high/low pulse in CPU cycles; the CPU
-// clock is PLL'd from the 40 MHz crystal (ppm-accurate), so the widths are an
-// absolute time reference that is independent of the UART divisor being probed.
-// UART pulses are integer multiples of one bit time, so the analyzer recovers
-// the bit time — and thus the true line rate — from each capture window:
-//   RX pin (Kelly Tx wire)  -> the Kelly's real transmit rate
-//   TX pin (our Tx)         -> this board's real transmit rate
-// Snooping only: the interrupts tap the pins through the GPIO matrix, the UART
-// keeps running, and normal polling continues. Results are served in /json as
-// "kelly_baud", alongside a readback of the UART's divisor and clock-source
-// registers (a divisor fed by the RC oscillator instead of a crystal-derived
-// clock would explain a large, temperature-dependent offset).
-#include <algorithm>           // std::sort for the width percentiles/cluster seed
-#include "soc/uart_struct.h"   // UART1 clk_conf/clkdiv register readback
-#include "soc/gpio_periph.h"   // GPIO_PIN_MUX_REG
-#include "soc/io_mux_reg.h"    // FUN_IE: pad input-buffer enable
-
-static const uint16_t KELLY_MEAS_MAX_PULSES = 512;    // per capture window
-static const uint16_t KELLY_MEAS_MIN_PULSES = 64;     // don't fit thinner captures
-static const uint32_t KELLY_MEAS_WINDOW_MS  = 10000;  // analyze at least this often
-static const uint16_t KELLY_MEAS_CLUSTER    = 6;      // widths that must corroborate
-                                                      // the bit-time seed
-
-// One capture channel. The ISR appends pulse widths until the buffer fills;
-// kellyMeasPoll() fits them and re-arms. `total` counts every edge ever seen,
-// so /json can show whether a silent channel is unwired or just idle.
-struct KellyMeasChan {
-    volatile uint32_t last_cc = 0;      // cycle count at the previous edge
-    volatile bool     primed  = false;  // last_cc holds a real edge
-    volatile uint16_t n       = 0;      // widths stored this window
-    volatile uint32_t total   = 0;      // edges seen since boot
-    uint32_t width_cc[KELLY_MEAS_MAX_PULSES];
-};
-struct KellyMeasResult {
-    // Window diagnostics — updated by every fit attempt, pass or fail, so /json
-    // shows what the line actually looked like even when the fit refuses it.
-    uint16_t pulses  = 0;      // widths in the last analyzed window
-    uint16_t noise   = 0;      // of those, sub-floor spikes (not UART bits)
-    float    p25_us  = 0;      // width percentiles of the window: a healthy
-    float    p50_us  = 0;      //   capture puts p25 near one bit time; a
-    float    p90_us  = 0;      //   sub-bit p25 means electrical noise
-    uint32_t windows = 0;      // fits that passed the quality gates
-    uint32_t fails   = 0;      // fits rejected by them
-    // Fitted rate — updated only when a fit passes the gates.
-    bool     valid   = false;
-    uint16_t used    = 0;      // widths the bit-multiple fit kept
-    uint16_t singles = 0;      // single-bit pulses among them
-    float    bit_us  = 0;      // fitted bit time
-    float    baud    = 0;      // 1e6 / bit_us
-};
-static KellyMeasChan   g_kmeas_rx, g_kmeas_tx;          // RX pin, TX pin
-static KellyMeasResult g_kmeas_rx_res, g_kmeas_tx_res;
-static uint32_t        g_kmeas_window_ms = 0;
-
-static void IRAM_ATTR kellyMeasIsr(void* arg) {
-    KellyMeasChan* c = (KellyMeasChan*)arg;
-    uint32_t cc;
-    asm volatile("rsr %0, ccount" : "=a"(cc));   // this core's cycle counter
-    if (c->primed && c->n < KELLY_MEAS_MAX_PULSES)
-        c->width_cc[c->n++] = cc - c->last_cc;   // unsigned math survives wrap
-    c->last_cc = cc;
-    c->primed  = true;
-    c->total++;
-}
-
-// Fit a bit time to one window of pulse widths. A UART receiver samples
-// mid-bit and shrugs off sub-bit spikes, but this wideband edge timer sees
-// every glitch — on the tractor the powered pump controller couples ~20 µs
-// bursts into the receive line, and a lone spike must never seed the fit
-// (v1 did exactly that and reported a 2.5× harmonic). Defenses, in order:
-//   * a 30 µs floor — 0.6 bit at this port's ~20 kBd; anything shorter is
-//     electrical noise, counted and reported as `noise`;
-//   * a population-anchored seed — the narrowest width corroborated by
-//     KELLY_MEAS_CLUSTER others within ±15 %, not the narrowest width;
-//   * every width classified by its nearest bit-multiple and the bit time
-//     re-estimated as (total cycles)/(total bits), two passes (interrupt
-//     latency jitter hits opening and closing edges alike, so it cancels);
-//   * a singles gate — genuine 8N1 traffic is rich in single-bit runs, so a
-//     fit whose kept widths are <1/8 single-bit is aliasing on a harmonic
-//     and gets refused rather than reported;
-//   * a coverage gate — a fit that can only explain a minority of the
-//     above-floor pulses is timing an interferer, not the UART, and is
-//     likewise refused.
-// Window percentiles land in the result either way, so /json shows what the
-// line looked like even when the fit refuses it.
-static void kellyMeasAnalyze(const uint32_t* w, uint16_t n, KellyMeasResult* r) {
-    const float    cpu_hz   = getCpuFrequencyMhz() * 1e6f;
-    const uint32_t floor_cc = (uint32_t)(cpu_hz * 30e-6f);
-    const uint32_t seed_max = (uint32_t)(cpu_hz * 200e-6f);  // > this isn't a bit
-
-    static uint32_t s[KELLY_MEAS_MAX_PULSES];   // sorted copy (single caller)
-    memcpy(s, w, n * sizeof(uint32_t));
-    std::sort(s, s + n);
-
-    r->pulses = n;
-    uint16_t noise = 0;
-    while (noise < n && s[noise] < floor_cc) noise++;
-    r->noise  = noise;
-    r->p25_us = s[n / 4]            * 1e6f / cpu_hz;
-    r->p50_us = s[n / 2]            * 1e6f / cpu_hz;
-    r->p90_us = s[(uint32_t)n * 9 / 10] * 1e6f / cpu_hz;
-
-    // Seed: middle of the first cluster of KELLY_MEAS_CLUSTER widths within
-    // ±15 % of each other (two-pointer walk over the sorted widths).
-    float t = 0;
-    for (uint16_t i = noise, hi = noise; i < n; i++) {
-        if (s[i] > seed_max) break;
-        if (hi < i) hi = i;
-        while (hi + 1 < n && (float)s[hi + 1] <= s[i] * 1.15f) hi++;
-        if (hi - i + 1 >= KELLY_MEAS_CLUSTER) { t = (float)s[(i + hi) / 2]; break; }
-    }
-    if (t <= 0) { r->fails++; return; }
-
-    uint16_t used = 0, singles = 0;
-    for (int pass = 0; pass < 2; pass++) {
-        uint64_t sum_cc = 0;
-        uint32_t sum_bits = 0;
-        used = singles = 0;
-        for (uint16_t i = 0; i < n; i++) {
-            if (w[i] < floor_cc) continue;
-            uint32_t m = (uint32_t)(w[i] / t + 0.5f);       // nearest bit count
-            if (m < 1 || m > 9) continue;                   // 8N1 runs are 1..9 bits
-            if (fabsf(w[i] - m * t) > 0.35f * t) continue;  // not a clean multiple
-            sum_cc   += w[i];
-            sum_bits += m;
-            used++;
-            if (m == 1) singles++;
-        }
-        // Coverage gate: on a genuine UART line nearly every above-floor pulse
-        // IS a bit multiple (clean captures keep >90%). When most aren't —
-        // e.g. the pump's ~16 kHz PWM splattering the receive line — the
-        // cluster seed lands on the interferer's period and the "fit" would
-        // report the PWM frequency as a baud rate. Refuse the window instead.
-        if (sum_bits < 16 || singles < 8 || singles * 8u < used ||
-            used * 2u < (uint16_t)(n - noise)) {
-            r->fails++;
-            return;
-        }
-        t = (float)sum_cc / (float)sum_bits;
-    }
-    r->used    = used;
-    r->singles = singles;
-    r->bit_us  = t * 1e6f / cpu_hz;
-    r->baud    = cpu_hz / t;
-    r->windows++;
-    r->valid   = true;
-}
-
-static void kellyMeasChanPoll(KellyMeasChan* c, KellyMeasResult* r, bool window_up) {
-    uint16_t n = c->n;   // snapshot; entries are append-only so w[0..n) is stable
-    if (n < KELLY_MEAS_MAX_PULSES && !(window_up && n >= KELLY_MEAS_MIN_PULSES))
-        return;          // keep accumulating (a failed window keeps the old result)
-    kellyMeasAnalyze((const uint32_t*)c->width_cc, n, r);
-    noInterrupts();      // ISR runs on this core, so this closes the race
-    c->n      = 0;
-    c->primed = false;   // discard the gap spanning the reset
-    interrupts();
-}
-
-void kellyMeasPoll() {
-    uint32_t now = millis();
-    bool window_up = (now - g_kmeas_window_ms) >= KELLY_MEAS_WINDOW_MS;
-    kellyMeasChanPoll(&g_kmeas_rx, &g_kmeas_rx_res, window_up);
-    kellyMeasChanPoll(&g_kmeas_tx, &g_kmeas_tx_res, window_up);
-    if (window_up) g_kmeas_window_ms = now;
-}
-
-static void kellyMeasInit() {
-    // The RXD pad's input buffer is already on (it is the UART RX). The TXD pad
-    // is output-only after Serial1.begin(): FUN_IE turns its input buffer on so
-    // the GPIO interrupt can see our own transmitted waveform. This touches only
-    // the pad's input path — the UART's output routing stays intact. (pinMode()
-    // would instead re-route the pad to plain GPIO and break the UART.)
-    SET_PERI_REG_MASK(GPIO_PIN_MUX_REG[KELLY_TXD_PIN], FUN_IE);
-    attachInterruptArg(KELLY_RXD_PIN, kellyMeasIsr, &g_kmeas_rx, CHANGE);
-    attachInterruptArg(KELLY_TXD_PIN, kellyMeasIsr, &g_kmeas_tx, CHANGE);
-}
-#endif  // KELLY_BAUD_MEASURE
 
 void kellyInit() {
     // Serial1.begin(baud, config, rxPin, txPin). The Kelly runs at a fixed 19200.
     Serial1.begin(KELLY_BAUD, SERIAL_8N1, KELLY_RXD_PIN, KELLY_TXD_PIN);
-#if defined(KELLY_BAUD_MEASURE)
-    kellyMeasInit();   // after begin(): the pads are routed to the UART by now
-#endif
 }
 
 // Fault-tolerant poller. Rotates through the monitor commands one at a time,
@@ -1452,61 +1262,6 @@ String buildJson(bool pretty = true, bool minimal = false) {
         kd["last_rx"] = hex;
     }
 #endif  // KELLY_DEBUG
-#if defined(KELLY_BAUD_MEASURE)
-    // Baud diagnosis (build with -DKELLY_BAUD_MEASURE). "rx" times the RX pin,
-    // i.e. the Kelly's real transmit rate; "tx" times the TX pin, i.e. this
-    // board's real transmit rate. The register block shows what the UART was
-    // programmed to do: sclk should read XTAL (crystal-derived, exact) and
-    // calc_baud should land on the nominal — RC_FAST there would mean the
-    // divisor runs from the ±several-% RC oscillator instead.
-    if (!minimal) {
-        auto kb = doc["kelly_baud"].to<JsonObject>();
-        kb["nominal"]  = KELLY_BAUD;
-        kb["readback"] = Serial1.baudRate();   // core's own divisor-derived value
-        uint32_t clk_conf     = UART1.clk_conf.val;
-        uint32_t clkdiv_reg   = UART1.clkdiv.val;
-        uint32_t sclk_sel     = (clk_conf >> 20) & 0x3;   // TRM: 1=APB 2=RC_FAST 3=XTAL
-        uint32_t sclk_div_num = (clk_conf >> 12) & 0xFF;
-        uint32_t div_int      = clkdiv_reg & 0xFFF;
-        uint32_t div_frag     = (clkdiv_reg >> 20) & 0xF;
-        static const char* const KELLY_SCLK_NAMES[4] = {"?", "APB", "RC_FAST", "XTAL"};
-        kb["sclk"]         = KELLY_SCLK_NAMES[sclk_sel];
-        kb["sclk_div_num"] = sclk_div_num;
-        kb["clkdiv_int"]   = div_int;
-        kb["clkdiv_frag"]  = div_frag;
-        // Rate the divisor produces if the source clock is exactly nominal
-        // (APB/XTAL are crystal-derived; RC_FAST is ~17.5 MHz only nominally).
-        float sclk_hz = (sclk_sel == 1) ? (float)getApbFrequency()
-                      : (sclk_sel == 3) ? getXtalFrequencyMhz() * 1e6f
-                      : (sclk_sel == 2) ? 17.5e6f
-                                        : 0.0f;
-        float div = (sclk_div_num + 1) * (div_int + div_frag / 16.0f);
-        if (sclk_hz > 0 && div > 0) addFloat(kb, "calc_baud", sclk_hz / div, 1);
-        struct { const char* key; KellyMeasChan* c; KellyMeasResult* r; } chans[] = {
-            {"rx", &g_kmeas_rx, &g_kmeas_rx_res},   // Kelly Tx wire -> Kelly's rate
-            {"tx", &g_kmeas_tx, &g_kmeas_tx_res},   // our Tx wire   -> this board's rate
-        };
-        for (auto& ch : chans) {
-            auto o = kb[ch.key].to<JsonObject>();
-            o["edges_total"] = ch.c->total;
-            o["windows"]     = ch.r->windows;
-            o["fails"]       = ch.r->fails;
-            if (ch.r->pulses) {   // last analyzed window, fit accepted or not
-                o["pulses"] = ch.r->pulses;
-                o["noise"]  = ch.r->noise;
-                addFloat(o, "p25_us", ch.r->p25_us, 1);
-                addFloat(o, "p50_us", ch.r->p50_us, 1);
-                addFloat(o, "p90_us", ch.r->p90_us, 1);
-            }
-            if (ch.r->valid) {
-                o["used"]    = ch.r->used;
-                o["singles"] = ch.r->singles;
-                addFloat(o, "bit_us", ch.r->bit_us, 3);
-                addFloat(o, "baud",   ch.r->baud,   0);
-            }
-        }
-    }
-#endif  // KELLY_BAUD_MEASURE
 #endif  // ENABLE_KELLY
 
     if (!minimal) {
@@ -2186,8 +1941,5 @@ void loop() {
 #endif
 #if defined(ENABLE_KELLY)
     kellyPoll();   // non-blocking: advances the Kelly monitor state machine
-#if defined(KELLY_BAUD_MEASURE)
-    kellyMeasPoll();   // fit + re-arm the edge captures when a window is ready
-#endif
 #endif
 }
