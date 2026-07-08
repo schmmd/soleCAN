@@ -121,13 +121,16 @@
   #define VIN_DIVIDER_DEN  33     // R6 in kΩ
   #define HAS_VIN_SENSE    1
   // Kelly e-hydraulic pump controller serial port (opt-in, -DENABLE_KELLY).
-  // Wired to the board's rear "RXD"/"TXD" pads = the ESP32-S3 UART0 pins, which
-  // are free here because the console/SLCAN runs over native USB. The Kelly is
-  // 5 V TTL: the green (Kelly Tx) wire needs a ~1–2.2 kΩ series resistor into
-  // KELLY_RXD_PIN (see kelly/README.md); blue (Kelly Rx) drives KELLY_TXD_PIN
-  // directly, black to GND, red (12 V) left unconnected.
-  #define KELLY_RXD_PIN    GPIO_NUM_44   // "RXD" pad <- Kelly Tx (green), via resistor
-  #define KELLY_TXD_PIN    GPIO_NUM_43   // "TXD" pad -> Kelly Rx (blue)
+  // On GPIO47/48 — NOT the board's rear "RXD"/"TXD" pads. Those pads are the
+  // ESP32-S3 UART0 console pins (GPIO44/43), and receiving the Kelly on GPIO44
+  // corrupted the waveform (framing errors, and a baud measurement skewed high).
+  // GPIO47/48 are plain GPIOs — free on the WROOM-1-N16R8, not strapping pins —
+  // and read cleanly. The Kelly is 5 V TTL: the green (Kelly Tx) wire needs a
+  // ~1–2.2 kΩ series resistor into KELLY_RXD_PIN (see kelly/README.md); blue
+  // (Kelly Rx) drives KELLY_TXD_PIN directly, black to GND, red (12 V) left
+  // unconnected.
+  #define KELLY_RXD_PIN    GPIO_NUM_47   // <- Kelly Tx (green), via resistor
+  #define KELLY_TXD_PIN    GPIO_NUM_48   // -> Kelly Rx (blue)
 #else
   #error "Define a board: BOARD_ADAFRUIT_FEATHER_S3, BOARD_LILYGO_T2CAN, or BOARD_REJSACAN"
 #endif
@@ -136,15 +139,20 @@
   #define LED_IS_DUAL_GPIO 0
 #endif
 
-// Kelly e-hydraulic pump monitor is RejsaCAN-only (it needs the RXD/TXD pads
-// wired to the controller's serial port). Fail loudly if enabled elsewhere.
+// Kelly e-hydraulic pump monitor is RejsaCAN-only (it needs GPIO47/48 wired to
+// the controller's serial port). Fail loudly if enabled elsewhere.
 #if defined(ENABLE_KELLY) && !defined(BOARD_REJSACAN)
   #error "ENABLE_KELLY requires BOARD_REJSACAN"
 #endif
 // Bench-only: turn the board into a transparent USB<->Kelly-UART bridge so the
-// Python monitor can validate the RXD/TXD wiring through the real hardware.
+// Python monitor can validate the Kelly UART wiring through the real hardware.
 #if defined(KELLY_PASSTHROUGH) && !defined(ENABLE_KELLY)
   #error "KELLY_PASSTHROUGH requires ENABLE_KELLY (it needs the UART pins/init)"
+#endif
+// Diagnostic: measure the true line rate of both Kelly UART pins against the
+// crystal and expose the UART's divisor/clock-source registers in /json.
+#if defined(KELLY_BAUD_MEASURE) && !defined(ENABLE_KELLY)
+  #error "KELLY_BAUD_MEASURE requires ENABLE_KELLY (it measures the Kelly UART pins)"
 #endif
 
 // WiFi runs in dual AP+STA mode: the board always broadcasts its own hotspot
@@ -361,9 +369,7 @@ uint32_t    g_kelly_polls    = 0;   // query cycles started
 uint32_t    g_kelly_rx_total = 0;   // total bytes ever read from Serial1
 uint8_t     g_kelly_last_rx[32];    // last raw chunk received
 uint8_t     g_kelly_last_rx_len = 0;
-uint8_t     g_kelly_baud_idx    = 0;      // index into KELLY_BAUDS being tried
-bool        g_kelly_baud_locked = false;  // set once a reply checksums
-// Flicker/reliability counters: how cleanly frames land at the current baud.
+// Flicker/reliability counters: how cleanly frames land.
 uint32_t    g_kelly_frames_ok   = 0;      // replies that checksummed
 uint32_t    g_kelly_frames_bad  = 0;      // header seen but checksum failed
 uint32_t    g_kelly_blocks_ok   = 0;      // full 48-byte blocks decoded (a card update)
@@ -477,8 +483,10 @@ void updateLed() {
     uint32_t warn_period_ms = 0;
     if (!g_can_initialized) {
         warn_period_ms = WARN_BLINK_FAST_MS;
+#if !defined(NO_WIFI)
     } else if (!g_ap_running && WiFi.status() != WL_CONNECTED) {
         warn_period_ms = WARN_BLINK_SLOW_MS;
+#endif
     }
     static uint32_t warn_last_toggle = 0;
     static bool     warn_on = false;
@@ -518,11 +526,13 @@ void updateLed() {
         ledWrite(g_led_on ? 32 : 0, 0, 0);
         return;
     }
+#if !defined(NO_WIFI)
     if (!g_ap_running && WiFi.status() != WL_CONNECTED) {
         if (toggle) { g_led_last_toggle = now; g_led_on = !g_led_on; }
         ledWrite(g_led_on ? 24 : 0, g_led_on ? 12 : 0, 0);
         return;
     }
+#endif
     bool active = (g_frames_rx > 0) && (now - g_last_frame_ms < LED_ACTIVE_MS);
     if (!active) {
         ledWrite(4, 4, 4);
@@ -809,31 +819,19 @@ void decodeCAN(uint32_t can_id, const uint8_t* raw, uint8_t len) {
 // ── Kelly e-hydraulic pump monitor (opt-in) ─────────────────────────────────────
 #if defined(ENABLE_KELLY)
 // Read-only serial monitor for the Kelly KLS pump controller on UART1. Ports the
-// ETS protocol from kelly/solectrac-kelly-monitor.py: 19200 8N1, three zero-data
+// ETS protocol from kelly/solectrac-kelly-monitor.py: 8N1, three zero-data
 // monitor queries 0x3A/0x3B/0x3C, each answered by [CMD,0x10,<16 data>,CHK]; the
 // three 16-byte replies concatenate into a 48-byte block. Polling is a
 // cooperative state machine so loop() never blocks. See kelly/README.md.
 
-// The Kelly runs at 19200, but this RejsaCAN's UART1 clock measures ~4% slow, so
-// a nominal 20000 lands the actual line rate on the Kelly's real 19200 (verified
-// on the tractor at ~99% frame success). The loopback never caught this because
-// TX and RX shared that same slow clock. So 20000 is pinned by default — no
-// sweep, which avoids ever mis-locking on a near-miss rate.
-//   -DKELLY_BAUD_HZ=N  pin a different single rate.
-//   -DKELLY_BAUD_SWEEP auto-detect on a board whose clock error is unknown:
-//                      try each rate until a full reading assembles, then lock.
-#if defined(KELLY_BAUD_HZ)
-static const uint32_t KELLY_BAUDS[] = { KELLY_BAUD_HZ };
-#elif defined(KELLY_BAUD_SWEEP)
-static const uint32_t KELLY_BAUDS[] = {
-    20000, 19600, 20400, 19200, 20800, 18800, 21200, 18400,
-    21600, 18000, 22050, 17280, 22500, 16000, 24000, 14400,
-    9600, 38400,
-};
-#else
-static const uint32_t KELLY_BAUDS[] = { 20000 };
-#endif
-static const uint8_t  KELLY_N_BAUDS          = sizeof(KELLY_BAUDS) / sizeof(KELLY_BAUDS[0]);
+// The Kelly transmits at its documented 19200 baud — fixed, no sweep; CONFIRMED
+// by sustained ~99% frame success. An earlier ~19,900 figure (crystal-referenced
+// edge timing, -DKELLY_BAUD_MEASURE, below) was measured through a
+// doubly-corrupted receive path — an Arduino core 2.0.x firmware bug (fixed by
+// the pioarduino/core-3.x platform, see platformio.ini) on top of the noisy
+// RXD0 console pad (GPIO44, since moved to GPIO47/48) — and is void. The full
+// story is in kelly/README.md §"Actual line rate".
+static const uint32_t KELLY_BAUD = 19200;
 static const uint8_t  KELLY_MON_CMDS[3]      = {0x3A, 0x3B, 0x3C};
 static const uint32_t KELLY_POLL_INTERVAL_MS = 40;     // gap between individual queries
 static const uint32_t KELLY_CMD_TIMEOUT_MS   = 600;    // per-command reply wait
@@ -885,10 +883,195 @@ static void kellyDecodeBlock(const uint8_t* b) {
     g_kelly.last_seen_ms      = millis();
 }
 
+#if defined(KELLY_BAUD_MEASURE)
+// ── Kelly baud measurement (build with -DKELLY_BAUD_MEASURE) ────────────────
+// Settles which side of the Kelly link owns the ~4% baud offset by timing the
+// actual waveform on both pins against the crystal. A GPIO change-interrupt on
+// each pin records the width of every high/low pulse in CPU cycles; the CPU
+// clock is PLL'd from the 40 MHz crystal (ppm-accurate), so the widths are an
+// absolute time reference that is independent of the UART divisor being probed.
+// UART pulses are integer multiples of one bit time, so the analyzer recovers
+// the bit time — and thus the true line rate — from each capture window:
+//   RX pin (Kelly Tx wire)  -> the Kelly's real transmit rate
+//   TX pin (our Tx)         -> this board's real transmit rate
+// Snooping only: the interrupts tap the pins through the GPIO matrix, the UART
+// keeps running, and normal polling continues. Results are served in /json as
+// "kelly_baud", alongside a readback of the UART's divisor and clock-source
+// registers (a divisor fed by the RC oscillator instead of a crystal-derived
+// clock would explain a large, temperature-dependent offset).
+#include <algorithm>           // std::sort for the width percentiles/cluster seed
+#include "soc/uart_struct.h"   // UART1 clk_conf/clkdiv register readback
+#include "soc/gpio_periph.h"   // GPIO_PIN_MUX_REG
+#include "soc/io_mux_reg.h"    // FUN_IE: pad input-buffer enable
+
+static const uint16_t KELLY_MEAS_MAX_PULSES = 512;    // per capture window
+static const uint16_t KELLY_MEAS_MIN_PULSES = 64;     // don't fit thinner captures
+static const uint32_t KELLY_MEAS_WINDOW_MS  = 10000;  // analyze at least this often
+static const uint16_t KELLY_MEAS_CLUSTER    = 6;      // widths that must corroborate
+                                                      // the bit-time seed
+
+// One capture channel. The ISR appends pulse widths until the buffer fills;
+// kellyMeasPoll() fits them and re-arms. `total` counts every edge ever seen,
+// so /json can show whether a silent channel is unwired or just idle.
+struct KellyMeasChan {
+    volatile uint32_t last_cc = 0;      // cycle count at the previous edge
+    volatile bool     primed  = false;  // last_cc holds a real edge
+    volatile uint16_t n       = 0;      // widths stored this window
+    volatile uint32_t total   = 0;      // edges seen since boot
+    uint32_t width_cc[KELLY_MEAS_MAX_PULSES];
+};
+struct KellyMeasResult {
+    // Window diagnostics — updated by every fit attempt, pass or fail, so /json
+    // shows what the line actually looked like even when the fit refuses it.
+    uint16_t pulses  = 0;      // widths in the last analyzed window
+    uint16_t noise   = 0;      // of those, sub-floor spikes (not UART bits)
+    float    p25_us  = 0;      // width percentiles of the window: a healthy
+    float    p50_us  = 0;      //   capture puts p25 near one bit time; a
+    float    p90_us  = 0;      //   sub-bit p25 means electrical noise
+    uint32_t windows = 0;      // fits that passed the quality gates
+    uint32_t fails   = 0;      // fits rejected by them
+    // Fitted rate — updated only when a fit passes the gates.
+    bool     valid   = false;
+    uint16_t used    = 0;      // widths the bit-multiple fit kept
+    uint16_t singles = 0;      // single-bit pulses among them
+    float    bit_us  = 0;      // fitted bit time
+    float    baud    = 0;      // 1e6 / bit_us
+};
+static KellyMeasChan   g_kmeas_rx, g_kmeas_tx;          // RX pin, TX pin
+static KellyMeasResult g_kmeas_rx_res, g_kmeas_tx_res;
+static uint32_t        g_kmeas_window_ms = 0;
+
+static void IRAM_ATTR kellyMeasIsr(void* arg) {
+    KellyMeasChan* c = (KellyMeasChan*)arg;
+    uint32_t cc;
+    asm volatile("rsr %0, ccount" : "=a"(cc));   // this core's cycle counter
+    if (c->primed && c->n < KELLY_MEAS_MAX_PULSES)
+        c->width_cc[c->n++] = cc - c->last_cc;   // unsigned math survives wrap
+    c->last_cc = cc;
+    c->primed  = true;
+    c->total++;
+}
+
+// Fit a bit time to one window of pulse widths. A UART receiver samples
+// mid-bit and shrugs off sub-bit spikes, but this wideband edge timer sees
+// every glitch — on the tractor the powered pump controller couples ~20 µs
+// bursts into the receive line, and a lone spike must never seed the fit
+// (v1 did exactly that and reported a 2.5× harmonic). Defenses, in order:
+//   * a 30 µs floor — 0.6 bit at this port's ~20 kBd; anything shorter is
+//     electrical noise, counted and reported as `noise`;
+//   * a population-anchored seed — the narrowest width corroborated by
+//     KELLY_MEAS_CLUSTER others within ±15 %, not the narrowest width;
+//   * every width classified by its nearest bit-multiple and the bit time
+//     re-estimated as (total cycles)/(total bits), two passes (interrupt
+//     latency jitter hits opening and closing edges alike, so it cancels);
+//   * a singles gate — genuine 8N1 traffic is rich in single-bit runs, so a
+//     fit whose kept widths are <1/8 single-bit is aliasing on a harmonic
+//     and gets refused rather than reported;
+//   * a coverage gate — a fit that can only explain a minority of the
+//     above-floor pulses is timing an interferer, not the UART, and is
+//     likewise refused.
+// Window percentiles land in the result either way, so /json shows what the
+// line looked like even when the fit refuses it.
+static void kellyMeasAnalyze(const uint32_t* w, uint16_t n, KellyMeasResult* r) {
+    const float    cpu_hz   = getCpuFrequencyMhz() * 1e6f;
+    const uint32_t floor_cc = (uint32_t)(cpu_hz * 30e-6f);
+    const uint32_t seed_max = (uint32_t)(cpu_hz * 200e-6f);  // > this isn't a bit
+
+    static uint32_t s[KELLY_MEAS_MAX_PULSES];   // sorted copy (single caller)
+    memcpy(s, w, n * sizeof(uint32_t));
+    std::sort(s, s + n);
+
+    r->pulses = n;
+    uint16_t noise = 0;
+    while (noise < n && s[noise] < floor_cc) noise++;
+    r->noise  = noise;
+    r->p25_us = s[n / 4]            * 1e6f / cpu_hz;
+    r->p50_us = s[n / 2]            * 1e6f / cpu_hz;
+    r->p90_us = s[(uint32_t)n * 9 / 10] * 1e6f / cpu_hz;
+
+    // Seed: middle of the first cluster of KELLY_MEAS_CLUSTER widths within
+    // ±15 % of each other (two-pointer walk over the sorted widths).
+    float t = 0;
+    for (uint16_t i = noise, hi = noise; i < n; i++) {
+        if (s[i] > seed_max) break;
+        if (hi < i) hi = i;
+        while (hi + 1 < n && (float)s[hi + 1] <= s[i] * 1.15f) hi++;
+        if (hi - i + 1 >= KELLY_MEAS_CLUSTER) { t = (float)s[(i + hi) / 2]; break; }
+    }
+    if (t <= 0) { r->fails++; return; }
+
+    uint16_t used = 0, singles = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        uint64_t sum_cc = 0;
+        uint32_t sum_bits = 0;
+        used = singles = 0;
+        for (uint16_t i = 0; i < n; i++) {
+            if (w[i] < floor_cc) continue;
+            uint32_t m = (uint32_t)(w[i] / t + 0.5f);       // nearest bit count
+            if (m < 1 || m > 9) continue;                   // 8N1 runs are 1..9 bits
+            if (fabsf(w[i] - m * t) > 0.35f * t) continue;  // not a clean multiple
+            sum_cc   += w[i];
+            sum_bits += m;
+            used++;
+            if (m == 1) singles++;
+        }
+        // Coverage gate: on a genuine UART line nearly every above-floor pulse
+        // IS a bit multiple (clean captures keep >90%). When most aren't —
+        // e.g. the pump's ~16 kHz PWM splattering the receive line — the
+        // cluster seed lands on the interferer's period and the "fit" would
+        // report the PWM frequency as a baud rate. Refuse the window instead.
+        if (sum_bits < 16 || singles < 8 || singles * 8u < used ||
+            used * 2u < (uint16_t)(n - noise)) {
+            r->fails++;
+            return;
+        }
+        t = (float)sum_cc / (float)sum_bits;
+    }
+    r->used    = used;
+    r->singles = singles;
+    r->bit_us  = t * 1e6f / cpu_hz;
+    r->baud    = cpu_hz / t;
+    r->windows++;
+    r->valid   = true;
+}
+
+static void kellyMeasChanPoll(KellyMeasChan* c, KellyMeasResult* r, bool window_up) {
+    uint16_t n = c->n;   // snapshot; entries are append-only so w[0..n) is stable
+    if (n < KELLY_MEAS_MAX_PULSES && !(window_up && n >= KELLY_MEAS_MIN_PULSES))
+        return;          // keep accumulating (a failed window keeps the old result)
+    kellyMeasAnalyze((const uint32_t*)c->width_cc, n, r);
+    noInterrupts();      // ISR runs on this core, so this closes the race
+    c->n      = 0;
+    c->primed = false;   // discard the gap spanning the reset
+    interrupts();
+}
+
+void kellyMeasPoll() {
+    uint32_t now = millis();
+    bool window_up = (now - g_kmeas_window_ms) >= KELLY_MEAS_WINDOW_MS;
+    kellyMeasChanPoll(&g_kmeas_rx, &g_kmeas_rx_res, window_up);
+    kellyMeasChanPoll(&g_kmeas_tx, &g_kmeas_tx_res, window_up);
+    if (window_up) g_kmeas_window_ms = now;
+}
+
+static void kellyMeasInit() {
+    // The RXD pad's input buffer is already on (it is the UART RX). The TXD pad
+    // is output-only after Serial1.begin(): FUN_IE turns its input buffer on so
+    // the GPIO interrupt can see our own transmitted waveform. This touches only
+    // the pad's input path — the UART's output routing stays intact. (pinMode()
+    // would instead re-route the pad to plain GPIO and break the UART.)
+    SET_PERI_REG_MASK(GPIO_PIN_MUX_REG[KELLY_TXD_PIN], FUN_IE);
+    attachInterruptArg(KELLY_RXD_PIN, kellyMeasIsr, &g_kmeas_rx, CHANGE);
+    attachInterruptArg(KELLY_TXD_PIN, kellyMeasIsr, &g_kmeas_tx, CHANGE);
+}
+#endif  // KELLY_BAUD_MEASURE
+
 void kellyInit() {
-    // Serial1.begin(baud, config, rxPin, txPin). Baud is the first sweep
-    // candidate; kellyPoll() steps through the rest until a reply checksums.
-    Serial1.begin(KELLY_BAUDS[0], SERIAL_8N1, KELLY_RXD_PIN, KELLY_TXD_PIN);
+    // Serial1.begin(baud, config, rxPin, txPin). The Kelly runs at a fixed 19200.
+    Serial1.begin(KELLY_BAUD, SERIAL_8N1, KELLY_RXD_PIN, KELLY_TXD_PIN);
+#if defined(KELLY_BAUD_MEASURE)
+    kellyMeasInit();   // after begin(): the pads are routed to the UART by now
+#endif
 }
 
 // Fault-tolerant poller. Rotates through the monitor commands one at a time,
@@ -908,24 +1091,14 @@ void kellyPoll() {
     static uint8_t  cur    = 0;      // command index currently in flight
     static uint32_t next_ms = 0;     // earliest time to send the next query
     static uint32_t sent_ms = 0;     // when the current query went out
-    static uint16_t tries  = 0;      // attempts since last full block (auto-baud)
 
     uint32_t now = millis();
 
     if (state == KIDLE) {
         if (now < next_ms) return;
-        // Auto-baud (sweep builds only): step to the next candidate if this one
-        // hasn't produced a full reading in a while. Locking waits for a whole
-        // block, not a single lucky frame, so a near-miss rate can't stick.
-        if (!g_kelly_baud_locked && KELLY_N_BAUDS > 1 && tries >= 8) {
-            tries = 0;
-            g_kelly_baud_idx = (g_kelly_baud_idx + 1) % KELLY_N_BAUDS;
-            Serial1.updateBaudRate(KELLY_BAUDS[g_kelly_baud_idx]);
-        }
         rxlen = 0;
         while (Serial1.available()) Serial1.read();   // drop stale bytes
         g_kelly_polls++;
-        if (!g_kelly_baud_locked) tries++;   // reset only when a block decodes
         kellySendQuery(KELLY_MON_CMDS[cur]);
         sent_ms = now;
         state   = KWAIT;
@@ -947,8 +1120,7 @@ void kellyPoll() {
         uint16_t sum = cmd + 0x10;
         for (int j = 0; j < 16; j++) sum += rxbuf[i + 2 + j];
         if ((sum & 0xFF) != rxbuf[i + 18]) continue;   // bad frame: keep scanning
-        // Good reply — cache this slot. (Don't lock yet: a single frame can
-        // fluke a checksum at a near-miss baud; only a full block locks.)
+        // Good reply — cache this slot.
         g_kelly_frames_ok++;
         memcpy(&block[cur * 16], &rxbuf[i + 2], 16);
         slot_ms[cur] = now ? now : 1;
@@ -958,8 +1130,6 @@ void kellyPoll() {
             if (!slot_ms[s] || (now - slot_ms[s]) >= KELLY_STALE_MS) all_fresh = false;
         if (all_fresh) {
             kellyDecodeBlock(block);
-            g_kelly_baud_locked = true;   // a full reading assembled — rate is right
-            tries = 0;
             g_kelly_blocks_ok++;
             if (g_kelly_last_block_ms != 0) {
                 uint32_t gap = now - g_kelly_last_block_ms;
@@ -971,6 +1141,16 @@ void kellyPoll() {
         next_ms = now + KELLY_POLL_INTERVAL_MS;
         state   = KIDLE;
         return;
+    }
+    // No match: slide the window instead of jamming. The Kelly's line can
+    // carry a second continuous transmission (~19.9k stream) plus noise, so a
+    // fixed snapshot fills with non-reply bytes before the reply arrives.
+    // Every start position the scan just exhausted is dead; keep only the
+    // tail that could still begin a frame, so the reply is found no matter
+    // how much chatter precedes it.
+    if (rxlen > 18) {
+        memmove(rxbuf, rxbuf + rxlen - 18, 18);
+        rxlen = 18;
     }
     if (now - sent_ms > KELLY_CMD_TIMEOUT_MS) {   // no valid reply this attempt
         g_kelly_frames_bad++;                     // one clean count per failed attempt
@@ -1258,8 +1438,7 @@ String buildJson(bool pretty = true, bool minimal = false) {
         auto kd = doc["kelly_dbg"].to<JsonObject>();
         kd["polls"]       = g_kelly_polls;
         kd["rx_total"]    = g_kelly_rx_total;
-        kd["baud"]        = KELLY_BAUDS[g_kelly_baud_idx];
-        kd["baud_locked"] = g_kelly_baud_locked;
+        kd["baud"]        = KELLY_BAUD;
         kd["frames_ok"]   = g_kelly_frames_ok;
         kd["frames_bad"]  = g_kelly_frames_bad;
         kd["blocks_ok"]   = g_kelly_blocks_ok;
@@ -1273,6 +1452,61 @@ String buildJson(bool pretty = true, bool minimal = false) {
         kd["last_rx"] = hex;
     }
 #endif  // KELLY_DEBUG
+#if defined(KELLY_BAUD_MEASURE)
+    // Baud diagnosis (build with -DKELLY_BAUD_MEASURE). "rx" times the RX pin,
+    // i.e. the Kelly's real transmit rate; "tx" times the TX pin, i.e. this
+    // board's real transmit rate. The register block shows what the UART was
+    // programmed to do: sclk should read XTAL (crystal-derived, exact) and
+    // calc_baud should land on the nominal — RC_FAST there would mean the
+    // divisor runs from the ±several-% RC oscillator instead.
+    if (!minimal) {
+        auto kb = doc["kelly_baud"].to<JsonObject>();
+        kb["nominal"]  = KELLY_BAUD;
+        kb["readback"] = Serial1.baudRate();   // core's own divisor-derived value
+        uint32_t clk_conf     = UART1.clk_conf.val;
+        uint32_t clkdiv_reg   = UART1.clkdiv.val;
+        uint32_t sclk_sel     = (clk_conf >> 20) & 0x3;   // TRM: 1=APB 2=RC_FAST 3=XTAL
+        uint32_t sclk_div_num = (clk_conf >> 12) & 0xFF;
+        uint32_t div_int      = clkdiv_reg & 0xFFF;
+        uint32_t div_frag     = (clkdiv_reg >> 20) & 0xF;
+        static const char* const KELLY_SCLK_NAMES[4] = {"?", "APB", "RC_FAST", "XTAL"};
+        kb["sclk"]         = KELLY_SCLK_NAMES[sclk_sel];
+        kb["sclk_div_num"] = sclk_div_num;
+        kb["clkdiv_int"]   = div_int;
+        kb["clkdiv_frag"]  = div_frag;
+        // Rate the divisor produces if the source clock is exactly nominal
+        // (APB/XTAL are crystal-derived; RC_FAST is ~17.5 MHz only nominally).
+        float sclk_hz = (sclk_sel == 1) ? (float)getApbFrequency()
+                      : (sclk_sel == 3) ? getXtalFrequencyMhz() * 1e6f
+                      : (sclk_sel == 2) ? 17.5e6f
+                                        : 0.0f;
+        float div = (sclk_div_num + 1) * (div_int + div_frag / 16.0f);
+        if (sclk_hz > 0 && div > 0) addFloat(kb, "calc_baud", sclk_hz / div, 1);
+        struct { const char* key; KellyMeasChan* c; KellyMeasResult* r; } chans[] = {
+            {"rx", &g_kmeas_rx, &g_kmeas_rx_res},   // Kelly Tx wire -> Kelly's rate
+            {"tx", &g_kmeas_tx, &g_kmeas_tx_res},   // our Tx wire   -> this board's rate
+        };
+        for (auto& ch : chans) {
+            auto o = kb[ch.key].to<JsonObject>();
+            o["edges_total"] = ch.c->total;
+            o["windows"]     = ch.r->windows;
+            o["fails"]       = ch.r->fails;
+            if (ch.r->pulses) {   // last analyzed window, fit accepted or not
+                o["pulses"] = ch.r->pulses;
+                o["noise"]  = ch.r->noise;
+                addFloat(o, "p25_us", ch.r->p25_us, 1);
+                addFloat(o, "p50_us", ch.r->p50_us, 1);
+                addFloat(o, "p90_us", ch.r->p90_us, 1);
+            }
+            if (ch.r->valid) {
+                o["used"]    = ch.r->used;
+                o["singles"] = ch.r->singles;
+                addFloat(o, "bit_us", ch.r->bit_us, 3);
+                addFloat(o, "baud",   ch.r->baud,   0);
+            }
+        }
+    }
+#endif  // KELLY_BAUD_MEASURE
 #endif  // ENABLE_KELLY
 
     if (!minimal) {
@@ -1791,7 +2025,7 @@ void setup() {
 #endif
 
 #if defined(ENABLE_KELLY)
-    kellyInit();   // Kelly pump monitor on UART1 (RXD/TXD pads)
+    kellyInit();   // Kelly pump monitor on UART1 (GPIO47/48)
 #endif
 
     for (int i = 0; i < NUM_CELLS; i++) g_cell_v[i] = NAN;
@@ -1826,6 +2060,7 @@ void setup() {
         if (err == ESP_OK) g_can_initialized = true;
     }
 
+#if !defined(NO_WIFI)
     // Bring up the soft-AP first so the board is always reachable in the field
     // at 192.168.4.1 even if there's no home network in range. STA connect
     // happens in the background; we don't block boot waiting on it.
@@ -1857,6 +2092,7 @@ void setup() {
     socketcand_server.begin();
     socketcand_server.setNoDelay(true);
     MDNS.addService("socketcand", "tcp", SOCKETCAND_PORT);
+#endif  // !NO_WIFI
 
 #if defined(HAS_MCP2515)
     // Release the MCP2515 from hardware reset before any SPI traffic. RESET is
@@ -1888,14 +2124,16 @@ void setup() {
     g_mcp_initialized = (g_mcp_init_err == 0);
 #endif
 
+#if !defined(NO_BLE)
     bleInit();
+#endif
 }
 
 void loop() {
 #if defined(KELLY_PASSTHROUGH)
     // Bench passthrough: transparent native-USB <-> Kelly-UART bridge. Lets the
     // Python monitor (solectrac-kelly-monitor.py --port <this board>) talk to the
-    // controller through the board to validate the RXD/TXD wiring and 5 V-TTL
+    // controller through the board to validate the Kelly UART wiring and 5 V-TTL
     // series resistor. Nothing else runs — no CAN, no decode, no SLCAN.
     while (Serial.available())  Serial1.write(Serial.read());
     while (Serial1.available()) Serial.write(Serial1.read());
@@ -1934,15 +2172,22 @@ void loop() {
 #endif
     canRecoveryTick();
     slcanPoll();
+#if !defined(NO_WIFI)
     socketcandPoll();
     dns_server.processNextRequest();
     server.handleClient();
+#endif
+#if !defined(NO_BLE)
     bleTick();
+#endif
     updateLed();
 #if defined(HAS_VIN_SENSE)
     updateVinSense();
 #endif
 #if defined(ENABLE_KELLY)
     kellyPoll();   // non-blocking: advances the Kelly monitor state machine
+#if defined(KELLY_BAUD_MEASURE)
+    kellyMeasPoll();   // fit + re-arm the edge captures when a window is ready
+#endif
 #endif
 }

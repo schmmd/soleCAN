@@ -7,3 +7,6 @@ __pycache__
 
 # Firmware artifacts extracted from the Docker build (see embedded/esp32-s3)
 out/
+
+# clangd index cache (created by IDE tooling in the firmware tree)
+embedded/esp32-s3/.cache/

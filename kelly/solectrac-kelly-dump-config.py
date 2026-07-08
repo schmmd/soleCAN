@@ -20,8 +20,8 @@ leaves the session open (it does this on every connect, to detect the
 controller model), and so does this tool. The session clears when the
 controller powers off.
 
-Protocol (Kelly "ETS", 19200 8N1)
----------------------------------
+Protocol (Kelly "ETS", 8N1, nominally 19200 baud)
+-------------------------------------------------
     frame     = [CMD][LEN][DATA 0..16][CHECKSUM]
     checksum  = (CMD + LEN + sum(DATA)) & 0xFF
     open      = [0xF1, 0x00, 0xF1]              (zero-data query)
@@ -50,6 +50,8 @@ except ImportError:
     sys.exit("This tool needs pyserial:  pip install pyserial")
 
 
+# The controller transmits at its documented 19200 baud (see README "Actual
+# line rate"); matches the monitor and the RejsaCAN firmware.
 BAUD = 19200
 
 CMD_CODE_VERSION = 0x11

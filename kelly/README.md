@@ -12,8 +12,9 @@ provides `solectrac-kelly-monitor.py`, a read-only live monitor for it.
 
 The RejsaCAN firmware can also read this port directly and add the pump
 telemetry to the tractor dashboard — build with `-DENABLE_KELLY`, wiring the
-controller's Tx/Rx to the board's RXD/TXD pads (with the 5 V-TTL series resistor
-below). See `../embedded/esp32-s3/README.md` §"Kelly e-hydraulic pump monitor".
+controller's Tx/Rx to the board's **GPIO47 (RX) / GPIO48 (TX)** (with the 5 V-TTL
+series resistor below). See `../embedded/esp32-s3/README.md` §"Kelly e-hydraulic
+pump monitor".
 
 ## Connector and wire protocol
 
@@ -42,13 +43,47 @@ level-shifter's HV reference: 12 V there will destroy the part. This is a
 low-voltage supply rail and is unrelated to the Tx/Rx logic swing (5 V TTL —
 see below).
 
-Wire protocol is **19200 baud, 8N1**, framed as
+Wire protocol is **8N1, documented at 19200 baud** (but see the actual line
+rate below), framed as
 `[CMD][LEN][DATA 0..16][CHECKSUM]` in 19-byte frames, checksum
 `(CMD + LEN + sum(DATA)) & 0xFF`. Live monitor uses commands `0x3A`/`0x3B`/`0x3C`
 (each a zero-data query returning 16 bytes); concatenated they form a 48-byte
 telemetry block. Flash config is a separate 512-byte read/write command set.
 The community `kelly-connect-oss` project reimplements this protocol and
 documents the field offsets.
+
+**Line rate is the documented 19200 baud — CONFIRMED** (sustained ~99 % frame
+success once the receive path was fixed). What earlier looked like a baud
+mismatch was two independent receive-path problems, both since fixed, plus one
+still open:
+
+1. **Arduino core 2.0.x broke Kelly reception in the RejsaCAN firmware.**
+   Builds on Arduino core 2.0.17 (the last version PlatformIO's official
+   `espressif32` platform carries) read only mangled frames on a wire that
+   core-3 builds decode 100 %; an A/B bench with otherwise-identical code
+   isolated the core version as the cause (the mechanism inside the core was
+   not identified). The firmware now builds on Arduino core 3.x via the
+   pioarduino platform — fixed, CONFIRMED.
+2. **The board's rear RXD0/TXD0 pads (GPIO44/43) corrupt the link** even with
+   a known-good core — they are the ESP32-S3's UART0 console pins, and the
+   boot ROM also prints on TXD0 at every reset. The Kelly UART now uses plain
+   GPIOs 47/48 — fixed, CONFIRMED.
+3. **Chassis-vs-traction grounding** (below) still degrades the link when the
+   board runs on OBD power; `isolator.txt` documents the planned fix.
+
+The ~19,900 edge-timing figure was measured through problems 1 and 2 together
+and is void; the auto-baud sweep has been removed and all tooling pins 19200.
+
+**Grounding dominates reliability on this port.** The Kelly is powered from
+the traction pack, so its V− is not at chassis potential. A receiver
+referenced to tractor chassis (a laptop touching metal, or the RejsaCAN
+powered from the OBD 12 V) injects the chassis-to-traction noise into the
+signal reference and the link degrades or dies outright; the same adapter
+floating (battery laptop, no chassis contact) reads cleanly. Always connect
+V− as the signal return, and keep the receiver otherwise floating — or
+galvanically isolate the UART when the host must share chassis ground. The
+build plan for that isolator (ADuM1201 dongle powered from SM-4P pin 1) is in
+`isolator.txt`.
 
 **Signal level is logic-level (TTL) UART, not bipolar RS-232 — CONFIRMED.** A
 full bidirectional monitor session succeeded through a bare CH340 (TTL)
