@@ -414,6 +414,8 @@ struct SdState {
     volatile uint32_t free_mb    = 0;
     volatile uint32_t raw_dropped  = 0;  // producer (core 1) owns these two
     volatile uint32_t json_dropped = 0;
+    const char*       fail_op  = "";     // which SD call failed (state == "error")
+    volatile uint32_t fail_kb  = 0;      // KB written when it failed
 };
 static SdState g_sd;
 
@@ -590,10 +592,13 @@ static void sdUpdateFree() {
 }
 
 // Give up logging for the rest of this boot (card removed / write failure). The
-// CAN tap keeps running; we do not attempt to remount.
-static void sdFail() {
-    g_sd_active = false;
-    g_sd.state  = "error";
+// CAN tap keeps running; we do not attempt to remount. `op` and the running byte
+// count are kept for the /json status so a field failure is diagnosable.
+static void sdFail(const char* op, uint64_t bytes_written) {
+    g_sd.fail_op = op;
+    g_sd.fail_kb = (uint32_t)(bytes_written >> 10);
+    g_sd_active  = false;
+    g_sd.state   = "error";
     if (g_sd_raw_file)  g_sd_raw_file.close();
     if (g_sd_json_file) g_sd_json_file.close();
     vTaskDelete(nullptr);
@@ -611,12 +616,14 @@ static void sdWriterTask(void*) {
 
         size_t n = xStreamBufferReceive(g_sd_raw_sb, buf, sizeof buf, 0);
         if (n) {
-            if (g_sd_raw_file.write(buf, n) != n) sdFail();   // never returns on fail
+            if (g_sd_raw_file.write(buf, n) != n)
+                sdFail("raw_write", total_bytes);   // never returns on fail
             raw_part_bytes += n; total_bytes += n; did = true;
         }
         n = xStreamBufferReceive(g_sd_json_sb, buf, sizeof buf, 0);
         if (n) {
-            if (g_sd_json_file.write(buf, n) != n) sdFail();
+            if (g_sd_json_file.write(buf, n) != n)
+                sdFail("json_write", total_bytes);
             json_part_bytes += n; total_bytes += n; did = true;
         }
         g_sd.mb_written = (uint32_t)(total_bytes >> 20);
@@ -625,13 +632,13 @@ static void sdWriterTask(void*) {
         if (raw_part_bytes >= SD_MAX_PART_BYTES) {
             g_sd_raw_file.flush(); g_sd_raw_file.close();
             g_sd.raw_part++;
-            if (!sdOpenRawPart()) sdFail();
+            if (!sdOpenRawPart()) sdFail("raw_open", total_bytes);
             raw_part_bytes = 0;
         }
         if (json_part_bytes >= SD_MAX_PART_BYTES) {
             g_sd_json_file.flush(); g_sd_json_file.close();
             g_sd.json_part++;
-            if (!sdOpenJsonPart()) sdFail();
+            if (!sdOpenJsonPart()) sdFail("json_open", total_bytes);
             json_part_bytes = 0;
         }
 
@@ -1342,6 +1349,10 @@ String buildJson(bool pretty = true, bool minimal = false) {
         }
         if (g_sd.raw_dropped)  sd["raw_dropped"]  = g_sd.raw_dropped;
         if (g_sd.json_dropped) sd["json_dropped"] = g_sd.json_dropped;
+        if (g_sd.fail_op[0]) {
+            sd["fail_op"] = g_sd.fail_op;
+            sd["fail_kb"] = g_sd.fail_kb;
+        }
     }
 #endif
 
