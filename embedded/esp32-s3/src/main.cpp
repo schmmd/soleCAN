@@ -35,6 +35,13 @@
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
+// WiFi identity overrides (WIFI_SSID / WIFI_PASS / AP_SSID / AP_PASS /
+// MDNS_NAME env vars), generated into the build dir by
+// inject_build_overrides.py. Absent when no override is set.
+#if __has_include("wifi_overrides.h")
+#include "wifi_overrides.h"
+#endif
+
 // Optional home network the board also joins (for bench use). Leave unset to
 // run AP-only — the board still broadcasts its own hotspot (see AP_SSID below),
 // which is the stable default for field use. Set both to join a network.
@@ -324,6 +331,12 @@ uint32_t    g_can_recoveries = 0;   // bus-off recoveries initiated since boot
 uint32_t    g_socketcand_tx_dropped = 0;   // frames dropped on full client TCP buffers
 bool        g_can_initialized = false;
 bool        g_ap_running      = false;
+
+// STA join telemetry for /config. Written by the WiFi event callback, which
+// runs on the system event task rather than the loop task — hence volatile
+// single-word values (torn reads aren't possible at word width or below).
+volatile uint32_t g_sta_disconnects = 0;
+volatile uint8_t  g_sta_last_disconnect_reason = 0;   // 0 = never disconnected
 
 #if defined(HAS_MCP2515)
 bool        g_mcp_initialized = false;
@@ -1027,6 +1040,89 @@ void handleJson() {
     server.send(200, "application/json", buildJson());
 }
 
+// Names for the STA disconnect reasons that come up when a credentials build
+// goes wrong: auth_fail / handshake_timeout usually mean a wrong password,
+// no_ap_found a wrong SSID or out-of-range network. Rare codes stay numeric.
+static String staDisconnectReasonName(uint8_t reason) {
+    switch (reason) {
+        case WIFI_REASON_AUTH_EXPIRE:                return "auth_expire";
+        case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:     return "4way_handshake_timeout";
+        case WIFI_REASON_BEACON_TIMEOUT:             return "beacon_timeout";
+        case WIFI_REASON_NO_AP_FOUND:                return "no_ap_found";
+        case WIFI_REASON_AUTH_FAIL:                  return "auth_fail";
+        case WIFI_REASON_ASSOC_FAIL:                 return "assoc_fail";
+        case WIFI_REASON_HANDSHAKE_TIMEOUT:          return "handshake_timeout";
+        case WIFI_REASON_CONNECTION_FAIL:            return "connection_fail";
+        default:                                     return String(reason);
+    }
+}
+
+// Build + WiFi diagnostics, deliberately separate from the /json telemetry:
+// this reports what was baked into the binary and how the home-network join
+// is going. The soft-AP is always up, so /config stays reachable at
+// 192.168.4.1 even when the STA join failed — one request distinguishes
+// "wrong password" from "wrong SSID" from "built with empty credentials".
+void handleConfig() {
+    JsonDocument doc;
+
+    doc["uptime"] = millis() / 1000.0;
+#ifdef GIT_SHA
+    doc["version"] = GIT_SHA;
+#endif
+#if defined(BOARD_ADAFRUIT_FEATHER_S3)
+    doc["board"] = "adafruit_feather_s3";
+#elif defined(BOARD_LILYGO_T2CAN)
+    doc["board"] = "lilygo_t2can";
+#elif defined(BOARD_REJSACAN)
+    doc["board"] = "rejsacan";
+#endif
+    doc["mdns"] = MDNS_NAME;
+
+    auto features = doc["features"].to<JsonObject>();
+    features["can_tx"]    = (bool)CAN_TX_ENABLED;
+#if defined(HAS_MCP2515)
+    features["mcp2515"]   = true;
+#else
+    features["mcp2515"]   = false;
+#endif
+#if defined(HAS_VIN_SENSE)
+    features["vin_sense"] = true;
+#else
+    features["vin_sense"] = false;
+#endif
+
+    auto wifi = doc["wifi"].to<JsonObject>();
+
+    auto sta = wifi["sta"].to<JsonObject>();
+    const bool join_sta = (sizeof(WIFI_SSID) > 1);
+    sta["ssid"]     = WIFI_SSID;                    // exactly what was compiled in
+    sta["pass_len"] = (int)(sizeof(WIFI_PASS) - 1); // length only, never the password
+    sta["enabled"]  = join_sta;
+    const bool sta_connected = join_sta && WiFi.status() == WL_CONNECTED;
+    sta["status"] = !join_sta ? "disabled"
+                  : sta_connected ? "connected" : "connecting";
+    if (sta_connected) {
+        sta["ip"]   = WiFi.localIP().toString();
+        sta["rssi"] = WiFi.RSSI();
+    }
+    sta["disconnects"] = (uint32_t)g_sta_disconnects;
+    if (g_sta_disconnects > 0)
+        sta["last_disconnect_reason"] =
+            staDisconnectReasonName(g_sta_last_disconnect_reason);
+
+    auto ap = wifi["ap"].to<JsonObject>();
+    ap["ssid"]    = AP_SSID;
+    ap["running"] = g_ap_running;
+    if (g_ap_running) {
+        ap["ip"]      = WiFi.softAPIP().toString();
+        ap["clients"] = WiFi.softAPgetStationNum();
+    }
+
+    String out;
+    serializeJsonPretty(doc, out);
+    server.send(200, "application/json", out);
+}
+
 void handleRoot() {
     // HTML lives in src/dashboard.html; embedded via board_build.embed_txtfiles.
     // Length excludes the trailing null byte that embed_txtfiles appends.
@@ -1551,10 +1647,40 @@ void setup() {
     // makes the soft-AP beacon hop channels and drop out (it appears briefly
     // then vanishes and won't accept clients). Build with an empty WIFI_SSID
     // for a rock-solid AP-only setup; set it to join a bench network as before.
+    // Record STA join outcomes for /config and the serial log. Registered
+    // before begin() so even the very first failure is captured. The callback
+    // runs on the WiFi event task; it only writes the volatile g_sta_* words.
+    // Serial output is suppressed while an SLCAN session is open — the USB
+    // serial port is the SLCAN channel, and a stray text line would corrupt
+    // the frame stream a python-can client is parsing.
+    WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
+        if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+            g_sta_last_disconnect_reason = info.wifi_sta_disconnected.reason;
+            g_sta_disconnects = g_sta_disconnects + 1;
+            if (!slcan_open)
+                Serial.printf("WiFi: STA disconnected, reason %u (%s)\r\n",
+                              info.wifi_sta_disconnected.reason,
+                              staDisconnectReasonName(
+                                  info.wifi_sta_disconnected.reason).c_str());
+        } else if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
+            if (!slcan_open)
+                Serial.printf("WiFi: STA connected, IP %s\r\n",
+                              WiFi.localIP().toString().c_str());
+        }
+    });
+
     const bool join_sta = (sizeof(WIFI_SSID) > 1);
     WiFi.mode(join_sta ? WIFI_AP_STA : WIFI_AP);
     g_ap_running = WiFi.softAP(AP_SSID, AP_PASS);
     if (join_sta) WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+    if (join_sta)
+        Serial.printf("WiFi: AP \"%s\" %s; STA joining \"%s\" (pass %u chars)\r\n",
+                      AP_SSID, g_ap_running ? "up" : "FAILED",
+                      WIFI_SSID, (unsigned)(sizeof(WIFI_PASS) - 1));
+    else
+        Serial.printf("WiFi: AP \"%s\" %s; STA disabled (no WIFI_SSID baked in)\r\n",
+                      AP_SSID, g_ap_running ? "up" : "FAILED");
 
     // Wildcard DNS on the soft-AP: any hostname (tractor.local, tractor,
     // captive-portal probes, etc.) resolves to the board's AP IP. Needed
@@ -1563,8 +1689,9 @@ void setup() {
 
     MDNS.begin(MDNS_NAME);
 
-    server.on("/",     handleRoot);
-    server.on("/json", handleJson);
+    server.on("/",       handleRoot);
+    server.on("/json",   handleJson);
+    server.on("/config", handleConfig);
     server.onNotFound(handleNotFound);
     server.begin();
     MDNS.addService("http", "tcp", 80);
