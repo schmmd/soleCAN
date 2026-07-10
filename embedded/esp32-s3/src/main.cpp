@@ -1045,14 +1045,26 @@ void handleJson() {
 // no_ap_found a wrong SSID or out-of-range network. Rare codes stay numeric.
 static String staDisconnectReasonName(uint8_t reason) {
     switch (reason) {
+        case WIFI_REASON_UNSPECIFIED:                return "unspecified";
         case WIFI_REASON_AUTH_EXPIRE:                return "auth_expire";
+        case WIFI_REASON_AUTH_LEAVE:                 return "auth_leave";
+        case WIFI_REASON_ASSOC_EXPIRE:               return "assoc_expire";
+        case WIFI_REASON_ASSOC_TOOMANY:              return "assoc_toomany";
+        case WIFI_REASON_NOT_AUTHED:                 return "not_authed";
+        case WIFI_REASON_NOT_ASSOCED:                return "not_assoced";
+        case WIFI_REASON_ASSOC_LEAVE:                return "assoc_leave";
+        case WIFI_REASON_MIC_FAILURE:                return "mic_failure";
         case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:     return "4way_handshake_timeout";
+        case WIFI_REASON_GROUP_KEY_UPDATE_TIMEOUT:   return "group_key_update_timeout";
+        case WIFI_REASON_802_1X_AUTH_FAILED:         return "802_1x_auth_failed";
         case WIFI_REASON_BEACON_TIMEOUT:             return "beacon_timeout";
         case WIFI_REASON_NO_AP_FOUND:                return "no_ap_found";
         case WIFI_REASON_AUTH_FAIL:                  return "auth_fail";
         case WIFI_REASON_ASSOC_FAIL:                 return "assoc_fail";
         case WIFI_REASON_HANDSHAKE_TIMEOUT:          return "handshake_timeout";
         case WIFI_REASON_CONNECTION_FAIL:            return "connection_fail";
+        case WIFI_REASON_AP_TSF_RESET:               return "ap_tsf_reset";
+        case WIFI_REASON_ROAMING:                    return "roaming";
         default:                                     return String(reason);
     }
 }
