@@ -46,7 +46,7 @@ env.Append(CPPPATH=[gen_dir])  # noqa: F821
 ssid = os.environ.get("WIFI_SSID") or ""
 password = os.environ.get("WIFI_PASS") or ""
 if ssid and password:
-    print(f'WiFi STA credentials: SSID "{ssid}", password set ({len(password)} chars)')
+    print(f'WiFi STA credentials: SSID "{ssid}", password set')
 elif ssid:
     print("!" * 72)
     print(f'WARNING: WIFI_SSID "{ssid}" is set but WIFI_PASS is empty/unset —')

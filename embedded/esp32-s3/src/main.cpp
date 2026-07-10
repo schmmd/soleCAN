@@ -1108,7 +1108,7 @@ void handleConfig() {
     auto sta = wifi["sta"].to<JsonObject>();
     const bool join_sta = (sizeof(WIFI_SSID) > 1);
     sta["ssid"]     = WIFI_SSID;                    // exactly what was compiled in
-    sta["pass_len"] = (int)(sizeof(WIFI_PASS) - 1); // length only, never the password
+    sta["pass_set"] = (sizeof(WIFI_PASS) > 1);      // presence only, never the password
     sta["enabled"]  = join_sta;
     const bool sta_connected = join_sta && WiFi.status() == WL_CONNECTED;
     sta["status"] = !join_sta ? "disabled"
