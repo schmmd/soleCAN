@@ -389,9 +389,11 @@ extern const uint8_t dashboard_html_end[]   asm("_binary_src_dashboard_html_end"
 // This keeps the decoded-state globals single-threaded — buildJson() and the .asc
 // formatter both run on the loop task, and only opaque bytes cross to the writer —
 // and it keeps SD stalls (block erase) off the CAN drain: a full ring drops whole
-// lines (counted) rather than blocking loop(). No hot-insert: the card is probed
-// once at boot; if it isn't there, the whole feature stays dormant (reboot to use
-// a card inserted later).
+// lines (counted) rather than blocking loop(). Mid-session SD failures are
+// handled by remount-and-resume (see sdRecoverOrFail); only repeated back-to-back
+// failures latch "error" until reboot. No hot-insert: the card is probed once at
+// boot; if it isn't there, the whole feature stays dormant (reboot to use a card
+// inserted later).
 #if defined(HAS_SD)
 
 // ── Tunables ──
@@ -404,6 +406,8 @@ extern const uint8_t dashboard_html_end[]   asm("_binary_src_dashboard_html_end"
 #define SD_RAW_RING_BYTES   (1024UL * 1024)           // PSRAM ring for raw .asc
 #define SD_JSON_RING_BYTES  (256UL * 1024)            // PSRAM ring for json lines
 #define SD_FREE_CHECK_MS    10000                     // usedBytes() is slow — poll sparingly
+#define SD_RECOVER_ATTEMPTS 5                         // remount tries before latching error
+#define SD_RECOVER_DELAY_MS 250                       // backoff base between remount tries
 
 struct SdState {
     const char* state = "no_card";     // no_card | logging | error
@@ -416,6 +420,7 @@ struct SdState {
     volatile uint32_t json_dropped = 0;
     const char*       fail_op  = "";     // which SD call failed (state == "error")
     volatile uint32_t fail_kb  = 0;      // KB written when it failed
+    volatile uint32_t recoveries = 0;    // successful remount-and-resume cycles
 };
 static SdState g_sd;
 
@@ -591,12 +596,17 @@ static void sdUpdateFree() {
     g_sd.free_mb = (uint32_t)(freeb >> 20);
 }
 
-// Give up logging for the rest of this boot (card removed / write failure). The
-// CAN tap keeps running; we do not attempt to remount. `op` and the running byte
-// count are kept for the /json status so a field failure is diagnosable.
-static void sdFail(const char* op, uint64_t bytes_written) {
+// Part-size accounting. File-scope (not writer-task locals) so a recovery can
+// reset them when it opens fresh part files. Writer task (core 0) owns all three.
+static uint64_t sd_total_bytes = 0;
+static uint64_t sd_raw_part_bytes = 0, sd_json_part_bytes = 0;
+
+// Give up logging for the rest of this boot. The CAN tap keeps running. `op` and
+// the running byte count are kept for the /json status so a field failure is
+// diagnosable.
+static void sdFail(const char* op) {
     g_sd.fail_op = op;
-    g_sd.fail_kb = (uint32_t)(bytes_written >> 10);
+    g_sd.fail_kb = (uint32_t)(sd_total_bytes >> 10);
     g_sd_active  = false;
     g_sd.state   = "error";
     if (g_sd_raw_file)  g_sd_raw_file.close();
@@ -604,10 +614,33 @@ static void sdFail(const char* op, uint64_t bytes_written) {
     vTaskDelete(nullptr);
 }
 
+// An SD call failed mid-session. Observed failure mode on the RejsaCAN: the card
+// stops answering CMD13 (SEND_STATUS) under sustained write load — on two
+// different cards and both Arduino cores — and a reboot always brings it back.
+// So instead of latching "error" on the first bad write, remount and resume the
+// same session with fresh part files (bounded attempts, linear backoff). The
+// in-flight chunk is discarded (≤512 B); the rings keep absorbing frames while
+// we're remounting, so a sub-second recovery usually loses nothing else.
+static void sdRecoverOrFail(const char* op) {
+    for (int attempt = 1; attempt <= SD_RECOVER_ATTEMPTS; attempt++) {
+        g_sd_raw_file.close();
+        g_sd_json_file.close();
+        SD.end();
+        vTaskDelay(pdMS_TO_TICKS(SD_RECOVER_DELAY_MS * attempt));
+        if (!SD.begin(SD_CS_PIN)) continue;
+        g_sd.raw_part++;
+        g_sd.json_part++;
+        if (!sdOpenRawPart())  continue;
+        if (!sdOpenJsonPart()) continue;
+        sd_raw_part_bytes = sd_json_part_bytes = 0;
+        g_sd.recoveries++;
+        return;
+    }
+    sdFail(op);   // never returns
+}
+
 static void sdWriterTask(void*) {
     uint8_t  buf[512];
-    uint64_t total_bytes = 0;
-    uint64_t raw_part_bytes = 0, json_part_bytes = 0;
     uint32_t last_flush = millis();
     uint32_t last_free  = millis() - SD_FREE_CHECK_MS;   // check on first idle
 
@@ -616,30 +649,36 @@ static void sdWriterTask(void*) {
 
         size_t n = xStreamBufferReceive(g_sd_raw_sb, buf, sizeof buf, 0);
         if (n) {
-            if (g_sd_raw_file.write(buf, n) != n)
-                sdFail("raw_write", total_bytes);   // never returns on fail
-            raw_part_bytes += n; total_bytes += n; did = true;
+            if (g_sd_raw_file.write(buf, n) != n) {
+                sdRecoverOrFail("raw_write");
+            } else {
+                sd_raw_part_bytes += n; sd_total_bytes += n;
+            }
+            did = true;
         }
         n = xStreamBufferReceive(g_sd_json_sb, buf, sizeof buf, 0);
         if (n) {
-            if (g_sd_json_file.write(buf, n) != n)
-                sdFail("json_write", total_bytes);
-            json_part_bytes += n; total_bytes += n; did = true;
+            if (g_sd_json_file.write(buf, n) != n) {
+                sdRecoverOrFail("json_write");
+            } else {
+                sd_json_part_bytes += n; sd_total_bytes += n;
+            }
+            did = true;
         }
-        g_sd.mb_written = (uint32_t)(total_bytes >> 20);
+        g_sd.mb_written = (uint32_t)(sd_total_bytes >> 20);
 
         // Roll parts so no single file grows unbounded.
-        if (raw_part_bytes >= SD_MAX_PART_BYTES) {
+        if (sd_raw_part_bytes >= SD_MAX_PART_BYTES) {
             g_sd_raw_file.flush(); g_sd_raw_file.close();
             g_sd.raw_part++;
-            if (!sdOpenRawPart()) sdFail("raw_open", total_bytes);
-            raw_part_bytes = 0;
+            if (!sdOpenRawPart()) sdRecoverOrFail("raw_open");
+            sd_raw_part_bytes = 0;
         }
-        if (json_part_bytes >= SD_MAX_PART_BYTES) {
+        if (sd_json_part_bytes >= SD_MAX_PART_BYTES) {
             g_sd_json_file.flush(); g_sd_json_file.close();
             g_sd.json_part++;
-            if (!sdOpenJsonPart()) sdFail("json_open", total_bytes);
-            json_part_bytes = 0;
+            if (!sdOpenJsonPart()) sdRecoverOrFail("json_open");
+            sd_json_part_bytes = 0;
         }
 
         uint32_t now = millis();
@@ -1349,6 +1388,7 @@ String buildJson(bool pretty = true, bool minimal = false) {
         }
         if (g_sd.raw_dropped)  sd["raw_dropped"]  = g_sd.raw_dropped;
         if (g_sd.json_dropped) sd["json_dropped"] = g_sd.json_dropped;
+        if (g_sd.recoveries)   sd["recoveries"]   = g_sd.recoveries;
         if (g_sd.fail_op[0]) {
             sd["fail_op"] = g_sd.fail_op;
             sd["fail_kb"] = g_sd.fail_kb;
