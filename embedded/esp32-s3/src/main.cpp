@@ -408,6 +408,7 @@ extern const uint8_t dashboard_html_end[]   asm("_binary_src_dashboard_html_end"
 #define SD_FREE_CHECK_MS    10000                     // usedBytes() is slow — poll sparingly
 #define SD_RECOVER_ATTEMPTS 5                         // remount tries before latching error
 #define SD_RECOVER_DELAY_MS 250                       // backoff base between remount tries
+#define SD_WRITE_CHUNK_BYTES 8192                     // batch writes into bursts this size
 
 struct SdState {
     const char* state = "no_card";     // no_card | logging | error
@@ -640,30 +641,40 @@ static void sdRecoverOrFail(const char* op) {
 }
 
 static void sdWriterTask(void*) {
-    uint8_t  buf[512];
+    static uint8_t buf[SD_WRITE_CHUNK_BYTES];   // static — doesn't fit the task stack
     uint32_t last_flush = millis();
     uint32_t last_free  = millis() - SD_FREE_CHECK_MS;   // check on first idle
 
     for (;;) {
         bool did = false;
 
-        size_t n = xStreamBufferReceive(g_sd_raw_sb, buf, sizeof buf, 0);
-        if (n) {
-            if (g_sd_raw_file.write(buf, n) != n) {
-                sdRecoverOrFail("raw_write");
-            } else {
-                sd_raw_part_bytes += n; sd_total_bytes += n;
+        // Batch: drain a stream only once a full chunk is waiting, or when the
+        // flush deadline arrives (so trickle data still lands within ~1 s).
+        // Short write bursts leave the card idle between them, instead of the
+        // continuous 512-byte-at-a-time program cycle that provoked mid-write
+        // card lockups. If a write fails, the chunk is still in buf after the
+        // remount, so recovery re-lands it — no data lost.
+        bool flush_due = (millis() - last_flush >= SD_FLUSH_MS);
+
+        if (flush_due || xStreamBufferBytesAvailable(g_sd_raw_sb) >= SD_WRITE_CHUNK_BYTES) {
+            size_t n = xStreamBufferReceive(g_sd_raw_sb, buf, sizeof buf, 0);
+            if (n) {
+                if (g_sd_raw_file.write(buf, n) != n) {
+                    sdRecoverOrFail("raw_write");
+                    if (g_sd_raw_file.write(buf, n) != n) sdFail("raw_write");
+                }
+                sd_raw_part_bytes += n; sd_total_bytes += n; did = true;
             }
-            did = true;
         }
-        n = xStreamBufferReceive(g_sd_json_sb, buf, sizeof buf, 0);
-        if (n) {
-            if (g_sd_json_file.write(buf, n) != n) {
-                sdRecoverOrFail("json_write");
-            } else {
-                sd_json_part_bytes += n; sd_total_bytes += n;
+        if (flush_due || xStreamBufferBytesAvailable(g_sd_json_sb) >= SD_WRITE_CHUNK_BYTES) {
+            size_t n = xStreamBufferReceive(g_sd_json_sb, buf, sizeof buf, 0);
+            if (n) {
+                if (g_sd_json_file.write(buf, n) != n) {
+                    sdRecoverOrFail("json_write");
+                    if (g_sd_json_file.write(buf, n) != n) sdFail("json_write");
+                }
+                sd_json_part_bytes += n; sd_total_bytes += n; did = true;
             }
-            did = true;
         }
         g_sd.mb_written = (uint32_t)(sd_total_bytes >> 20);
 
