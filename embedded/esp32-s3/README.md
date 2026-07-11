@@ -388,6 +388,64 @@ jq . /Volumes/SD/s00007/data_00.jsonl | less                       # decoded tim
 The `.jsonl` is a convenience timeline; the `.asc` is the full-fidelity record
 (you can always regenerate the decoded view from it with `solecan-analyze.py`).
 
+## Pre-ship bench test
+
+`device-test.py` is an acceptance suite to run against each flashed device
+before it ships. From a bench Mac it exercises every external interface: the
+HTTP dashboard and `/json` (including firmware version, CAN health counters,
+and the RejsaCAN 12 V sense), the captive-portal redirect, mDNS, socketcand
+slot handling, SLCAN over USB — including confirming that a listen-only build
+answers injection attempts with BELL, the pre-ship proof that the passive-tap
+guarantee is in the flashed image — and optionally BLE. With a bench CAN
+adapter it also runs an end-to-end decode check: it injects synthetic J1939
+frames covering every decoder path (pack, cells, temps, limits, faults,
+motor, charger, DM1) and verifies the decoded engineering values in `/json`,
+the raw-frame taps, and that `motor.alive` latches and goes stale correctly.
+
+```bash
+# WiFi-only smoke test: join the device's AP (SSID `tractor`), then from the
+# repo root:
+uv run python embedded/esp32-s3/device-test.py
+
+# Full pre-ship run: USB serial + bench injector + ACK adapter + BLE +
+# operator LED checks
+uv run python embedded/esp32-s3/device-test.py \
+    --serial /dev/cu.usbmodem101 \
+    --inject-interface slcan --inject-channel /dev/cu.usbserial-A50 \
+    --ack-interface canalystii --ack-channel 0 \
+    --expect-version $(git rev-parse --short HEAD) \
+    --ble --interactive
+```
+
+Stages whose prerequisite flag isn't given are reported as SKIP, so the
+WiFi-only form is still a useful smoke test. The exit code is 0 only when
+every executed check passes.
+
+Bench notes:
+
+- **Test one device at a time.** Every unit broadcasts the same AP SSID and
+  mDNS name.
+- **The injection stage needs an ACK node on the bench bus.** The device
+  under test is listen-only and never ACKs, so a lone injector goes
+  error-passive and retransmits its *first* frame forever while the rest
+  queue behind it — none of the later fixtures reach the device. Wire any
+  second adapter to the bench bus and pass it as
+  `--ack-interface`/`--ack-channel`; the suite opens it in normal mode
+  purely to provide hardware ACKs. The suite probes for the no-ACK
+  condition right after the first frame and skips the decode sweep with a
+  single clear failure instead of a wall of misleading ones.
+- **Terminate the bench bus** (~120 Ω between CANH and CANL) and connect
+  ground between the adapter and the board.
+- **Never run the injection stage with the device wired to the tractor** —
+  the bench adapter would spoof BMS/motor frames onto the real bus.
+- **Pass `--expect-vin` only when the board is powered from a 12 V supply.**
+  On USB power the RejsaCAN rail sense reads ~4.6 V (5 V minus the
+  protection-diode drop), which would fail a 12 V expectation.
+- `--ble` needs the `bleak` package (`uv pip install bleak`); it is not a
+  project dependency.
+- On a T-2CAN pass `--channels 2` so the socketcand channel checks match the
+  board.
+
 ## Source layout
 
 ```
@@ -396,6 +454,7 @@ esp32-s3/
 ├── boards/                 # custom board JSONs (LilyGo T-2CAN)
 ├── copy_dashboard.py       # pre-build: copies repo-root dashboard.html → src/
 ├── inject_build_overrides.py # pre-build: injects AP_SSID / AP_PASS / MDNS_NAME
+├── device-test.py          # bench acceptance suite for a flashed device
 ├── README.md               # this file
 └── src/
     ├── main.cpp            # all firmware code (decode, HTTP, SLCAN, socketcand, LED)

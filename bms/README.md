@@ -2,8 +2,8 @@
 
 Reference for the diagnostic CAN port on the UDAN BMS shipped in the
 Solectrac e25G tractor (India 72V 300Ah variant). Covers wire protocol,
-session lifecycle, and the Data Identifier (DID) map. Reverse-engineering
-provenance and unresolved investigations are in the Appendix.
+session lifecycle, and the Data Identifier (DID) map. Provenance of each
+decode and unresolved investigations are in the Appendix.
 
 Confidence markers used throughout: **CONFIRMED**, **TENTATIVE**, **UNKNOWN**.
 
@@ -99,7 +99,7 @@ The iBMS PC tool performs a fixed 11-step sequence on every connection
 | 10   | `37`                                 | TransferExit                                  |
 | 11   | `22 A5 03`, `22 A5 05`, `22 A5 0D`   | Additional identity / status reads            |
 
-Steps 8–10 are the open mystery — see "Bootstrap RequestDownload" in the reverse-engineering notes appendix.
+Steps 8–10 are the open mystery — see "Bootstrap RequestDownload" in the investigation notes appendix.
 
 ---
 
@@ -841,7 +841,7 @@ which ID + framing first gets an answer.
 The iBMS PC Utility presents five top-level tabs (with sub-navigation
 where present). Pairing tab transitions against trace polling-burst
 boundaries was the primary technique for mapping DIDs to data — see
-"DID-mapping methodology" in the reverse-engineering notes below.
+"DID-mapping methodology" in the investigation notes below.
 
 | Top tab          | Right sub-nav                                                                                                                    | Driving DIDs              |
 |------------------|----------------------------------------------------------------------------------------------------------------------------------|---------------------------|
@@ -889,7 +889,7 @@ unlike the History → XLSX export).
 
 ---
 
-## Reverse-engineering notes
+## Investigation notes
 
 Active investigations: methodology, captured data, unresolved findings,
 and open questions. Anything here is subject to change as more captures
@@ -964,7 +964,7 @@ Cell volt / Temp) that wasn't screenshotted.
   L2 240 V charge captures. The dynamic u16s at `0x0901` bytes
   0..1 BE / 4..5 BE don't map to any field the iBMS surfaces from this
   cluster — they're treated as opaque BMS-internal ADC counts. Further
-  decode would require firmware reverse engineering, a separate research
+  decode would require analyzing the BMS firmware, a separate research
   line.
 - **`0x4000` interpretation — UDAN `0x87` mapping is incorrect or partial.**
   The above capture shows `0x4000` is dominated by charger telemetry
