@@ -13,6 +13,7 @@
  * Endpoints:
  *   GET /       — mobile-friendly dashboard (auto-refreshing)
  *   GET /json   — raw JSON
+ *   anything else 302-redirects to / (captive-portal auto-open on the AP)
  */
 
 #include <Arduino.h>
@@ -51,6 +52,24 @@
 #endif
 #ifndef WIFI_PASS
 #define WIFI_PASS ""
+#endif
+
+// ── CAN transmit / bus mode ───────────────────────────────────────────────────
+// Safe by default: both CAN controllers come up in *listen-only* mode, so the
+// hardware physically cannot drive the bus — no ACKs, no error frames, no
+// injection. This makes the stock firmware a true passive tap; a bug in a
+// transmit path can't perturb the bus because the silicon never drives a bit.
+//
+// Build with -DCAN_ALLOW_TX to switch both controllers to NORMAL mode. That
+// makes them ACK received frames AND arms every transmit path — SLCAN t/T
+// injection over USB and socketcand `< send >` over WiFi. Only build this way
+// when you intend to write to the bus. Note: in listen-only mode a two-node
+// bench setup gets no ACKs (the lone talker retransmits and eventually goes
+// bus-off); on the tractor's four-ECU bus the real nodes ACK each other.
+#if defined(CAN_ALLOW_TX)
+  #define CAN_TX_ENABLED 1
+#else
+  #define CAN_TX_ENABLED 0
 #endif
 
 // Per-board pin map. Selected via -DBOARD_* in platformio.ini.
@@ -227,21 +246,11 @@ struct PackState {
     int8_t  temp_spread_c = -1;
 };
 
+// Raw F106 state bitmaps. The individual bits are decoded downstream (see
+// dashboard.html B0_NAMES/B1_NAMES and solecan_proto F106), not here.
 struct BmsStateFlags {
     uint8_t byte0 = 0, byte1 = 0;
-    bool output_enable   : 1;
-    bool main_contactor  : 1;
-    bool operating       : 1;
-    bool standby         : 1;
-    bool charging        : 1;
-    bool no_drive        : 1;
-    bool drive_mode      : 1;
-    bool awake           : 1;
-    bool valid           : 1;
-    BmsStateFlags() : output_enable(false), main_contactor(false),
-        operating(false), standby(false), charging(false),
-        no_drive(false), drive_mode(false), awake(false),
-        valid(false) {}
+    bool    valid = false;
 };
 
 struct BmsLimits {
@@ -265,7 +274,9 @@ struct MotorState {
     uint16_t rpm_magnitude = 0;
     int8_t   direction     = 0;
     uint8_t  range    = 1;
-    uint8_t  torque_raw  = 0;
+    // LE u16: commanded effort magnitude; peaks past 255 under hard
+    // acceleration (observed 262), so a single byte would wrap.
+    uint16_t torque_raw  = 0;
     int8_t   controller_temp_c = INT8_MIN;
     int8_t   motor_temp_c      = INT8_MIN;
     bool     valid             = false;
@@ -327,6 +338,11 @@ bool        g_ap_running      = false;
 bool        g_mcp_initialized = false;
 uint32_t    g_mcp_init_err    = 0xFFFFFFFFUL;   // sentinel: never attempted
 uint32_t    g_mcp_frames_rx   = 0;
+// MCP2515: external classic-CAN 2.0B controller wired to SPI, run at 250 kbit/s
+// to match the J1939 main bus. The library's RX buffers are drained from
+// loop(); frames are forwarded to socketcand as channel can1. Crystal frequency
+// is board-dependent — see MCP2515_QUARTZ_HZ if can1 stays silent.
+static ACAN2515 g_mcp(MCP2515_CS_PIN, SPI, MCP2515_INT_PIN);
 #endif
 
 #if defined(HAS_VIN_SENSE)
@@ -499,6 +515,12 @@ static void updateVinSense() {
 // — without this, capture is dead until a power cycle. Poll the driver state
 // and walk it back: BUS_OFF → initiate recovery (the controller waits out
 // 128×11 recessive bits), which completes into STOPPED → start again.
+//
+// The MCP2515 (can1) deliberately has no equivalent: bus-off is driven by the
+// *transmit* error counter, so a listen-only controller can never reach it,
+// and in a -DCAN_ALLOW_TX build the MCP2515 — unlike the TWAI peripheral —
+// recovers from bus-off automatically in hardware. Its error state is
+// observable via tec/rec/eflg in the /json mcp2515 block.
 
 static void canRecoveryTick() {
     static uint32_t last_ms = 0;
@@ -677,17 +699,9 @@ void decodeCAN(uint32_t can_id, const uint8_t* raw, uint8_t len) {
 
         } else if (pgn == PGN_F106) {
             if (allZero(d)) return;
-            g_bms_state.byte0          = d[0];
-            g_bms_state.byte1          = d[1];
-            g_bms_state.output_enable  = (d[0] & 0x01) != 0;
-            g_bms_state.main_contactor = (d[0] & 0x04) != 0;
-            g_bms_state.operating      = (d[0] & 0x40) != 0;
-            g_bms_state.standby        = (d[0] & 0x80) != 0;
-            g_bms_state.charging       = (d[1] & 0x08) != 0;
-            g_bms_state.no_drive       = (d[1] & 0x04) != 0;
-            g_bms_state.drive_mode     = (d[1] & 0x20) != 0;
-            g_bms_state.awake          = (d[1] & 0x40) != 0;
-            g_bms_state.valid          = true;
+            g_bms_state.byte0 = d[0];
+            g_bms_state.byte1 = d[1];
+            g_bms_state.valid = true;
 
         } else if (pgn == PGN_F107) {
             if (allZero(d)) return;
@@ -726,13 +740,17 @@ void decodeCAN(uint32_t can_id, const uint8_t* raw, uint8_t len) {
     } else if (src == SRC_MOTOR && pgn == PGN_FF21) {
         uint16_t rpm_raw  = le16(d[2], d[3]);
         int      rpm_mag  = (int)rpm_raw - RPM_BIAS;
+        // Raw can jitter a bit below the zero-RPM bias at standstill; without
+        // the clamp the uint16_t cast below would wrap a small negative to
+        // ~65000 RPM (and a garbage speed).
+        if (rpm_mag < 0) rpm_mag = 0;
         uint8_t  fnr      = d[7] & 0x0F;
         int8_t   dir      = (fnr == 0x4) ? 1 : (fnr == 0x8) ? -1 : 0;
         g_motor.rpm_magnitude      = (uint16_t)rpm_mag;
         g_motor.rpm_signed         = dir * rpm_mag;
         g_motor.direction          = dir;
         g_motor.range         = ((d[7] >> 4) & 0x0F) + 1;
-        g_motor.torque_raw       = d[0];
+        g_motor.torque_raw       = le16(d[0], d[1]);
         if (d[4]) g_motor.controller_temp_c = (int8_t)(d[4] - TEMP_OFFSET_C);
         if (d[5]) g_motor.motor_temp_c      = (int8_t)(d[5] - TEMP_OFFSET_C);
         g_motor.valid = true;
@@ -841,11 +859,7 @@ String buildJson(bool pretty = true, bool minimal = false) {
         }
     }
     can["frames_rx"]      = g_frames_rx;
-#if defined(CAN_LISTEN_ONLY)
-    if (!minimal) can["mode"] = "listen_only";
-#else
-    if (!minimal) can["mode"] = "normal";
-#endif
+    if (!minimal) can["mode"] = CAN_TX_ENABLED ? "normal" : "listen_only";
     if (!minimal) can["frames_decoded"] = g_frames_decoded;
     if (!minimal && g_socketcand_tx_dropped)
         can["socketcand_dropped"] = g_socketcand_tx_dropped;
@@ -856,6 +870,15 @@ String buildJson(bool pretty = true, bool minimal = false) {
     mcp["initialized"] = g_mcp_initialized;
     mcp["init_err"]    = g_mcp_init_err;
     mcp["frames_rx"]   = g_mcp_frames_rx;
+    if (!minimal && g_mcp_initialized) {
+        // Error-state visibility for can1, matching can0's tec/rec above.
+        // Each accessor is one short SPI register read. eflg is the raw EFLG
+        // register: bit 5 TXBO (bus-off), bits 4/3 TXEP/RXEP (error-passive),
+        // bits 7/6 RX1OVR/RX0OVR (RX buffer overflow).
+        mcp["tec"]  = g_mcp.transmitErrorCounter();
+        mcp["rec"]  = g_mcp.receiveErrorCounter();
+        mcp["eflg"] = g_mcp.errorFlagRegister();
+    }
 #endif
 
     // Pack
@@ -945,19 +968,12 @@ String buildJson(bool pretty = true, bool minimal = false) {
 
     // BMS state
     if (g_bms_state.valid) {
+        // Raw F106 bitmaps; the dashboard decodes the individual bits. Sent
+        // in the minimal (BLE) payload too — the dashboard's BMS State panel
+        // reads only these two bytes.
         auto st = doc["bms"]["state"].to<JsonObject>();
-        if (!minimal) {
-            st["byte0"] = g_bms_state.byte0;
-            st["byte1"] = g_bms_state.byte1;
-        }
-        st["output_enable"]  = g_bms_state.output_enable  ? 1 : 0;
-        st["main_contactor"] = g_bms_state.main_contactor ? 1 : 0;
-        st["operating"]      = g_bms_state.operating      ? 1 : 0;
-        st["precharge"]      = g_bms_state.standby        ? 1 : 0;
-        st["charging"]       = g_bms_state.charging       ? 1 : 0;
-        st["no_drive"]       = g_bms_state.no_drive       ? 1 : 0;
-        st["drive_mode"]     = g_bms_state.drive_mode     ? 1 : 0;
-        st["awake"]          = g_bms_state.awake          ? 1 : 0;
+        st["byte0"] = g_bms_state.byte0;
+        st["byte1"] = g_bms_state.byte1;
     }
 
     // BMS current limits
@@ -1001,16 +1017,6 @@ String buildJson(bool pretty = true, bool minimal = false) {
             mot["direction"]     = g_motor.direction;
             mot["range"]    = g_motor.range;
             mot["torque_raw"] = g_motor.torque_raw;
-            // Ground speed from RPM × range (Turf/Industrial tire calibration,
-            // per Operator Manual p34; Agri tires would need different coeffs).
-            if (g_motor.range >= 1 && g_motor.range <= 3) {
-                static const float KMH_PER_RPM[3] = {
-                    5.7f / 2800.0f, 8.6f / 2800.0f, 17.0f / 2800.0f
-                };
-                float kmh = g_motor.rpm_magnitude * KMH_PER_RPM[g_motor.range - 1];
-                addFloat(mot, "speed_kmh", kmh, 2);
-                addFloat(mot, "speed_mph", kmh * 0.6213712f, 2);
-            }
             if (g_motor.controller_temp_c != INT8_MIN)
                 mot["controller_temp_c"] = g_motor.controller_temp_c;
             if (g_motor.motor_temp_c != INT8_MIN)
@@ -1101,9 +1107,25 @@ void handleRoot() {
     server.send_P(200, "text/html", (PGM_P)dashboard_html_start, len);
 }
 
+void handleNotFound() {
+    // The soft-AP's wildcard DNS lands every hostname here, including phone
+    // connectivity probes (generate_204 / hotspot-detect.html). Answering
+    // those with a redirect — not a 404 — makes the OS classify the AP as a
+    // captive portal and auto-open the dashboard when someone joins.
+    // localIP() is the board's address on whichever interface (AP or STA)
+    // the request arrived on, so bench-network clients redirect sensibly too.
+    server.sendHeader("Location",
+                      "http://" + server.client().localIP().toString() + "/");
+    server.send(302, "text/plain", "");
+}
+
 // ── SLCAN ─────────────────────────────────────────────────────────────────────
 // Presents the CAN bus as an SLCAN device over USB CDC serial.
 // python-can: interface='slcan', channel='/dev/cu.usbmodem...'
+// Receive always works; transmit (t/T commands) is gated on -DCAN_ALLOW_TX and
+// routes to can0 (the native TWAI controller) only — SLCAN has no channel
+// concept, so it never reaches the MCP2515 (can1). A listen-only build answers
+// every t/T with BELL.
 
 static char   slcan_buf[32];
 static uint8_t slcan_len = 0;
@@ -1118,11 +1140,38 @@ void slcanSendFrame(const twai_message_t& msg) {
                    msg.identifier, msg.data_length_code)
         : snprintf(line, sizeof(line), "t%03" PRIX32 "%u",
                    msg.identifier, msg.data_length_code);
-    for (int i = 0; i < msg.data_length_code; i++)
+    // Bound n so the two hex digits and the trailing '\r' always fit: if n
+    // ever passed sizeof(line), the sizeof(line) - n below would underflow
+    // and line[n++] would land out of bounds. Unreachable while loop()
+    // clamps DLC to 8, but the formatter shouldn't lean on that.
+    for (int i = 0; i < msg.data_length_code && n < (int)sizeof(line) - 3; i++)
         n += snprintf(line + n, sizeof(line) - n, "%02X", msg.data[i]);
     line[n++] = '\r';
     Serial.write((uint8_t*)line, n);
 }
+
+// Single hex digit -> 0..15, or -1 if not a hex character.
+static int hexNibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+#if CAN_TX_ENABLED
+// Inject a frame onto can0 (native TWAI). Shared by the SLCAN t/T handler and
+// the socketcand channel-0 `< send >` so the two TX paths can't drift. Returns
+// true if the driver queued the frame. Only compiled when TX is enabled — in a
+// listen-only build there is no code that can reach the bus.
+static bool canTransmit0(uint32_t id, bool extd, uint8_t dlc, const uint8_t* data) {
+    twai_message_t tx = {};
+    tx.identifier       = id;
+    tx.extd             = extd ? 1 : 0;
+    tx.data_length_code = dlc;
+    memcpy(tx.data, data, dlc);
+    return twai_transmit(&tx, pdMS_TO_TICKS(10)) == ESP_OK;
+}
+#endif
 
 void slcanHandleCommand(const char* cmd) {
     switch (cmd[0]) {
@@ -1132,6 +1181,41 @@ void slcanHandleCommand(const char* cmd) {
         case 'V': Serial.print("V1013\r"); break;
         case 'N': Serial.print("NA000\r"); break;
         case 'F': Serial.print("F00\r");   break;
+        // Transmit: t<iii><l><dd..> (11-bit) / T<iiiiiiii><l><dd..> (29-bit).
+        // Reply CR on success, BELL (\a) on any parse/TX error — the Lawicel
+        // convention python-can tolerates. Only functional when built with
+        // -DCAN_ALLOW_TX; a listen-only build rejects every frame with BELL.
+        case 't':
+        case 'T': {
+#if !CAN_TX_ENABLED
+            Serial.write('\a');   // listen-only build: injection disabled
+#else
+            if (!slcan_open) { Serial.write('\a'); break; }
+            bool extd = (cmd[0] == 'T');
+            int idlen = extd ? 8 : 3;
+            size_t len = strlen(cmd);
+            if (len < (size_t)(1 + idlen + 1)) { Serial.write('\a'); break; }
+            bool bad = false;
+            uint32_t id = 0;
+            for (int i = 0; i < idlen && !bad; i++) {
+                int nib = hexNibble(cmd[1 + i]);
+                if (nib < 0) bad = true; else id = (id << 4) | (uint32_t)nib;
+            }
+            int dlc = hexNibble(cmd[1 + idlen]);
+            if (bad || dlc < 0 || dlc > 8) { Serial.write('\a'); break; }
+            if (len < (size_t)(1 + idlen + 1 + dlc * 2)) { Serial.write('\a'); break; }
+            id &= extd ? 0x1FFFFFFFUL : 0x7FFUL;
+            uint8_t data[8] = {0};
+            const char* dp = cmd + 1 + idlen + 1;
+            for (int i = 0; i < dlc && !bad; i++) {
+                int hi = hexNibble(dp[i * 2]), lo = hexNibble(dp[i * 2 + 1]);
+                if (hi < 0 || lo < 0) bad = true; else data[i] = (uint8_t)((hi << 4) | lo);
+            }
+            if (bad) { Serial.write('\a'); break; }
+            Serial.write(canTransmit0(id, extd, (uint8_t)dlc, data) ? '\r' : '\a');
+#endif
+            break;
+        }
         default:  Serial.write('\r'); break;
     }
 }
@@ -1215,14 +1299,6 @@ static bool socketcandWritable(WiFiClient& client) {
     return select(fd + 1, nullptr, &wset, nullptr, &tv) > 0;
 }
 
-#if defined(HAS_MCP2515)
-// MCP2515: external classic-CAN 2.0B controller wired to SPI, run at 250 kbit/s
-// to match the J1939 main bus. The library's RX buffers are drained from
-// loop(); frames are forwarded to socketcand as channel can1. Crystal frequency
-// is board-dependent — see MCP2515_QUARTZ_HZ if can1 stays silent.
-static ACAN2515 g_mcp(MCP2515_CS_PIN, SPI, MCP2515_INT_PIN);
-#endif
-
 void socketcandSendFrame(const twai_message_t& msg, int8_t channel) {
     uint32_t now_ms = millis();
     uint32_t secs   = now_ms / 1000;
@@ -1254,6 +1330,9 @@ void socketcandSendFrame(const twai_message_t& msg, int8_t channel) {
 // extended here. Byte tokens may be 1 or 2 hex digits; the dlc (0..8) reads the
 // same in decimal or hex. Anything unparseable is dropped, like a real daemon.
 static void socketcandHandleSend(SocketcandSlot& slot, const char* cmd) {
+#if !CAN_TX_ENABLED
+    (void)slot; (void)cmd;              // listen-only build: injection disabled
+#else
     const char* p = cmd + 7;            // past "< send "
     char* end = nullptr;
     unsigned long id_val = strtoul(p, &end, 16);
@@ -1275,12 +1354,7 @@ static void socketcandHandleSend(SocketcandSlot& slot, const char* cmd) {
     uint32_t id = extended ? (id_val & 0x1FFFFFFFUL) : (id_val & 0x7FFUL);
 
     if (slot.channel == 0) {
-        twai_message_t tx = {};
-        tx.identifier       = id;
-        tx.extd             = extended ? 1 : 0;
-        tx.data_length_code = (uint8_t)dlc;
-        memcpy(tx.data, data, (size_t)dlc);
-        twai_transmit(&tx, pdMS_TO_TICKS(10));
+        canTransmit0(id, extended, (uint8_t)dlc, data);
     }
 #if defined(HAS_MCP2515)
     else if (slot.channel == 1 && g_mcp_initialized) {
@@ -1293,6 +1367,7 @@ static void socketcandHandleSend(SocketcandSlot& slot, const char* cmd) {
         g_mcp.tryToSend(tx);
     }
 #endif
+#endif  // CAN_TX_ENABLED
 }
 
 static void socketcandHandleCommand(SocketcandSlot& slot, const char* cmd) {
@@ -1365,8 +1440,12 @@ void socketcandPoll() {
 }
 
 // ── BLE (Nordic UART Service) ─────────────────────────────────────────────────
-// Pushes a compact (minimal) JSON snapshot to a single BLE central whenever it
-// differs from what we last sent. Framing on the wire is:
+// Pushes a compact (minimal) JSON snapshot to a single BLE central — every
+// BLE_PUSH_INTERVAL_MS while CAN frames are arriving, dropping to a slow
+// BLE_HEARTBEAT_MS cadence on a quiet bus. The heartbeat exists because some
+// fields change with time rather than with frames (uptime, last_frame_age_s,
+// the tractor on/off flag): the client must still see those move after the
+// bus goes silent. Framing on the wire is:
 //
 //     [u16 big-endian length] [length bytes of JSON]
 //
@@ -1387,29 +1466,33 @@ void socketcandPoll() {
 #define NUS_RX_UUID   "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
 
 #define BLE_CHUNK_BYTES        180
-#define BLE_PUSH_INTERVAL_MS   200    // diff cadence — actual send only on change
+#define BLE_PUSH_INTERVAL_MS   200    // push cadence while CAN frames are arriving
+#define BLE_HEARTBEAT_MS       2000   // idle cadence — keeps time-derived fields fresh
+
 #define BLE_INTER_CHUNK_DELAY  5      // min ms between chunk notifies (paced by bleTick)
 
 static BLEServer*         g_ble_server = nullptr;
 static BLECharacteristic* g_ble_tx     = nullptr;
-static volatile bool      g_ble_connected = false;
-static String             g_ble_last_payload;
+static volatile bool      g_ble_connected  = false;
+static volatile bool      g_ble_force_push = false;
 static uint32_t           g_ble_last_push_ms = 0;
+static uint32_t           g_ble_frames_at_push = 0;   // g_frames_rx at last push
 
 class BleServerCb : public BLEServerCallbacks {
+    // These callbacks run on the Bluedroid task, not loop() — they may only
+    // touch the volatile flags, never heap-backed state the loop task owns.
     void onConnect(BLEServer*) override {
-        g_ble_connected   = true;
-        g_ble_last_payload = "";   // force a full resend on (re)connect
+        g_ble_connected  = true;
+        g_ble_force_push = true;   // full snapshot immediately on (re)connect
     }
     void onDisconnect(BLEServer* s) override {
-        g_ble_connected   = false;
-        g_ble_last_payload = "";
+        g_ble_connected = false;
         s->getAdvertising()->start();   // resume advertising for the next client
     }
 };
 
 void bleInit() {
-    BLEDevice::init("tractor");
+    BLEDevice::init(MDNS_NAME);
     BLEDevice::setMTU(517);
 
     g_ble_server = BLEDevice::createServer();
@@ -1455,9 +1538,8 @@ void bleTick() {
     uint32_t now = millis();
 
     // Drain the in-flight frame first — one chunk per tick, keeping the
-    // 5 ms inter-chunk spacing on the wire. No new payload is built (and
-    // g_ble_last_payload doesn't advance) until the frame completes, so
-    // frames are never interleaved.
+    // 5 ms inter-chunk spacing on the wire. No new payload is built until
+    // the frame completes, so frames are never interleaved.
     if (g_ble_tx_off < g_ble_tx_len) {
         if (now - g_ble_chunk_ms < BLE_INTER_CHUNK_DELAY) return;
         size_t n = g_ble_tx_len - g_ble_tx_off;
@@ -1469,14 +1551,16 @@ void bleTick() {
         return;
     }
 
-    if (now - g_ble_last_push_ms < BLE_PUSH_INTERVAL_MS) return;
-    g_ble_last_push_ms = now;
-
-    String j = buildJson(false /*pretty*/, true /*minimal*/);
-    if (j != g_ble_last_payload) {
-        bleQueueFramed(j);
-        g_ble_last_payload = j;
-    }
+    // Adaptive cadence, keyed on frame arrival rather than a payload diff —
+    // frames_rx is in the payload, so any received frame changes the JSON
+    // and a diff could never suppress a push on an active bus anyway.
+    bool bus_active = g_frames_rx != g_ble_frames_at_push;
+    uint32_t interval = bus_active ? BLE_PUSH_INTERVAL_MS : BLE_HEARTBEAT_MS;
+    if (!g_ble_force_push && now - g_ble_last_push_ms < interval) return;
+    g_ble_force_push     = false;
+    g_ble_last_push_ms   = now;
+    g_ble_frames_at_push = g_frames_rx;
+    bleQueueFramed(buildJson(false /*pretty*/, true /*minimal*/));
 }
 
 // ── Setup & loop ──────────────────────────────────────────────────────────────
@@ -1523,16 +1607,16 @@ void setup() {
     // ~1800 frames/s, so 512 frames buffer ~280 ms of worst-case traffic
     // (longer at realistic bus load) for ~10 KB of DRAM.
     //
-    // Build with -DCAN_LISTEN_ONLY to put the controller in listen-only mode:
-    // it never transmits — no ACKs, no error frames — so it is electrically
-    // incapable of perturbing other nodes. Use this when tapping a bus shared
-    // with a device you must not disturb (e.g. a fleet/compliance logger).
-    // Trade-off: ALL transmit is disabled (SLCAN injection, socketcand
-    // client->bus send, UDS polling). Default is NORMAL, which ACKs frames.
-#if defined(CAN_LISTEN_ONLY)
-    const twai_mode_t kCanMode = TWAI_MODE_LISTEN_ONLY;
-#else
+    // Bus mode is set by CAN_TX_ENABLED (see -DCAN_ALLOW_TX up top). Default is
+    // LISTEN_ONLY: the controller never transmits — no ACKs, no error frames —
+    // so it is electrically incapable of perturbing other nodes, and every TX
+    // path (SLCAN injection, socketcand client->bus send) is dead at the
+    // silicon level. -DCAN_ALLOW_TX selects NORMAL, which ACKs frames and arms
+    // those TX paths.
+#if CAN_TX_ENABLED
     const twai_mode_t kCanMode = TWAI_MODE_NORMAL;
+#else
+    const twai_mode_t kCanMode = TWAI_MODE_LISTEN_ONLY;
 #endif
     twai_general_config_t can_cfg = TWAI_GENERAL_CONFIG_DEFAULT(
         CAN_TX_PIN, CAN_RX_PIN, kCanMode);
@@ -1570,6 +1654,7 @@ void setup() {
 
     server.on("/",     handleRoot);
     server.on("/json", handleJson);
+    server.onNotFound(handleNotFound);
     server.begin();
     MDNS.addService("http", "tcp", 80);
 
@@ -1595,9 +1680,14 @@ void setup() {
     // ACAN2515Settings(quartz_Hz, bitrate). begin() issues the MCP2515 reset,
     // configures bit timing, installs the ISR, and returns 0 on success (a
     // non-zero code is a bitmask of configuration errors — e.g. an impossible
-    // bitrate for the given crystal). Default mode is NormalMode (2.0B); the
-    // default filters accept every frame, which is what we want for a sniffer.
+    // bitrate for the given crystal). Default filters accept every frame, which
+    // is what we want for a sniffer. Mode tracks CAN_TX_ENABLED so can1 gets the
+    // same passive-tap guarantee as can0: ListenOnly by default, Normal only
+    // under -DCAN_ALLOW_TX.
     ACAN2515Settings mcp_cfg(MCP2515_QUARTZ_HZ, 250UL * 1000UL);
+#if !CAN_TX_ENABLED
+    mcp_cfg.mRequestedMode = ACAN2515Settings::ListenOnlyMode;
+#endif
     g_mcp_init_err    = g_mcp.begin(mcp_cfg, [] { g_mcp.isr(); });
     g_mcp_initialized = (g_mcp_init_err == 0);
 #endif

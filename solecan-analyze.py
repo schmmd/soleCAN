@@ -31,269 +31,16 @@ in one line:
     df = pd.read_csv("signals.csv")
     wide = df.pivot_table(index="timestamp", columns="signal", values="value")
 
-Signal names use a `domain.name` (or `domain.NN.name`) convention:
-    cell.NN.voltage_v          per-cell voltage (NN = 0-based BMS index)
-    temp.NN.c                  per-channel module temp (NN = 0-based)
-    pack.cell_max_mv           PGN F102 derived pack-wide stats
-    pack.cell_min_mv
-    pack.cell_spread_mv
-    pack.cell_max_n            F102 byte 4: max-cell number, 1-based (BMS GUI numbering)
-    pack.cell_min_n            F102 byte 5: min-cell number, 1-based (BMS GUI numbering)
-    pack.cell_spread_mv_reported  F102 byte 7: BMS-reported spread (max-min) in mV.
-                                  Verified to equal pack.cell_spread_mv in
-                                  36,950 of 36,950 corpus frames; previously
-                                  labelled 'pack.flags' but never carried flags.
-    pack.v_estimate            20 * mean(min, max) / 1000
-    pack.voltage_v             F100 bytes 0-1 BE: pack voltage, raw * 0.1 V/bit
-    pack.current_raw           F100 bytes 2-3 (raw biased u16)
-    pack.current_a             F100 signed pack current, A
-    pack.power_w               F100 derived: pack.voltage_v * pack.current_a (signed; + draw / - charge)
-    pack.temp_max_c            F104 byte 0: pack max module temp, b - 40
-    pack.temp_min_c            F104 byte 1: pack min module temp, b - 40
-    pack.temp_max_n            F104 byte 2: max-temp channel # (1-based)
-    pack.temp_min_n            F104 byte 3: min-temp channel # (1-based)
-    pack.temp_spread_c         F104 byte 4: max - min temp (°C)
-    bms.state.byte0/1          F106 raw state bytes
-    bms.state.output_enable    F106 byte 0 bit 0 (BMS output command active)
-    bms.state.main_contactor   F106 byte 0 bit 2 (main contactor closed)
-    bms.state.operating        F106 byte 0 bit 6 (operating mode: power flowing)
-    bms.state.standby          F106 byte 0 bit 7 (standby: charger present, no
-                               main current; mutex with .operating)
-    bms.state.charging         F106 byte 1 bit 3 (charger active)
-    bms.state.no_drive         F106 byte 1 bit 2 (drive not enabled)
-    bms.state.drive_mode       F106 byte 1 bit 5 (motor enabled)
-    bms.state.contactors       F106 byte 1 bit 6 (vehicle awake)
-    bms.limit.discharge_a      F107 bytes 0-1 BE * 0.01: max discharge current
-    bms.limit.charge_a         F107 bytes 2-3 BE * 0.01: max charge current
-    bms.limit.mode             F107 byte 4: 0=charging, 1=driving
-    bms.limit.byte5            F107 byte 5: pack-voltage echo at coarse quantization
-                               (~0.221 V/bit, offset ~57.0 V; R^2=0.97 vs F100F3 V_pack
-                               in driving captures); 0x00 in charging mode; rare
-                               transient values 0x4D / 0x6B / 0xA5 / 0xA7 in init/teardown
-    bms.limit.charge_power_extra_w
-                               F107 bytes 6-7 BE * 10 W: charge-power allowance
-                               above the 100 A baseline, verified against
-                               (bms.limit.charge_a - 100 A) * pack.voltage_v
-    bms.fault.byteN            F108 bytes 0..7 raw (only emitted when frame is non-zero;
-                               corresponds to DBC FaultByteN_Raw signals).
-                               Bytes 0..6 are a 2-bit-per-code bitmap covering codes
-                               100..127 (4 codes per byte; see bms.fault.code_NNN). Byte 7
-                               is the dashboard system/maintenance bitmap (1 bit per code:
-                               124, 140, 142..146). Codes 124 and 140 also fall in the
-                               bytes-0..6 layout (byte 6) and are emitted once per frame.
-    bms.fault.code_NNN         vendor BMS error code asserted (=1). F108 bytes 0..6 use
-                               mixed encoding: bytes 0..3 are 2 bits per code (codes
-                               100..113; 114/115 reserved -> bits 4..7 of byte 3 silent),
-                               bytes 4..5 are 1 bit per code (byte 4 = 116..123, byte 5
-                               = 124..127 with bits 4..7 silent), byte 6 is silent.
-                               Byte 7 uses 1 bit per code with gaps (bit 0 = 140; bits
-                               1,2 silent; bit 3 = 142; bit 4 = 143; bits 5,6 both =
-                               144; bit 7 = 145). Code 146 is not encoded in F108.
-                               Per-bit tables live in BMS_FAULT_CODES_BYTES_0_TO_6 and
-                               BMS_FAULT_CODES_BYTE7. All mappings injection-confirmed
-                               on 2026-05-10.
-    charger.flags              FF50 byte 4: Elcon fault flags (0x00 = delivering)
-    charger.v_raw              FF50 bytes 0-1 BE (raw, always emitted)
-    charger.voltage_v          FF50 charger output voltage, raw * 0.1 V/bit.
-                               Equals pack V only while flags == 0x00;
-                               otherwise reads the bare output rail
-    charger.i_raw              FF50 bytes 2-3 BE (raw, always emitted)
-    charger.current_a          FF50 charger output current, raw * 0.1 A/bit
-    chgr_cmd.voltage_v         0600 bytes 0-1 BE * 0.1: BMS->charger V setpoint
-                               (no +76.8 V offset; suppressed when idle)
-    chgr_cmd.current_a         0600 bytes 2-3 BE * 0.1: BMS->charger I setpoint
-                               (suppressed when idle)
-    chgr_cmd.enable            0600 byte 4: 0=active command, 1=idle
-    chgr_cmd.v_raw             0600 bytes 0-1 BE raw
-    chgr_cmd.i_raw             0600 bytes 2-3 BE raw
-    vc.state                   F100D0 byte 0 (vehicle-controller mode flag).
-                               Only ever 0x00 (init/transition) or 0x0C (ready)
-                               across 22,338 frames; bytes 1..7 are 0xFF padding
-    motor.rpm_signed           FF21CA RPM with directional sign
-    motor.rpm_magnitude        FF21CA RPM unsigned
-    motor.direction            +1 forward / 0 neutral / -1 reverse (F/N/R lever, byte 7 low nibble)
-    motor.range                R1/R2/R3 range-switch selector, value 1..3
-                               (byte 7 high nibble; RPM cap selector — NOT the
-                               mechanical L/M/H gear, which is sensor-less)
-    motor.torque_raw           FF21CA bytes 0-1 (LE u16) — unsigned magnitude
-                               of the controller's commanded motor effort
-                               (torque / current command). Rises during both
-                               drive and regen; direction of work comes from
-                               sign(pack.current_a). See DOCUMENTATION.md
-                               §FF21CA.
-    motor.controller_temp_c    FF21CA byte 4 (only emitted when nonzero)
-    motor.motor_temp_c         FF21CA byte 5 (only emitted when nonzero)
-    dash.alive                 FF2112 byte 0 (0=booting, 1=alive; 10 Hz heartbeat from SA 0x12)
-    pack.soc_raw               F100F3 byte 4 (raw)
-    pack.soc_pct               F100F3 byte 4 -> percent (b4 * 0.4 - 0.8)
-    dm1.lamp.byte0/1           FECA bytes 0/1 raw (lamp & flash status, when nonzero)
-    dm1.lamp.NAME_state        FECA byte 0 per-lamp 2-bit state (NAME in
-                               {malfunction, red_stop, amber_warning, protect})
-    dm1.lamp.NAME_flash        FECA byte 1 per-lamp 2-bit flash status
-    dm1.dtc.spn                FECA SAE J1939-73 SPN (19-bit)
-    dm1.dtc.fmi                FECA J1939-73 FMI (5-bit failure mode)
-    dm1.dtc.cm                 FECA SPN Conversion Method bit
-    dm1.dtc.oc                 FECA Occurrence Count (7-bit)
+Signal names use a `domain.name` (or `domain.NN.name`) convention — e.g.
+cell.07.voltage_v, pack.soc_pct, bms.state.charging, motor.rpm_signed,
+dm1.dtc.spn. Byte numbering is 0-based throughout, matching data[N]
+indexing in code.
 
-Decoder assumptions (verify against the BMS spec before trusting numerically):
-  * Source 0xF3 is the BMS (broadcasts), 0xE5 is the external charger,
-    0xCA is the motor / drive ECU, 0xD0 is the vehicle controller, 0xF4
-    is the BMS again in its charger-interface role (sends only PGN
-    0x000600 destination-addressed to 0xE5).
-    Byte numbering below is 0-based throughout (matches data[N] indexing
-    in code and the DECODERS table; NOTES.txt uses 1-based, so data[1] in
-    code = "byte 2" in NOTES).
-  * PGN 0xF113..0xF13C: 4 cell voltages per frame, big-endian uint16 mV.
-        cell_index = (PGN - 0xF113) * 4 + slot
-        Indexes >= NUM_CELLS (20) and 0xFFFF "not present" sentinels are
-        suppressed.
-  * PGN 0xF155..0xF15E: 8 module temperatures per frame, uint8 with the
-    J1939-style +40 C offset (raw 0x35 = 13 C).
-        temp_index = (PGN - 0xF155) * 8 + slot
-        Indexes >= NUM_TEMPS (7) and 0xFF "not present" sentinels are
-        suppressed.
-  * PGN 0xF102: bytes 0-1 BE = max cell mV, bytes 2-3 BE = min cell mV,
-                byte 4 = max-cell number (1-based BMS GUI numbering),
-                byte 5 = min-cell number (1-based BMS GUI numbering),
-                byte 6 = 0x00 padding (constant across corpus),
-                byte 7 = cell spread in mV (max - min, 1 mV/bit; verified
-                         to match the computed (max-min) in 36,950/36,950
-                         corpus frames).
-  * PGN 0xF100 bytes 0-1 BE = pack voltage at the BMS terminals,
-        one u16 at 0.1 V/bit. The 60..84 V operating window keeps byte 0
-        at 0x02/0x03, which can make the field masquerade as a
-        range-selector byte plus 8-bit voltage. Confirmed by linear
-        regression against 20 * mean cell mV across the full voltage
-        range, and cross-checked against the FF50 charger frame which
-        carries the same BE-16 encoding.
-  * PGN 0xF100 bytes 2-3 BE = signed pack current at 0.1 A/bit, biased so that
-        raw 0x7D00 = 0 A (positive = drawing from pack, negative = charging).
-        Cross-validated by the amp-*.asc dashboard-anchored set (1, 18, 35, 42,
-        58 A): mean decoded current matches the displayed dashboard reading
-        within ~1 A across the full range, including across the 0x7D->0x7E and
-        0x7F->0x80 high-byte rollovers.
-  * PGN 0xF108 = BMS active fault bitmap. All per-bit assignments
-        established by injection sweep (solectrac-inject-f108.py) on
-        2026-05-10. The per-bit code tables live in
-        BMS_FAULT_CODES_BYTES_0_TO_6 and BMS_FAULT_CODES_BYTE7.
-        Bytes 0..6 use MIXED encoding by byte:
-          byte 0: 2 bits per code → 100, 101, 102, 103
-          byte 1: 2 bits per code → 104, 105, 106, 107
-          byte 2: 2 bits per code → 108, 109, 110, 111
-          byte 3: 2 bits per code → 112, 113 (bits 4..7 silent; 114/115
-                  are reserved per the manual and take zero bits)
-          byte 4: 1 BIT per code  → 116, 117, 118, 119, 120, 121, 122, 123
-          byte 5: 1 bit per code  → 124, 125, 126, 127 (bits 4..7 silent)
-          byte 6: fully silent
-        Byte 7 uses 1 bit per code with gaps and a duplicate:
-          bit 0 = 140, bits 1,2 silent, bit 3 = 142, bit 4 = 143,
-          bits 5 AND 6 both display 144 (re-verified duplicate), bit 7
-          = 145. Code 146 ("Maintenance mode status") does NOT appear in
-          F108 — the operator's "146" in bms-124-140-142-143-144-146.asc
-          was almost certainly a 145 transcription.
-        The bytes-0..6 and byte-7 active code sets are merged and
-        deduplicated.
-  * PGN 0xFF50 from 0xE5: standard Elcon/TC charger status frame.
-                          bytes 0-1 BE = charger output voltage, 0.1 V/bit.
-                          Tracks pack V while delivering (confirmed by
-                          linear regression across a multi-hour L1 charge,
-                          slope 0.099 V/LSB); reads the bare output rail
-                          otherwise (~0.2 V plug-idle, slow decay after
-                          charge end).
-                          bytes 2-3 BE = charger output current, 0.1 A/bit
-                          — CONFIRMED.
-                          byte 4 = fault flags; 0x00 = actively delivering.
-                            bit 0 = hardware fault
-                            bit 1 = over-temperature
-                            bit 2 = no AC input
-                            bit 3 = battery voltage not detected at output
-                            bit 4 = no BMS command (1806 timeout)
-  * PGN 0x000600 from 0xF4 to 0xE5 (charger): the Elcon BMS->charger
-        command frame. Decode confirmed by correlating
-        58,584 frames in charging-120V-90ish-to-100.asc against
-        contemporaneous F100 (pack V/I/SoC), FF50 (charger V/I/flags),
-        and F107 (BMS current limits). Source 0xF4 sends only this PGN,
-        and only to destination 0xE5 -- consistent with a dedicated SA
-        for the BMS's charger-control role (likely the same physical
-        BMS module that uses 0xF3 for broadcasts).
-            bytes 0-1 BE u16 = voltage setpoint, 0.1 V/bit, no offset.
-                               0x034E = 84.6 V (4.23 V/cell * 20 cells)
-                               in every active-request frame.
-            bytes 2-3 BE u16 = current setpoint, 0.1 A/bit, no offset.
-                               Observed 3.0..39.0 A across the charge.
-                               When the request <= the charger's delivery
-                               capability (~14 A from a 120V/15A wall
-                               outlet at 84 V), the charger tracks within
-                               ~0.5 A. When the request exceeds capability
-                               the charger saturates ~18 A regardless.
-            byte 4           = enable: 0x00 = active command,
-                               0x01 = idle / no-request (charger raises
-                               its no-BMS-command flag within a few
-                               frames).
-            bytes 5-7        = padding 0xFF.
-  * PGN 0xFECA from 0xCA: DM1 (Active Diagnostic Trouble Codes), per
-        SAE J1939-73. Single-frame layout (multi-DTC BAM not observed):
-            byte 0     = lamp status, 4 lamps x 2 bits each:
-                           bits 7-6 MIL, 5-4 Red Stop,
-                           3-2 Amber Warning, 1-0 Protect
-            byte 1     = flash status, same lamp layout as byte 0
-            bytes 2-5  = first DTC (4 bytes):
-                           SPN  = b2 | (b3<<8) | ((b4>>5)&7)<<16
-                           FMI  = b4 & 0x1F
-                           CM   = (b5 >> 7) & 1
-                           OC   = b5 & 0x7F
-            bytes 6-7  = padding 0xFF for single-DTC frames
-        All observed frames in our captures are the J1939 idle pattern
-        (00 00 00 00 00 00 FF FF), which the decoder skips. Decoder is
-        validated against the J1939-73 spec rather than against fault
-        data; trust the lamp/state decode but treat any future SPN as
-        TENTATIVE until cross-checked against vendor documentation.
-  * PGN 0xFF21 from 0xCA: motor controller / drive ECU telemetry.
-        bytes 0-1  = torque, little-endian uint16. Unsigned magnitude of
-                     the controller's commanded motor effort (torque /
-                     current command), observed 0..262 — peak forward
-                     acceleration pushes past 255, which is why byte 1
-                     occasionally reads 0x01. Symmetric across drive and
-                     regen — the value rises whether the motor is being
-                     driven or used as a generator. Direction of work
-                     comes from sign(pack.current_a) on F100F3, not from
-                     anywhere in FF21CA. Idle resting offset ~3 (sensor
-                     noise floor); below raw ~14 the controller's internal
-                     dead-low keeps RPM near 0. See DOCUMENTATION.md
-                     §FF21CA for the full interpretation.
-        bytes 2-3  = motor RPM magnitude, little-endian uint16, biased by 0x0C80
-                     (rpm = ((b3<<8)|b2) - 0x0C80; verified against a
-                     0->2500 RPM acceleration trace). Always positive; sign of
-                     motion comes from byte 7.
-        byte 4     = main controller temperature, J1939 +40 C offset.
-        byte 5     = motor temperature, J1939 +40 C offset.
-        byte 6     = always 0x00 across 45,086 frames in 30 captures
-                     (reserved padding)
-        byte 7     = packed transmission state: high nibble = RANGE GEAR
-                     (1..3), low nibble = F/N/R LEVER. Confirmed by two
-                     controlled captures:
-                       drive-r-n-f.asc   walks the F/N/R lever R -> N -> F
-                                         in Range 3, byte 7 = 0x28 -> 0x20
-                                         -> 0x24 (low nibble 8 -> 0 -> 4).
-                       range-1-2-3.asc   walks the range selector 1 -> 2 -> 3
-                                         in Forward, byte 7 = 0x04 -> 0x14
-                                         -> 0x24 (high nibble 0 -> 1 -> 2).
-                     Encoding:
-                       high nibble 0x0/0x1/0x2 = range switch R1/R2/R3
-                       low  nibble 0x0/0x4/0x8 = N / F / R
-                     Direction sign (for signed RPM) comes from the low
-                     nibble; range is reported separately.
-    Frame is suppressed entirely while charging (contactors open for traction).
-  * PGN 0xFF21 from 0x12: dashboard / instrument-cluster heartbeat.
-        Same PGN as the motor telemetry above, but a different sender (SA
-        0x12 vs 0xCA), so the on-the-wire ID 0x18FF2112 is distinct from
-        0x18FF21CA. SA 0x12 broadcasts only this PGN, at 10 Hz.
-        byte 0     = alive flag: 0x00 during the first ~700 ms after key-on
-                     (boot), 0x01 thereafter.
-        bytes 1..7 = always 0x00 padding.
-        SA 0x12 isn't in any standard J1939 SA table; the "dashboard" label
-        is by elimination (the boot-then-alive pattern coincides exactly
-        with the key-on transitions in the two ignition-* captures).
+The per-signal decode rules (bytes, formula, unit, confidence, notes) are
+cataloged once, in the DECODERS table below, and written verbatim to
+decoders.csv on every run. Protocol constants and the byte-level decode
+itself live in solecan_proto.py; the validation evidence behind each decode
+is in DOCUMENTATION.md.
 """
 
 import argparse
@@ -309,19 +56,9 @@ except ImportError:
     sys.exit(1)
 
 from solecan_proto import (
-    SRC_BMS, SRC_BMS_CHGR_IF, SRC_CHARGER, SRC_VEHICLE, SRC_MOTOR, SRC_DASH,
     PGN_CELL_FIRST, PGN_CELL_LAST, PGN_TEMP_FIRST, PGN_TEMP_LAST,
-    PGN_F100, PGN_F102, PGN_F104, PGN_F106, PGN_F107, PGN_F108,
-    PGN_FF50, PGN_FF21, PGN_FECA, PGN_PROP_0600,
-    DM1_LAMP_NAMES, VC_STATE_NAMES,
-    NUM_CELLS, NUM_TEMPS, TEMP_OFFSET_C,
-    PACK_CAPACITY_AH, PACK_NOMINAL_V, PACK_CAPACITY_WH,
-    PACK_CURRENT_LSB_A, PACK_CURRENT_BIAS_RAW,
-    PACK_VOLTAGE_LSB_V,
-    CHARGER_V_LSB_V, CHARGER_I_LSB_A,
-    RPM_BIAS, LIMIT_CURRENT_LSB_A,
-    BMS_FAULT_CODES_BYTE7, BMS_FAULT_CODES_BYTES_0_TO_6,
-    parse_id, be16, le16, data_bytes, c_to_f,
+    DM1_LAMP_NAMES, PACK_CAPACITY_WH,
+    parse_id, data_bytes, c_to_f,
     decode as proto_decode,
 )
 
@@ -372,16 +109,6 @@ def _make_emit(emissions: list):
 
 
 # --- script-local protocol tables -------------------------------------------
-
-# DM1 lamp-status enum per J1939-73 (2 bits per lamp, same encoding for byte 0
-# "lamp on/off" and byte 1 "flash status"):
-#   0b00 = off / no flash
-#   0b01 = on  / slow flash (1 Hz)
-#   0b10 = reserved / fast flash (2 Hz)
-#   0b11 = not available
-DM1_LAMP_STATE = {0: "off", 1: "on", 2: "reserved", 3: "n/a"}
-DM1_FLASH_STATE = {0: "no_flash", 1: "slow_1hz", 2: "fast_2hz", 3: "n/a"}
-
 
 # Known PGN descriptions (SAE-defined plus what we've identified locally).
 PGN_NAMES = {
@@ -989,8 +716,8 @@ def summarize(counts: dict, rows: list):
             ranges = values_for(rows, scenario, "motor.range")
             if ranges:
                 seen = sorted(set(ranges))
-                counts = "  ".join(f"R{g}={ranges.count(g)}" for g in seen)
-                print(f"    range     : {counts}")
+                range_counts = "  ".join(f"R{g}={ranges.count(g)}" for g in seen)
+                print(f"    range     : {range_counts}")
 
 
 # --- main --------------------------------------------------------------------

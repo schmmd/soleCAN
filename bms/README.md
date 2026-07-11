@@ -2,8 +2,8 @@
 
 Reference for the diagnostic CAN port on the UDAN BMS shipped in the
 Solectrac e25G tractor (India 72V 300Ah variant). Covers wire protocol,
-session lifecycle, and the Data Identifier (DID) map. Reverse-engineering
-provenance and unresolved investigations are in the Appendix.
+session lifecycle, and the Data Identifier (DID) map. Provenance of each
+decode and unresolved investigations are in the Appendix.
 
 Confidence markers used throughout: **CONFIRMED**, **TENTATIVE**, **UNKNOWN**.
 
@@ -99,7 +99,7 @@ The iBMS PC tool performs a fixed 11-step sequence on every connection
 | 10   | `37`                                 | TransferExit                                  |
 | 11   | `22 A5 03`, `22 A5 05`, `22 A5 0D`   | Additional identity / status reads            |
 
-Steps 8–10 are the open mystery — see "Bootstrap RequestDownload" in the reverse-engineering notes appendix.
+Steps 8–10 are the open mystery — see "Bootstrap RequestDownload" in the investigation notes appendix.
 
 ---
 
@@ -196,7 +196,7 @@ column in the iBMS System-state CSV.
 | 6      | u8      | Average cell temperature (°C = raw − 50) — matches round(mean(`0x0102`)) ≥99 % |
 | 7      | u8      | `0x00` padding                                        |
 | 8      | u8      | Cell-mV spread (mirrors `0x2800` byte 9)              |
-| 9      | u8      | Pack-current state code (mirrors `0x2800` byte 10; 99.9 % match): **50 = discharging, 51 = idle/transient, 52 = active charging** — CONFIRMED |
+| 9      | u8      | Pack-current state code (mirrors `0x2800` byte 10; 99.9 % match) — meaning **UNKNOWN**; see the `0x2800` byte 10 note above and derive charge/discharge from the signed current instead |
 | 10     | u8      | `0x00` padding                                        |
 | 11     | u8      | `0x1E` constant (struct version tag)                  |
 | 12..15 | BE u32  | Accumulated charge capacity, **raw u32 = lifetime Ah** (one LSB per Ah delivered) — CONFIRMED. Cross-checked across a 13.9 h L1 charge (10 → 99 % SOC): integrating signed pack current from `0x2800` yields 269 Ah delivered; counter advanced raw 7763 → 8032 (+269). Match at × 1 Ah scale is <1 %; the documented × 0.01 Ah scale would have moved ~26,900 LSBs. The wire format may nominally be × 0.01 Ah resolution but the firmware quantizes to whole-Ah steps. **Independent second-source confirmation:** the iBMS XLSX `(Dis)charged energy 0x89` export's `Acc. charged energy/capacity` column advances 7763 → 8037 (+274 over 7 days) with explicit unit `AH` and scale `1` — same × 1 Ah/LSB. |
@@ -841,7 +841,7 @@ which ID + framing first gets an answer.
 The iBMS PC Utility presents five top-level tabs (with sub-navigation
 where present). Pairing tab transitions against trace polling-burst
 boundaries was the primary technique for mapping DIDs to data — see
-"DID-mapping methodology" in the reverse-engineering notes below.
+"DID-mapping methodology" in the investigation notes below.
 
 | Top tab          | Right sub-nav                                                                                                                    | Driving DIDs              |
 |------------------|----------------------------------------------------------------------------------------------------------------------------------|---------------------------|
@@ -889,7 +889,7 @@ unlike the History → XLSX export).
 
 ---
 
-## Reverse-engineering notes
+## Investigation notes
 
 Active investigations: methodology, captured data, unresolved findings,
 and open questions. Anything here is subject to change as more captures
@@ -964,7 +964,7 @@ Cell volt / Temp) that wasn't screenshotted.
   L2 240 V charge captures. The dynamic u16s at `0x0901` bytes
   0..1 BE / 4..5 BE don't map to any field the iBMS surfaces from this
   cluster — they're treated as opaque BMS-internal ADC counts. Further
-  decode would require firmware reverse engineering, a separate research
+  decode would require analyzing the BMS firmware, a separate research
   line.
 - **`0x4000` interpretation — UDAN `0x87` mapping is incorrect or partial.**
   The above capture shows `0x4000` is dominated by charger telemetry
@@ -990,8 +990,10 @@ Cell volt / Temp) that wasn't screenshotted.
   `0x0EA0`/`0x0EA1` (balancing — no balancing seen); `0x0ED0`–`0x0ED7`
   (open-wire / short flags); `0x09xx` BMS-tab block (Hlss / HV / Hall).
   Most prior `0x2800`/`0x2810` byte-level tentative items are now
-  CONFIRMED (state code 50/51/52; charge counter × 1 Ah/LSB; spread
-  mirror; avg cell V/T).
+  CONFIRMED (charge counter × 1 Ah/LSB; spread mirror; avg cell V/T).
+  The byte-10 / byte-9 state code, once read as 50/51/52 =
+  discharge/idle/charge, is back to UNKNOWN — see the `0x2800` byte 10
+  note above.
 - **Unmapped UDAN tags** from the iBMSUpper symbol table:
   - `0x0A` Heat and Pole Temperatures, `0x0B` Heat Pole MOS Temperatures —
     likely **features absent** on the Solectrac pack (no heat-pole MOS

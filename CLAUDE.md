@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Reverse-engineering and monitoring tooling for a **Solectrac e25G** electric
+Decode and monitoring tooling for a **Solectrac e25G** electric
 tractor's CAN buses. The decode information is empirical — derived from captured
 traffic, vendor manuals, and live injection tests — so everything is tagged with
 confidence markers: **CONFIRMED**, **TENTATIVE**, **UNKNOWN**. Preserve and
@@ -53,6 +53,16 @@ presentation in the consumer.
   serves a localhost dashboard. Independent of the main-bus tools and the proto
   module; its DID map is in `bms/README.md`.
 
+### Kelly e-hydraulic serial monitor (`kelly/`)
+- `solectrac-kelly-monitor.py` — read-only monitor for the e-hydraulic **Kelly
+  KLS pump controller**, which is *not* on either CAN bus. It polls the Kelly
+  "ETS" serial protocol over a USB-serial adapter (SM-4P port) and decodes the
+  live telemetry, with plain-text, JSON, and `--tui` output. Independent of the
+  proto module and every other tool. Read-only by construction: a single
+  transmit choke-point allows only the monitor/version query commands, so it
+  cannot write controller config. Connector pinout, wire protocol, and field
+  map are in `kelly/README.md`.
+
 ### Embedded firmware (`embedded/esp32-s3/`)
 ESP32-S3 firmware that re-implements the main-bus J1939 decode in C++ and
 exposes it four ways: WiFi HTML dashboard, JSON endpoint, BLE (Nordic UART
@@ -64,8 +74,7 @@ wiring, and flashing guide.
 ### Android app (`android/`)
 Mirrors the ESP32 web dashboard over BLE so the phone doesn't need to join the
 tractor's WiFi. Loads the dashboard HTML in a WebView and pipes JSON snapshots
-from the NUS characteristic. `android/README.md` has details (note: it still
-refers to the firmware as `esp32/`; the real path is `embedded/esp32-s3/`).
+from the NUS characteristic. `android/README.md` has details.
 
 ### Shared dashboard HTML
 `dashboard.html` at the repo root is the **single tracked copy**. Both
@@ -88,9 +97,9 @@ source isn't present in the build context.
 ## Commands
 
 ### Python tooling
-`pyproject.toml` (managed with `uv`) is the full dependency set, including BLE
-(`bless`) and the Canalyst-II interface. `requirements.txt` is the lighter set
-sufficient for the analyzer and stream TUI (`python-can`, `pyserial`, `rich`).
+`pyproject.toml` (managed with `uv`) is the dependency set: `python-can`,
+`pyserial`, and `rich` for the analyzer and stream TUI, plus optional extras
+for BLE (`bless`) and the Canalyst-II interface.
 
 ```bash
 # Offline decode of captures -> CSVs in OUTDIR
@@ -141,12 +150,22 @@ gradle wrapper --gradle-version 8.7   # one-time; wrapper JAR is not checked in
 ./gradlew installDebug
 ```
 
-## No automated tests
-This repository has no test suite — the tools are reverse-engineering scripts
-validated against real captures and live injection on the tractor.
+## Testing
+There are no unit tests and nothing runs in CI — the tools are validated
+against real captures and live injection on the tractor. The one test suite is `embedded/esp32-s3/device-test.py`, a
+hardware-in-the-loop acceptance suite run against a flashed, powered device
+before it ships. It needs bench hardware: the device itself, and for the CAN
+decode stage a bench injector adapter plus an ACK node (the device under test
+is listen-only and never ACKs). See "Pre-ship bench test" in
+`embedded/esp32-s3/README.md` for setup and usage. Its J1939 fixtures are
+deliberately hand-encoded golden values, independent of `solecan_proto.py` —
+keep them that way so the suite checks the firmware decode rather than
+mirroring it.
 
 ## Reference docs
 - `DOCUMENTATION.md` — main-bus J1939 decode, CAN topology, OBD-II pinout,
   cluster hardware, vendor error-code tables.
 - `bms/README.md` — BMS UDS diagnostic port: wire protocol, session lifecycle,
   DID map.
+- `kelly/README.md` — e-hydraulic Kelly KLS serial diagnostic port: SM-4P
+  pinout, ETS wire protocol, monitor field map, and live findings.

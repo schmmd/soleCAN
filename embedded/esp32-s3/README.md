@@ -98,30 +98,39 @@ two options:
 > The tractor's nominal 12 V accessory rail is fine; do not wire it to a higher
 > traction-pack rail.
 
-## Sharing the bus with another device (listen-only)
+## Bus mode: passive tap by default, transmit is opt-in
 
-If the OBD-II port is already occupied by a device you must not disturb — e.g. a
-fleet or grant-compliance telematics logger — tap the same bus in parallel (a
-passive OBD-II Y-splitter is the simplest way) and build the firmware in
-**listen-only** mode so this board never transmits. The flag is board-agnostic
-and works on all three envs (`adafruit_feather_s3`, `lilygo_t2can`, `rejsacan`):
+The default firmware is a **hardware-enforced passive tap**: both CAN
+controllers (native TWAI on can0, MCP2515 on can1) come up in listen-only mode,
+so the silicon never drives a bit — no ACKs, no error frames, no injection. A
+bug in a transmit path cannot perturb the bus, because there is no path from
+code to the wire. This is the right default for tapping a bus already occupied
+by a device you must not disturb (e.g. a fleet or grant-compliance telematics
+logger); a passive OBD-II Y-splitter taps the same bus in parallel.
+
+To write to the bus, build with **`-DCAN_ALLOW_TX`**. That switches both
+controllers to NORMAL mode, so they ACK received frames *and* arm every
+transmit path: SLCAN `t`/`T` injection over USB and socketcand `< send >` over
+WiFi. The flag is board-agnostic (works on `adafruit_feather_s3`,
+`lilygo_t2can`, `rejsacan`):
 
 ```bash
 # Native PlatformIO (substitute your env)
-pio run -e <env>                                            # NORMAL: ACKs frames (default)
-PLATFORMIO_BUILD_FLAGS=-DCAN_LISTEN_ONLY pio run -e <env>   # listen-only
+pio run -e <env>                                          # listen-only passive tap (default)
+PLATFORMIO_BUILD_FLAGS=-DCAN_ALLOW_TX pio run -e <env>    # NORMAL: ACKs + transmit
 
-# Docker (reproducible build): add the build-arg; omit it for NORMAL
-docker build -f embedded/esp32-s3/Dockerfile --build-arg CAN_LISTEN_ONLY=1 -t solectrac-fw .
+# Docker (reproducible build): add the build-arg; omit it for the passive tap
+docker build -f embedded/esp32-s3/Dockerfile --build-arg CAN_ALLOW_TX=1 -t solectrac-fw .
 ```
 
-In listen-only mode the TWAI controller emits nothing — no ACKs, no error
-frames — so it cannot perturb the other device's traffic (beyond what CAN's
-error-confinement already guarantees). The tractor's other nodes (MC, BMS,
-charger, cluster) handle ACKing, so monitoring still works. **Trade-off:** all
-transmit is disabled — SLCAN injection, socketcand client→bus send, and UDS
-polling will not function. Confirm which mode is running via `can.mode`
-(`normal` / `listen_only`) in `/json`.
+Confirm which mode is running via `can.mode` (`normal` / `listen_only`) in
+`/json`.
+
+**Gotcha with the default (listen-only):** on the tractor's four-ECU bus the
+real nodes ACK each other, so monitoring works unchanged. But on a bare
+two-node bench setup — one talker plus this board — nothing ACKs the talker, so
+it retransmits and eventually goes bus-off. Build with `-DCAN_ALLOW_TX` for
+bench work where this board must provide the ACK.
 
 ## What the LED tells you
 
@@ -335,6 +344,64 @@ uv run python -m can.logger -i socketcand -c can1 --bus-kwargs host=tractor.loca
 One client per channel is allowed; a new connection on a busy channel is
 refused so the existing clients aren't disturbed.
 
+## Pre-ship bench test
+
+`device-test.py` is an acceptance suite to run against each flashed device
+before it ships. From a bench Mac it exercises every external interface: the
+HTTP dashboard and `/json` (including firmware version, CAN health counters,
+and the RejsaCAN 12 V sense), the captive-portal redirect, mDNS, socketcand
+slot handling, SLCAN over USB — including confirming that a listen-only build
+answers injection attempts with BELL, the pre-ship proof that the passive-tap
+guarantee is in the flashed image — and optionally BLE. With a bench CAN
+adapter it also runs an end-to-end decode check: it injects synthetic J1939
+frames covering every decoder path (pack, cells, temps, limits, faults,
+motor, charger, DM1) and verifies the decoded engineering values in `/json`,
+the raw-frame taps, and that `motor.alive` latches and goes stale correctly.
+
+```bash
+# WiFi-only smoke test: join the device's AP (SSID `tractor`), then from the
+# repo root:
+uv run python embedded/esp32-s3/device-test.py
+
+# Full pre-ship run: USB serial + bench injector + ACK adapter + BLE +
+# operator LED checks
+uv run python embedded/esp32-s3/device-test.py \
+    --serial /dev/cu.usbmodem101 \
+    --inject-interface slcan --inject-channel /dev/cu.usbserial-A50 \
+    --ack-interface canalystii --ack-channel 0 \
+    --expect-version $(git rev-parse --short HEAD) \
+    --ble --interactive
+```
+
+Stages whose prerequisite flag isn't given are reported as SKIP, so the
+WiFi-only form is still a useful smoke test. The exit code is 0 only when
+every executed check passes.
+
+Bench notes:
+
+- **Test one device at a time.** Every unit broadcasts the same AP SSID and
+  mDNS name.
+- **The injection stage needs an ACK node on the bench bus.** The device
+  under test is listen-only and never ACKs, so a lone injector goes
+  error-passive and retransmits its *first* frame forever while the rest
+  queue behind it — none of the later fixtures reach the device. Wire any
+  second adapter to the bench bus and pass it as
+  `--ack-interface`/`--ack-channel`; the suite opens it in normal mode
+  purely to provide hardware ACKs. The suite probes for the no-ACK
+  condition right after the first frame and skips the decode sweep with a
+  single clear failure instead of a wall of misleading ones.
+- **Terminate the bench bus** (~120 Ω between CANH and CANL) and connect
+  ground between the adapter and the board.
+- **Never run the injection stage with the device wired to the tractor** —
+  the bench adapter would spoof BMS/motor frames onto the real bus.
+- **Pass `--expect-vin` only when the board is powered from a 12 V supply.**
+  On USB power the RejsaCAN rail sense reads ~4.6 V (5 V minus the
+  protection-diode drop), which would fail a 12 V expectation.
+- `--ble` needs the `bleak` package (`uv pip install bleak`); it is not a
+  project dependency.
+- On a T-2CAN pass `--channels 2` so the socketcand channel checks match the
+  board.
+
 ## Source layout
 
 ```
@@ -343,6 +410,7 @@ esp32-s3/
 ├── boards/                 # custom board JSONs (LilyGo T-2CAN)
 ├── copy_dashboard.py       # pre-build: copies repo-root dashboard.html → src/
 ├── inject_build_overrides.py # pre-build: injects AP_SSID / AP_PASS / MDNS_NAME
+├── device-test.py          # bench acceptance suite for a flashed device
 ├── README.md               # this file
 └── src/
     ├── main.cpp            # all firmware code (decode, HTTP, SLCAN, socketcand, LED)
