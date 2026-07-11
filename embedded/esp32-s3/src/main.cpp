@@ -32,6 +32,14 @@
   #include <SPI.h>
   #include <ACAN2515.h>
 #endif
+#if defined(BOARD_REJSACAN)
+  // Onboard microSD session logging (see the "SD-card session logging" section).
+  #include <SPI.h>
+  #include <SD.h>
+  #include <esp_timer.h>
+  #include <esp_heap_caps.h>
+  #include "freertos/stream_buffer.h"
+#endif
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -131,6 +139,16 @@
   // unconnected.
   #define KELLY_RXD_PIN    GPIO_NUM_47   // <- Kelly Tx (green), via resistor
   #define KELLY_TXD_PIN    GPIO_NUM_48   // -> Kelly Rx (blue)
+  // Onboard microSD reader on a dedicated SPI bus. Pins verified against the
+  // vendor's s3-sdcard.ino example and "RejsaCAN v3.4 - Pinout.h". They avoid
+  // GPIO33–37, which the N16R8 module's octal PSRAM occupies — using those
+  // would guru-meditate at boot. CS is the only signal unique to the card;
+  // nothing else on this board is on SPI.
+  #define SD_SCK_PIN       GPIO_NUM_39
+  #define SD_MOSI_PIN      GPIO_NUM_40
+  #define SD_MISO_PIN      GPIO_NUM_41
+  #define SD_CS_PIN        GPIO_NUM_45
+  #define HAS_SD           1
 #else
   #error "Define a board: BOARD_ADAFRUIT_FEATHER_S3, BOARD_LILYGO_T2CAN, or BOARD_REJSACAN"
 #endif
@@ -417,6 +435,357 @@ DNSServer  dns_server;
 // C-string for server.send_P().
 extern const uint8_t dashboard_html_start[] asm("_binary_src_dashboard_html_start");
 extern const uint8_t dashboard_html_end[]   asm("_binary_src_dashboard_html_end");
+
+// ── SD-card session logging (RejsaCAN) ──────────────────────────────────────────
+// Records two streams to the onboard microSD whenever a card is present at boot:
+//
+//   /sNNNNN/raw_PP.asc    every received CAN frame, Vector ASCII — replayable by
+//                         solecan-analyze.py / solecan-stream.py --replay unchanged
+//   /sNNNNN/data_PP.jsonl one buildJson() snapshot per line at SD_JSON_HZ (default 1)
+//
+// Design (see also the plan): loop() (core 1) only *formats* bytes and pushes them
+// into two PSRAM ring buffers; a dedicated writer task (core 0) does every SD I/O.
+// This keeps the decoded-state globals single-threaded — buildJson() and the .asc
+// formatter both run on the loop task, and only opaque bytes cross to the writer —
+// and it keeps SD stalls (block erase) off the CAN drain: a full ring drops whole
+// lines (counted) rather than blocking loop(). Mid-session SD failures are
+// handled by remount-and-resume (see sdRecoverOrFail); only repeated back-to-back
+// failures latch "error" until reboot. No hot-insert: the card is probed once at
+// boot; if it isn't there, the whole feature stays dormant (reboot to use a card
+// inserted later).
+#if defined(HAS_SD)
+
+// ── Tunables ──
+#ifndef SD_JSON_HZ
+#define SD_JSON_HZ          1                         // decoded-snapshot cadence
+#endif
+#define SD_MAX_PART_BYTES   (64ULL * 1024 * 1024)     // roll raw/json parts at this size
+#define SD_MIN_FREE_BYTES   (512ULL * 1024 * 1024)    // reap oldest sessions below this
+#define SD_FLUSH_MS         1000                      // fsync cadence → ≤~1 s lost on power cut
+#define SD_RAW_RING_BYTES   (1024UL * 1024)           // PSRAM ring for raw .asc
+#define SD_JSON_RING_BYTES  (256UL * 1024)            // PSRAM ring for json lines
+#define SD_FREE_CHECK_MS    10000                     // usedBytes() is slow — poll sparingly
+#define SD_RECOVER_ATTEMPTS 5                         // remount tries before latching error
+#define SD_RECOVER_DELAY_MS 250                       // backoff base between remount tries
+#define SD_WRITE_CHUNK_BYTES 8192                     // batch writes into bursts this size
+
+struct SdState {
+    const char* state = "no_card";     // no_card | logging | error
+    uint32_t          session   = 0;
+    uint16_t          raw_part  = 0;
+    uint16_t          json_part = 0;
+    volatile uint32_t mb_written = 0;  // writer task (core 0) owns these two
+    volatile uint32_t free_mb    = 0;
+    volatile uint32_t raw_dropped  = 0;  // producer (core 1) owns these two
+    volatile uint32_t json_dropped = 0;
+    const char*       fail_op  = "";     // which SD call failed (state == "error")
+    volatile uint32_t fail_kb  = 0;      // KB written when it failed
+    volatile uint32_t recoveries = 0;    // successful remount-and-resume cycles
+};
+static SdState g_sd;
+
+// Set true once at boot after a successful mount + first session open; gates the
+// producer in loop(). Only ever cleared again (mid-session card failure), never
+// re-armed until reboot. This flag is the *only* state shared across the core
+// boundary — the writer task otherwise sees nothing but bytes in the ring buffers.
+volatile bool g_sd_active = false;
+
+static StreamBufferHandle_t g_sd_raw_sb  = nullptr;
+static StreamBufferHandle_t g_sd_json_sb = nullptr;
+static StaticStreamBuffer_t g_sd_raw_sb_struct;
+static StaticStreamBuffer_t g_sd_json_sb_struct;
+static uint8_t*             g_sd_raw_storage  = nullptr;
+static uint8_t*             g_sd_json_storage = nullptr;
+
+static File    g_sd_raw_file;
+static File    g_sd_json_file;
+static int64_t g_sd_session_start_us = 0;   // esp_timer µs at session open (log t=0)
+
+// ── Producer side (runs on the loop task, core 1) ──
+
+// Format one frame as a Vector ASCII data line and push it to the raw ring.
+// Line-atomic: if the whole line doesn't fit, drop it and count it rather than
+// write a fragment or block the CAN drain.
+static inline void sdEnqueueRaw(const twai_message_t& msg) {
+    char line[96];
+    double ts = (esp_timer_get_time() - g_sd_session_start_us) / 1e6;
+    int n = snprintf(line, sizeof line, " %.6f 1  %0*lX%s   Rx   d %u",
+                     ts, msg.extd ? 8 : 3, (unsigned long)msg.identifier,
+                     msg.extd ? "x" : "", (unsigned)msg.data_length_code);
+    for (int i = 0; i < msg.data_length_code && n < (int)sizeof line - 4; i++)
+        n += snprintf(line + n, sizeof line - n, " %02X", msg.data[i]);
+    if (n < (int)sizeof line - 1) line[n++] = '\n';
+    if (xStreamBufferSpacesAvailable(g_sd_raw_sb) >= (size_t)n)
+        xStreamBufferSend(g_sd_raw_sb, line, n, 0);
+    else
+        g_sd.raw_dropped++;
+}
+
+// Push one JSON snapshot (built by the caller) as a line to the json ring. Only a
+// single producer touches the ring, so the space check can't race with a shrink
+// (the consumer only frees space), making the two sends effectively atomic.
+static inline void sdEnqueueJson(const String& js) {
+    size_t len = js.length();
+    if (xStreamBufferSpacesAvailable(g_sd_json_sb) >= len + 1) {
+        xStreamBufferSend(g_sd_json_sb, js.c_str(), len, 0);
+        xStreamBufferSend(g_sd_json_sb, "\n", 1, 0);
+    } else {
+        g_sd.json_dropped++;
+    }
+}
+
+// ── Writer side (runs on the dedicated task, core 0) ──
+
+// Vector ASCII header. The ESP32 has no RTC/NTP, so the wall-clock date is
+// nominal; what matters to the readers is "base hex" + "timestamps absolute"
+// and monotonic per-line timestamps (which are session-relative seconds).
+static void sdWriteAscHeader(File& f) {
+    f.print("date Thu Jan 1 00:00:00.000 1970\n");
+    f.print("base hex  timestamps absolute\n");
+    f.print("internal events logged\n");
+    f.print("   0.000000 Start of measurement\n");
+}
+
+static bool sdOpenRawPart() {
+    char path[32];
+    snprintf(path, sizeof path, "/s%05lu/raw_%02u.asc",
+             (unsigned long)g_sd.session, g_sd.raw_part);
+    g_sd_raw_file = SD.open(path, FILE_WRITE);
+    if (!g_sd_raw_file) return false;
+    sdWriteAscHeader(g_sd_raw_file);
+    return true;
+}
+
+static bool sdOpenJsonPart() {
+    char path[32];
+    snprintf(path, sizeof path, "/s%05lu/data_%02u.jsonl",
+             (unsigned long)g_sd.session, g_sd.json_part);
+    g_sd_json_file = SD.open(path, FILE_WRITE);
+    return (bool)g_sd_json_file;
+}
+
+// Highest existing /sNNNNN index, or 0 if none. Session number = this + 1, so it
+// is monotonic per card and survives reaping and card swaps (no counter file).
+static uint32_t sdHighestSession() {
+    uint32_t maxn = 0;
+    File root = SD.open("/");
+    if (!root) return 0;
+    for (File e = root.openNextFile(); e; e = root.openNextFile()) {
+        if (e.isDirectory()) {
+            const char* nm = strrchr(e.name(), '/');
+            nm = nm ? nm + 1 : e.name();
+            if (nm[0] == 's') {
+                uint32_t n = strtoul(nm + 1, nullptr, 10);
+                if (n > maxn) maxn = n;
+            }
+        }
+        e.close();
+    }
+    root.close();
+    return maxn;
+}
+
+static bool sdStartSession() {
+    g_sd.session   = sdHighestSession() + 1;
+    g_sd.raw_part  = 0;
+    g_sd.json_part = 0;
+    char dir[16];
+    snprintf(dir, sizeof dir, "/s%05lu", (unsigned long)g_sd.session);
+    if (!SD.mkdir(dir)) return false;
+    g_sd_session_start_us = esp_timer_get_time();
+    if (!sdOpenRawPart()) return false;
+    if (!sdOpenJsonPart()) { g_sd_raw_file.close(); return false; }
+    return true;
+}
+
+// Delete a session directory. Sessions hold only flat files (raw_PP.asc /
+// data_PP.jsonl), so remove them one at a time — re-opening the dir each pass
+// avoids invalidating the FatFS iterator by deleting during a walk.
+static bool sdRemoveSessionDir(const char* path) {
+    for (;;) {
+        File d = SD.open(path);
+        if (!d) return false;
+        File e = d.openNextFile();
+        if (!e) { d.close(); break; }
+        char child[80];
+        const char* nm = strrchr(e.name(), '/');
+        nm = nm ? nm + 1 : e.name();
+        snprintf(child, sizeof child, "%s/%s", path, nm);
+        e.close();
+        d.close();
+        if (!SD.remove(child)) return false;
+    }
+    return SD.rmdir(path);
+}
+
+// Reap the oldest session dir, never the active one. Returns false when there's
+// nothing else to delete.
+static bool sdReapOldest() {
+    uint32_t oldest = 0xFFFFFFFFUL;
+    File root = SD.open("/");
+    if (!root) return false;
+    for (File e = root.openNextFile(); e; e = root.openNextFile()) {
+        if (e.isDirectory()) {
+            const char* nm = strrchr(e.name(), '/');
+            nm = nm ? nm + 1 : e.name();
+            if (nm[0] == 's') {
+                uint32_t n = strtoul(nm + 1, nullptr, 10);
+                if (n < oldest && n != g_sd.session) oldest = n;
+            }
+        }
+        e.close();
+    }
+    root.close();
+    if (oldest == 0xFFFFFFFFUL) return false;
+    char path[16];
+    snprintf(path, sizeof path, "/s%05lu", (unsigned long)oldest);
+    return sdRemoveSessionDir(path);
+}
+
+// Refresh free-space figure and reap oldest sessions until we're back above the
+// threshold (or only the active session remains).
+static void sdUpdateFree() {
+    uint64_t total = SD.totalBytes();
+    uint64_t used  = SD.usedBytes();
+    uint64_t freeb = total > used ? total - used : 0;
+    while (freeb < SD_MIN_FREE_BYTES) {
+        if (!sdReapOldest()) break;
+        used  = SD.usedBytes();
+        freeb = total > used ? total - used : 0;
+    }
+    g_sd.free_mb = (uint32_t)(freeb >> 20);
+}
+
+// Part-size accounting. File-scope (not writer-task locals) so a recovery can
+// reset them when it opens fresh part files. Writer task (core 0) owns all three.
+static uint64_t sd_total_bytes = 0;
+static uint64_t sd_raw_part_bytes = 0, sd_json_part_bytes = 0;
+
+// Give up logging for the rest of this boot. The CAN tap keeps running. `op` and
+// the running byte count are kept for the /json status so a field failure is
+// diagnosable.
+static void sdFail(const char* op) {
+    g_sd.fail_op = op;
+    g_sd.fail_kb = (uint32_t)(sd_total_bytes >> 10);
+    g_sd_active  = false;
+    g_sd.state   = "error";
+    if (g_sd_raw_file)  g_sd_raw_file.close();
+    if (g_sd_json_file) g_sd_json_file.close();
+    vTaskDelete(nullptr);
+}
+
+// An SD call failed mid-session. Observed failure mode on the RejsaCAN: the card
+// stops answering CMD13 (SEND_STATUS) under sustained write load — on two
+// different cards and both Arduino cores — and a reboot always brings it back.
+// So instead of latching "error" on the first bad write, remount and resume the
+// same session with fresh part files (bounded attempts, linear backoff). The
+// in-flight chunk is discarded (≤512 B); the rings keep absorbing frames while
+// we're remounting, so a sub-second recovery usually loses nothing else.
+static void sdRecoverOrFail(const char* op) {
+    for (int attempt = 1; attempt <= SD_RECOVER_ATTEMPTS; attempt++) {
+        g_sd_raw_file.close();
+        g_sd_json_file.close();
+        SD.end();
+        vTaskDelay(pdMS_TO_TICKS(SD_RECOVER_DELAY_MS * attempt));
+        if (!SD.begin(SD_CS_PIN)) continue;
+        g_sd.raw_part++;
+        g_sd.json_part++;
+        if (!sdOpenRawPart())  continue;
+        if (!sdOpenJsonPart()) continue;
+        sd_raw_part_bytes = sd_json_part_bytes = 0;
+        g_sd.recoveries++;
+        return;
+    }
+    sdFail(op);   // never returns
+}
+
+static void sdWriterTask(void*) {
+    static uint8_t buf[SD_WRITE_CHUNK_BYTES];   // static — doesn't fit the task stack
+    uint32_t last_flush = millis();
+    uint32_t last_free  = millis() - SD_FREE_CHECK_MS;   // check on first idle
+
+    for (;;) {
+        bool did = false;
+
+        // Batch: drain a stream only once a full chunk is waiting, or when the
+        // flush deadline arrives (so trickle data still lands within ~1 s).
+        // Short write bursts leave the card idle between them, instead of the
+        // continuous 512-byte-at-a-time program cycle that provoked mid-write
+        // card lockups. If a write fails, the chunk is still in buf after the
+        // remount, so recovery re-lands it — no data lost.
+        bool flush_due = (millis() - last_flush >= SD_FLUSH_MS);
+
+        if (flush_due || xStreamBufferBytesAvailable(g_sd_raw_sb) >= SD_WRITE_CHUNK_BYTES) {
+            size_t n = xStreamBufferReceive(g_sd_raw_sb, buf, sizeof buf, 0);
+            if (n) {
+                if (g_sd_raw_file.write(buf, n) != n) {
+                    sdRecoverOrFail("raw_write");
+                    if (g_sd_raw_file.write(buf, n) != n) sdFail("raw_write");
+                }
+                sd_raw_part_bytes += n; sd_total_bytes += n; did = true;
+            }
+        }
+        if (flush_due || xStreamBufferBytesAvailable(g_sd_json_sb) >= SD_WRITE_CHUNK_BYTES) {
+            size_t n = xStreamBufferReceive(g_sd_json_sb, buf, sizeof buf, 0);
+            if (n) {
+                if (g_sd_json_file.write(buf, n) != n) {
+                    sdRecoverOrFail("json_write");
+                    if (g_sd_json_file.write(buf, n) != n) sdFail("json_write");
+                }
+                sd_json_part_bytes += n; sd_total_bytes += n; did = true;
+            }
+        }
+        g_sd.mb_written = (uint32_t)(sd_total_bytes >> 20);
+
+        // Roll parts so no single file grows unbounded.
+        if (sd_raw_part_bytes >= SD_MAX_PART_BYTES) {
+            g_sd_raw_file.flush(); g_sd_raw_file.close();
+            g_sd.raw_part++;
+            if (!sdOpenRawPart()) sdRecoverOrFail("raw_open");
+            sd_raw_part_bytes = 0;
+        }
+        if (sd_json_part_bytes >= SD_MAX_PART_BYTES) {
+            g_sd_json_file.flush(); g_sd_json_file.close();
+            g_sd.json_part++;
+            if (!sdOpenJsonPart()) sdRecoverOrFail("json_open");
+            sd_json_part_bytes = 0;
+        }
+
+        uint32_t now = millis();
+        if (now - last_flush >= SD_FLUSH_MS) {
+            last_flush = now;
+            g_sd_raw_file.flush();
+            g_sd_json_file.flush();
+        }
+        if (now - last_free >= SD_FREE_CHECK_MS) {
+            last_free = now;
+            sdUpdateFree();
+        }
+
+        if (!did) vTaskDelay(pdMS_TO_TICKS(20));   // both rings empty — yield
+    }
+}
+
+// Probe the card once and, only on success, start logging + spawn the writer.
+// Called from setup(); leaves the feature dormant (g_sd_active stays false) on
+// any failure so the firmware behaves exactly as a card-less tap.
+static void sdInit() {
+    g_sd_raw_storage  = (uint8_t*) heap_caps_malloc(SD_RAW_RING_BYTES + 1,  MALLOC_CAP_SPIRAM);
+    g_sd_json_storage = (uint8_t*) heap_caps_malloc(SD_JSON_RING_BYTES + 1, MALLOC_CAP_SPIRAM);
+    if (!g_sd_raw_storage || !g_sd_json_storage) { g_sd.state = "error"; return; }
+    g_sd_raw_sb  = xStreamBufferCreateStatic(SD_RAW_RING_BYTES,  1, g_sd_raw_storage,  &g_sd_raw_sb_struct);
+    g_sd_json_sb = xStreamBufferCreateStatic(SD_JSON_RING_BYTES, 1, g_sd_json_storage, &g_sd_json_sb_struct);
+
+    SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
+    if (!SD.begin(SD_CS_PIN))  { g_sd.state = "no_card"; return; }
+    if (!sdStartSession())     { g_sd.state = "error"; SD.end(); return; }
+
+    g_sd.state = "logging";
+    xTaskCreatePinnedToCore(sdWriterTask, "sdwriter", 8192, nullptr, 1, nullptr, 0);
+    g_sd_active = true;   // arm the producer last, once everything is ready
+}
+
+#endif  // HAS_SD
 
 // ── LED status indicator ──────────────────────────────────────────────────────
 // Single-LED boards (Adafruit Feather S3 NeoPixel) colour-code state on one
@@ -1285,6 +1654,29 @@ String buildJson(bool pretty = true, bool minimal = false) {
         }
     }
 
+#if defined(HAS_SD)
+    // SD session-logging status. Always emitted (small, and the phone app mirrors
+    // the dashboard) so both the web tile and BLE clients can show it.
+    {
+        auto sd = doc["sd"].to<JsonObject>();
+        sd["state"] = g_sd.state;
+        if (g_sd_active) {
+            sd["session"]    = g_sd.session;
+            sd["raw_part"]   = g_sd.raw_part;
+            sd["json_part"]  = g_sd.json_part;
+            sd["mb_written"] = g_sd.mb_written;
+            sd["free_mb"]    = g_sd.free_mb;
+        }
+        if (g_sd.raw_dropped)  sd["raw_dropped"]  = g_sd.raw_dropped;
+        if (g_sd.json_dropped) sd["json_dropped"] = g_sd.json_dropped;
+        if (g_sd.recoveries)   sd["recoveries"]   = g_sd.recoveries;
+        if (g_sd.fail_op[0]) {
+            sd["fail_op"] = g_sd.fail_op;
+            sd["fail_kb"] = g_sd.fail_kb;
+        }
+    }
+#endif
+
     String out;
     if (pretty) serializeJsonPretty(doc, out);
     else        serializeJson(doc, out);
@@ -1879,6 +2271,13 @@ void setup() {
     g_mcp_initialized = (g_mcp_init_err == 0);
 #endif
 
+#if defined(HAS_SD)
+    // Probe the microSD once. On success this arms g_sd_active and spawns the
+    // writer task; on no-card/failure it's a no-op and the firmware runs as a
+    // pure tap. Must precede loop(), which is where the producer is gated.
+    sdInit();
+#endif
+
 #if !defined(NO_BLE)
     bleInit();
 #endif
@@ -1910,6 +2309,9 @@ void loop() {
             decodeCAN(msg.identifier, msg.data, msg.data_length_code);
         slcanSendFrame(msg);
         socketcandSendFrame(msg, /*channel=*/0);
+#if defined(HAS_SD)
+        if (g_sd_active) sdEnqueueRaw(msg);   // no-op enqueue when no card
+#endif
     }
 #if defined(HAS_MCP2515)
     if (g_mcp_initialized) {
@@ -1922,6 +2324,21 @@ void loop() {
             fwd.data_length_code = frame.len <= 8 ? frame.len : 8;
             memcpy(fwd.data, frame.data, fwd.data_length_code);
             socketcandSendFrame(fwd, /*channel=*/1);
+        }
+    }
+#endif
+#if defined(HAS_SD)
+    // Periodic decoded snapshot at SD_JSON_HZ (default 1 Hz), independent of any
+    // client — buildJson() only runs on HTTP/BLE demand otherwise, so an
+    // unattended session would log no JSON. Built here on the loop task, so the
+    // decoded globals stay single-threaded; only the serialized line crosses to
+    // the writer.
+    if (g_sd_active) {
+        static uint32_t last_json_ms = 0;
+        uint32_t now = millis();
+        if (now - last_json_ms >= 1000 / SD_JSON_HZ) {
+            last_json_ms = now;
+            sdEnqueueJson(buildJson(/*pretty=*/false, /*minimal=*/false));
         }
     }
 #endif
