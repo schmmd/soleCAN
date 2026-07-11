@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Reverse-engineering and monitoring tooling for a **Solectrac e25G** electric
+Decode and monitoring tooling for a **Solectrac e25G** electric
 tractor's CAN buses. The decode information is empirical — derived from captured
 traffic, vendor manuals, and live injection tests — so everything is tagged with
 confidence markers: **CONFIRMED**, **TENTATIVE**, **UNKNOWN**. Preserve and
@@ -150,9 +150,17 @@ gradle wrapper --gradle-version 8.7   # one-time; wrapper JAR is not checked in
 ./gradlew installDebug
 ```
 
-## No automated tests
-This repository has no test suite — the tools are reverse-engineering scripts
-validated against real captures and live injection on the tractor.
+## Testing
+There are no unit tests and nothing runs in CI — the tools are validated
+against real captures and live injection on the tractor. The one test suite is `embedded/esp32-s3/device-test.py`, a
+hardware-in-the-loop acceptance suite run against a flashed, powered device
+before it ships. It needs bench hardware: the device itself, and for the CAN
+decode stage a bench injector adapter plus an ACK node (the device under test
+is listen-only and never ACKs). See "Pre-ship bench test" in
+`embedded/esp32-s3/README.md` for setup and usage. Its J1939 fixtures are
+deliberately hand-encoded golden values, independent of `solecan_proto.py` —
+keep them that way so the suite checks the firmware decode rather than
+mirroring it.
 
 ## Reference docs
 - `DOCUMENTATION.md` — main-bus J1939 decode, CAN topology, OBD-II pinout,
