@@ -32,6 +32,15 @@
   #include <SPI.h>
   #include <ACAN2515.h>
 #endif
+// Energy-saving deep sleep is on by default; build with -DNO_AUTOSHUTDOWN to
+// keep the board fully awake through CAN-bus silence.
+#if !defined(NO_AUTOSHUTDOWN) && !defined(AUTOSHUTDOWN)
+  #define AUTOSHUTDOWN
+#endif
+#if defined(AUTOSHUTDOWN)
+  #include <esp_sleep.h>
+  #include "driver/gpio.h"   // gpio_hold_en() etc. — only called on BOARD_REJSACAN, but cheap to include for all
+#endif
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -340,6 +349,10 @@ static ACAN2515 g_mcp(MCP2515_CS_PIN, SPI, MCP2515_INT_PIN);
 float       g_vin_v = NAN;   // most recent 12 V supply reading, averaged
 #endif
 
+#if defined(AUTOSHUTDOWN)
+esp_sleep_wakeup_cause_t g_wake_cause = ESP_SLEEP_WAKEUP_UNDEFINED;   // set once in setup()
+#endif
+
 // Session energy tracking (integrated power since boot)
 uint32_t    g_session_last_ms   = 0;
 uint32_t    g_session_active_ms = 0;   // sum of valid dt's — excludes bus-silent gaps
@@ -522,6 +535,58 @@ static void canRecoveryTick() {
         twai_start();
     }
 }
+
+#if defined(AUTOSHUTDOWN)
+// ── Energy-saving deep sleep ──────────────────────────────────────────────────
+// A parked tractor (or bench setup) produces no CAN traffic, so there's
+// nothing to log. Deep sleep + wake-on-CAN needs nothing board-specific: any
+// board's CAN_RX_PIN can be an ext0 wake source (0–21 are RTC-capable on the
+// S3, and every board map here picks one in that range).
+//
+// Wake source is CAN traffic only (ext0 on CAN_RX: the first dominant bit
+// pulls the line low). There is deliberately no voltage-rise wake: on the
+// RejsaCAN, the tractor's measured 12 V rail is ~12.4 V key-off / ~12.7 V
+// key-on (issue #41 comments), both below the comparator's assumed on/off
+// thresholds (~13.0/13.7 V for the genuine R4=91k board), so SENSE_V_DIG would
+// not reliably fire even at key-on, let alone during a charge session. CAN
+// wake covers both cases: ECUs broadcast at key-on, and the charger/BMS
+// broadcast during charging.
+//
+// TENTATIVE: assumes gpio_hold_en() holds a non-RTC digital output through
+// deep sleep on the S3, and that ext0 wakes with the transceiver left in
+// normal mode (RS held LOW, not standby) — neither is bench-verified yet.
+#define CAN_QUIET_SLEEP_MS   (10UL * 60UL * 1000UL)   // 10 min of silence
+
+static void checkCanQuietSleep() {
+    if (millis() - g_last_frame_ms < CAN_QUIET_SLEEP_MS) return;
+
+    WiFi.mode(WIFI_OFF);
+    BLEDevice::deinit(true);
+    twai_stop();
+    twai_driver_uninstall();
+
+#if defined(BOARD_REJSACAN)
+    // RejsaCAN-only: these pins are firmware-driven and float during deep
+    // sleep unless held, which would cause real problems on this board —
+    // CAN_RS floating drops the transceiver into slope-control mode (mangles
+    // frames, including the one meant to wake us) and FORCE_ON floating risks
+    // a spurious auto-shutdown edge. The other boards don't define these pins
+    // (transceiver mode is fixed in hardware, no auto-shutdown circuit), so
+    // there's nothing to hold there.
+    digitalWrite(WARN_LED_PIN, LOW);
+    digitalWrite(ACTIVITY_LED_PIN, LOW);
+    gpio_hold_en(CAN_RS_PIN);
+    gpio_hold_en(FORCE_ON_PIN);
+    gpio_hold_en(WARN_LED_PIN);
+    gpio_hold_en(ACTIVITY_LED_PIN);
+    gpio_deep_sleep_hold_en();
+#endif
+
+    esp_sleep_enable_ext0_wakeup(CAN_RX_PIN, 0 /*wake when pulled LOW*/);
+    esp_deep_sleep_start();
+    // Never returns — waking from deep sleep is a full reboot back into setup().
+}
+#endif
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -969,6 +1034,14 @@ String buildJson(bool pretty = true, bool minimal = false) {
 #if defined(HAS_VIN_SENSE)
     if (!isnan(g_vin_v)) {
         doc["vin_v"] = roundf(g_vin_v * 10.0f) / 10.0f;
+    }
+#endif
+
+#if defined(AUTOSHUTDOWN)
+    switch (g_wake_cause) {
+        case ESP_SLEEP_WAKEUP_EXT0:  doc["wake_cause"] = "can";      break;
+        case ESP_SLEEP_WAKEUP_UNDEFINED: doc["wake_cause"] = "power_on"; break;
+        default:                     doc["wake_cause"] = "other";    break;
     }
 #endif
 
@@ -1498,6 +1571,22 @@ void setup() {
     ledInit();
     ledWrite(4, 4, 4);   // dim white the moment firmware starts running
 
+#if defined(AUTOSHUTDOWN)
+    // A wake from deep sleep is a full reboot, so this runs on every wake too.
+    // Capture the cause for /json before anything else touches the RTC state.
+    g_wake_cause = esp_sleep_get_wakeup_cause();
+
+#if defined(BOARD_REJSACAN)
+    // Release the pins checkCanQuietSleep() held through the previous sleep
+    // (no-op on a cold boot / power-on reset) before reconfiguring them below.
+    gpio_hold_dis(CAN_RS_PIN);
+    gpio_hold_dis(FORCE_ON_PIN);
+    gpio_hold_dis(WARN_LED_PIN);
+    gpio_hold_dis(ACTIVITY_LED_PIN);
+    gpio_deep_sleep_hold_dis();
+#endif
+#endif
+
 #if defined(BOARD_REJSACAN)
     // Drive the transceiver into high-speed normal mode (RS=LOW) and assert
     // the auto-shutdown override so the board stays on across vehicle/key
@@ -1629,6 +1718,11 @@ void loop() {
         CANMessage frame;
         while (g_mcp.receive(frame)) {
             g_mcp_frames_rx++;
+            // Counts as bus activity for the quiet-sleep timer too: the board
+            // must not deep-sleep while CAN A still carries traffic (ext0 wake
+            // only watches the TWAI RX pin, so a sleep here would be terminal
+            // until CAN B traffic resumes).
+            g_last_frame_ms = millis();
             twai_message_t fwd = {};
             fwd.identifier       = frame.id;
             fwd.extd             = frame.ext ? 1 : 0;
@@ -1647,5 +1741,8 @@ void loop() {
     updateLed();
 #if defined(HAS_VIN_SENSE)
     updateVinSense();
+#endif
+#if defined(AUTOSHUTDOWN)
+    checkCanQuietSleep();
 #endif
 }
