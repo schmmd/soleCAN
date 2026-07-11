@@ -66,7 +66,7 @@ ENV GIT_SHA=${GIT_SHA}
 ARG CAN_ALLOW_TX=
 ENV PLATFORMIO_BUILD_FLAGS=${CAN_ALLOW_TX:+-DCAN_ALLOW_TX}
 
-# Build for the LilyGo T-2CAN. This downloads the espressif32 platform and
+# Build for the LilyGo T-2CAN. This downloads the pioarduino espressif32 platform and
 # Xtensa toolchain on first run and caches them in the image layer.
 RUN pio run -e lilygo_t2can
 
