@@ -413,12 +413,8 @@ extern const uint8_t dashboard_html_end[]   asm("_binary_src_dashboard_html_end"
 struct SdState {
     const char* state = "no_card";     // no_card | logging | error
     uint32_t          session   = 0;
-    uint16_t          raw_part  = 0;
-    uint16_t          json_part = 0;
-    volatile uint32_t mb_written = 0;  // writer task (core 0) owns these two
+    volatile uint32_t kb_written = 0;  // writer task (core 0) owns these two
     volatile uint32_t free_mb    = 0;
-    volatile uint32_t raw_dropped  = 0;  // producer (core 1) owns these two
-    volatile uint32_t json_dropped = 0;
     const char*       fail_op  = "";     // which SD call failed (state == "error")
     volatile uint32_t fail_kb  = 0;      // KB written when it failed
     volatile uint32_t recoveries = 0;    // successful remount-and-resume cycles
@@ -427,19 +423,34 @@ static SdState g_sd;
 
 // Set true once at boot after a successful mount + first session open; gates the
 // producer in loop(). Only ever cleared again (mid-session card failure), never
-// re-armed until reboot. This flag is the *only* state shared across the core
-// boundary — the writer task otherwise sees nothing but bytes in the ring buffers.
+// re-armed until reboot. Cross-core rule for this flag and the status fields in
+// SdState/SdStream: every field has exactly one writer, and readers (buildJson)
+// tolerate a torn multi-field snapshot — no control flow crosses the core
+// boundary except this flag; the writer task otherwise sees nothing but bytes
+// in the ring buffers.
 volatile bool g_sd_active = false;
 
-static StreamBufferHandle_t g_sd_raw_sb  = nullptr;
-static StreamBufferHandle_t g_sd_json_sb = nullptr;
-static StaticStreamBuffer_t g_sd_raw_sb_struct;
-static StaticStreamBuffer_t g_sd_json_sb_struct;
-static uint8_t*             g_sd_raw_storage  = nullptr;
-static uint8_t*             g_sd_json_storage = nullptr;
+// One logged stream: a PSRAM ring fed by loop() (core 1) and drained to the
+// current part file by the writer task (core 0). The raw .asc and the json
+// .jsonl are two instances; everything that touches a stream goes through the
+// shared helpers below so the two lifecycles can't drift apart.
+struct SdStream {
+    const char*          path_fmt;    // "/s%05lu/<name>_%02u.<ext>" (session, part)
+    const char*          write_op;    // fail_op tag for a failed write
+    const char*          open_op;     // fail_op tag for a failed part open
+    bool                 asc_header;  // new parts get the Vector ASCII header
+    size_t               ring_bytes;
+    StreamBufferHandle_t sb = nullptr;
+    StaticStreamBuffer_t sb_struct;
+    uint8_t*             storage = nullptr;
+    File                 file;            // writer task (core 0) owns these two
+    uint64_t             part_bytes = 0;
+    volatile uint16_t    part = 0;
+    volatile uint32_t    dropped = 0;     // producer (core 1) owns this
+};
+static SdStream g_sd_raw  = { "/s%05lu/raw_%02u.asc",    "raw_write",  "raw_open",  true,  SD_RAW_RING_BYTES };
+static SdStream g_sd_json = { "/s%05lu/data_%02u.jsonl", "json_write", "json_open", false, SD_JSON_RING_BYTES };
 
-static File    g_sd_raw_file;
-static File    g_sd_json_file;
 static int64_t g_sd_session_start_us = 0;   // esp_timer µs at session open (log t=0)
 
 // ── Producer side (runs on the loop task, core 1) ──
@@ -456,10 +467,10 @@ static inline void sdEnqueueRaw(const twai_message_t& msg) {
     for (int i = 0; i < msg.data_length_code && n < (int)sizeof line - 4; i++)
         n += snprintf(line + n, sizeof line - n, " %02X", msg.data[i]);
     if (n < (int)sizeof line - 1) line[n++] = '\n';
-    if (xStreamBufferSpacesAvailable(g_sd_raw_sb) >= (size_t)n)
-        xStreamBufferSend(g_sd_raw_sb, line, n, 0);
+    if (xStreamBufferSpacesAvailable(g_sd_raw.sb) >= (size_t)n)
+        xStreamBufferSend(g_sd_raw.sb, line, n, 0);
     else
-        g_sd.raw_dropped++;
+        g_sd_raw.dropped++;
 }
 
 // Push one JSON snapshot (built by the caller) as a line to the json ring. Only a
@@ -467,11 +478,11 @@ static inline void sdEnqueueRaw(const twai_message_t& msg) {
 // (the consumer only frees space), making the two sends effectively atomic.
 static inline void sdEnqueueJson(const String& js) {
     size_t len = js.length();
-    if (xStreamBufferSpacesAvailable(g_sd_json_sb) >= len + 1) {
-        xStreamBufferSend(g_sd_json_sb, js.c_str(), len, 0);
-        xStreamBufferSend(g_sd_json_sb, "\n", 1, 0);
+    if (xStreamBufferSpacesAvailable(g_sd_json.sb) >= len + 1) {
+        xStreamBufferSend(g_sd_json.sb, js.c_str(), len, 0);
+        xStreamBufferSend(g_sd_json.sb, "\n", 1, 0);
     } else {
-        g_sd.json_dropped++;
+        g_sd_json.dropped++;
     }
 }
 
@@ -487,55 +498,67 @@ static void sdWriteAscHeader(File& f) {
     f.print("   0.000000 Start of measurement\n");
 }
 
-static bool sdOpenRawPart() {
-    char path[32];
-    snprintf(path, sizeof path, "/s%05lu/raw_%02u.asc",
-             (unsigned long)g_sd.session, g_sd.raw_part);
-    g_sd_raw_file = SD.open(path, FILE_WRITE);
-    if (!g_sd_raw_file) return false;
-    sdWriteAscHeader(g_sd_raw_file);
-    return true;
+// Basename of a directory entry — e.name() may or may not carry a leading path
+// depending on core version.
+static const char* sdBasename(const char* name) {
+    const char* slash = strrchr(name, '/');
+    return slash ? slash + 1 : name;
 }
 
-static bool sdOpenJsonPart() {
-    char path[32];
-    snprintf(path, sizeof path, "/s%05lu/data_%02u.jsonl",
-             (unsigned long)g_sd.session, g_sd.json_part);
-    g_sd_json_file = SD.open(path, FILE_WRITE);
-    return (bool)g_sd_json_file;
+// Parse a session directory basename: exactly 's' followed by digits. Anything
+// else — a user's "stuff/" folder, "saved" — is rejected; strtoul alone would
+// parse those to 0 and permanently jam the reaper on a nonexistent /s00000.
+static bool sdParseSession(const char* nm, uint32_t& n) {
+    if (nm[0] != 's' || nm[1] < '0' || nm[1] > '9') return false;
+    char* end = nullptr;
+    n = strtoul(nm + 1, &end, 10);
+    return *end == '\0';
 }
 
-// Highest existing /sNNNNN index, or 0 if none. Session number = this + 1, so it
-// is monotonic per card and survives reaping and card swaps (no counter file).
-static uint32_t sdHighestSession() {
-    uint32_t maxn = 0;
+// One walk of the root directory serving both consumers: the highest session
+// index (next session number = highest + 1, monotonic per card, survives
+// reaping and card swaps with no counter file) and the lowest index excluding
+// the active session (the reaper's victim). 0 / UINT32_MAX when none exist.
+static void sdScanSessions(uint32_t& lowest_other, uint32_t& highest) {
+    lowest_other = UINT32_MAX;
+    highest = 0;
     File root = SD.open("/");
-    if (!root) return 0;
+    if (!root) return;
     for (File e = root.openNextFile(); e; e = root.openNextFile()) {
-        if (e.isDirectory()) {
-            const char* nm = strrchr(e.name(), '/');
-            nm = nm ? nm + 1 : e.name();
-            if (nm[0] == 's') {
-                uint32_t n = strtoul(nm + 1, nullptr, 10);
-                if (n > maxn) maxn = n;
-            }
+        uint32_t n;
+        if (e.isDirectory() && sdParseSession(sdBasename(e.name()), n)) {
+            if (n > highest) highest = n;
+            if (n < lowest_other && n != g_sd.session) lowest_other = n;
         }
         e.close();
     }
     root.close();
-    return maxn;
+}
+
+// Open the stream's current part file (fresh — FILE_WRITE truncates) and reset
+// its size accounting.
+static bool sdOpenPart(SdStream& s) {
+    char path[32];
+    snprintf(path, sizeof path, s.path_fmt, (unsigned long)g_sd.session, s.part);
+    s.file = SD.open(path, FILE_WRITE);
+    if (!s.file) return false;
+    if (s.asc_header) sdWriteAscHeader(s.file);
+    s.part_bytes = 0;
+    return true;
 }
 
 static bool sdStartSession() {
-    g_sd.session   = sdHighestSession() + 1;
-    g_sd.raw_part  = 0;
-    g_sd.json_part = 0;
+    uint32_t lowest, highest;
+    sdScanSessions(lowest, highest);
+    g_sd.session   = highest + 1;
+    g_sd_raw.part  = 0;
+    g_sd_json.part = 0;
     char dir[16];
     snprintf(dir, sizeof dir, "/s%05lu", (unsigned long)g_sd.session);
     if (!SD.mkdir(dir)) return false;
     g_sd_session_start_us = esp_timer_get_time();
-    if (!sdOpenRawPart()) return false;
-    if (!sdOpenJsonPart()) { g_sd_raw_file.close(); return false; }
+    if (!sdOpenPart(g_sd_raw)) return false;
+    if (!sdOpenPart(g_sd_json)) { g_sd_raw.file.close(); return false; }
     return true;
 }
 
@@ -549,9 +572,7 @@ static bool sdRemoveSessionDir(const char* path) {
         File e = d.openNextFile();
         if (!e) { d.close(); break; }
         char child[80];
-        const char* nm = strrchr(e.name(), '/');
-        nm = nm ? nm + 1 : e.name();
-        snprintf(child, sizeof child, "%s/%s", path, nm);
+        snprintf(child, sizeof child, "%s/%s", path, sdBasename(e.name()));
         e.close();
         d.close();
         if (!SD.remove(child)) return false;
@@ -562,22 +583,9 @@ static bool sdRemoveSessionDir(const char* path) {
 // Reap the oldest session dir, never the active one. Returns false when there's
 // nothing else to delete.
 static bool sdReapOldest() {
-    uint32_t oldest = 0xFFFFFFFFUL;
-    File root = SD.open("/");
-    if (!root) return false;
-    for (File e = root.openNextFile(); e; e = root.openNextFile()) {
-        if (e.isDirectory()) {
-            const char* nm = strrchr(e.name(), '/');
-            nm = nm ? nm + 1 : e.name();
-            if (nm[0] == 's') {
-                uint32_t n = strtoul(nm + 1, nullptr, 10);
-                if (n < oldest && n != g_sd.session) oldest = n;
-            }
-        }
-        e.close();
-    }
-    root.close();
-    if (oldest == 0xFFFFFFFFUL) return false;
+    uint32_t oldest, highest;
+    sdScanSessions(oldest, highest);
+    if (oldest == UINT32_MAX) return false;
     char path[16];
     snprintf(path, sizeof path, "/s%05lu", (unsigned long)oldest);
     return sdRemoveSessionDir(path);
@@ -597,21 +605,20 @@ static void sdUpdateFree() {
     g_sd.free_mb = (uint32_t)(freeb >> 20);
 }
 
-// Part-size accounting. File-scope (not writer-task locals) so a recovery can
-// reset them when it opens fresh part files. Writer task (core 0) owns all three.
+// Total bytes written this session, both streams. Writer task (core 0) owns it.
 static uint64_t sd_total_bytes = 0;
-static uint64_t sd_raw_part_bytes = 0, sd_json_part_bytes = 0;
 
 // Give up logging for the rest of this boot. The CAN tap keeps running. `op` and
 // the running byte count are kept for the /json status so a field failure is
-// diagnosable.
+// diagnosable. Self-deletes the calling task — only callable from the writer
+// task; boot-time failures latch their error in sdInit() instead.
 static void sdFail(const char* op) {
     g_sd.fail_op = op;
     g_sd.fail_kb = (uint32_t)(sd_total_bytes >> 10);
     g_sd_active  = false;
     g_sd.state   = "error";
-    if (g_sd_raw_file)  g_sd_raw_file.close();
-    if (g_sd_json_file) g_sd_json_file.close();
+    if (g_sd_raw.file)  g_sd_raw.file.close();
+    if (g_sd_json.file) g_sd_json.file.close();
     vTaskDelete(nullptr);
 }
 
@@ -620,24 +627,59 @@ static void sdFail(const char* op) {
 // different cards and both Arduino cores — and a reboot always brings it back.
 // So instead of latching "error" on the first bad write, remount and resume the
 // same session with fresh part files (bounded attempts, linear backoff). The
-// in-flight chunk is discarded (≤512 B); the rings keep absorbing frames while
-// we're remounting, so a sub-second recovery usually loses nothing else.
+// failed chunk is still in the caller's buffer and is re-written after we
+// return; the rings keep absorbing frames while we're remounting, so a
+// sub-second recovery usually loses nothing.
+//
+// A stream whose file was open when the failure hit moves to a fresh part — its
+// on-card tail ends at the last fsync, possibly mid-line, so appending is
+// unsafe. A stream whose file was already closed (a part-roll open that failed)
+// retries the same, never-created part number instead of skipping one.
 static void sdRecoverOrFail(const char* op) {
+    if (g_sd_raw.file)  g_sd_raw.part++;
+    if (g_sd_json.file) g_sd_json.part++;
     for (int attempt = 1; attempt <= SD_RECOVER_ATTEMPTS; attempt++) {
-        g_sd_raw_file.close();
-        g_sd_json_file.close();
+        g_sd_raw.file.close();
+        g_sd_json.file.close();
         SD.end();
         vTaskDelay(pdMS_TO_TICKS(SD_RECOVER_DELAY_MS * attempt));
         if (!SD.begin(SD_CS_PIN)) continue;
-        g_sd.raw_part++;
-        g_sd.json_part++;
-        if (!sdOpenRawPart())  continue;
-        if (!sdOpenJsonPart()) continue;
-        sd_raw_part_bytes = sd_json_part_bytes = 0;
+        if (!sdOpenPart(g_sd_raw))  continue;
+        if (!sdOpenPart(g_sd_json)) continue;
         g_sd.recoveries++;
         return;
     }
     sdFail(op);   // never returns
+}
+
+// Drain one stream: pull a chunk from its ring and write it. Batch: drain only
+// once a full chunk is waiting, or when the flush deadline arrives (so trickle
+// data still lands within ~1 s). Short write bursts leave the card idle between
+// them, instead of the continuous 512-byte-at-a-time program cycle that
+// provoked mid-write card lockups. If a write fails, the chunk is still in buf
+// after the remount, so the retry re-lands it — no data lost.
+static bool sdDrainStream(SdStream& s, bool flush_due, uint8_t* buf) {
+    if (!flush_due && xStreamBufferBytesAvailable(s.sb) < SD_WRITE_CHUNK_BYTES)
+        return false;
+    size_t n = xStreamBufferReceive(s.sb, buf, SD_WRITE_CHUNK_BYTES, 0);
+    if (!n) return false;
+    if (s.file.write(buf, n) != n) {
+        sdRecoverOrFail(s.write_op);
+        if (s.file.write(buf, n) != n) sdFail(s.write_op);
+    }
+    s.part_bytes += n;
+    sd_total_bytes += n;
+    return true;
+}
+
+// Roll to the next part once the current one reaches SD_MAX_PART_BYTES, so no
+// single file grows unbounded.
+static void sdRollIfDue(SdStream& s) {
+    if (s.part_bytes < SD_MAX_PART_BYTES) return;
+    s.file.flush();
+    s.file.close();
+    s.part++;
+    if (!sdOpenPart(s)) sdRecoverOrFail(s.open_op);
 }
 
 static void sdWriterTask(void*) {
@@ -646,60 +688,22 @@ static void sdWriterTask(void*) {
     uint32_t last_free  = millis() - SD_FREE_CHECK_MS;   // check on first idle
 
     for (;;) {
-        bool did = false;
-
-        // Batch: drain a stream only once a full chunk is waiting, or when the
-        // flush deadline arrives (so trickle data still lands within ~1 s).
-        // Short write bursts leave the card idle between them, instead of the
-        // continuous 512-byte-at-a-time program cycle that provoked mid-write
-        // card lockups. If a write fails, the chunk is still in buf after the
-        // remount, so recovery re-lands it — no data lost.
         bool flush_due = (millis() - last_flush >= SD_FLUSH_MS);
 
-        if (flush_due || xStreamBufferBytesAvailable(g_sd_raw_sb) >= SD_WRITE_CHUNK_BYTES) {
-            size_t n = xStreamBufferReceive(g_sd_raw_sb, buf, sizeof buf, 0);
-            if (n) {
-                if (g_sd_raw_file.write(buf, n) != n) {
-                    sdRecoverOrFail("raw_write");
-                    if (g_sd_raw_file.write(buf, n) != n) sdFail("raw_write");
-                }
-                sd_raw_part_bytes += n; sd_total_bytes += n; did = true;
-            }
-        }
-        if (flush_due || xStreamBufferBytesAvailable(g_sd_json_sb) >= SD_WRITE_CHUNK_BYTES) {
-            size_t n = xStreamBufferReceive(g_sd_json_sb, buf, sizeof buf, 0);
-            if (n) {
-                if (g_sd_json_file.write(buf, n) != n) {
-                    sdRecoverOrFail("json_write");
-                    if (g_sd_json_file.write(buf, n) != n) sdFail("json_write");
-                }
-                sd_json_part_bytes += n; sd_total_bytes += n; did = true;
-            }
-        }
-        g_sd.mb_written = (uint32_t)(sd_total_bytes >> 20);
+        bool did = sdDrainStream(g_sd_raw, flush_due, buf);
+        did     |= sdDrainStream(g_sd_json, flush_due, buf);
+        g_sd.kb_written = (uint32_t)(sd_total_bytes >> 10);
 
-        // Roll parts so no single file grows unbounded.
-        if (sd_raw_part_bytes >= SD_MAX_PART_BYTES) {
-            g_sd_raw_file.flush(); g_sd_raw_file.close();
-            g_sd.raw_part++;
-            if (!sdOpenRawPart()) sdRecoverOrFail("raw_open");
-            sd_raw_part_bytes = 0;
-        }
-        if (sd_json_part_bytes >= SD_MAX_PART_BYTES) {
-            g_sd_json_file.flush(); g_sd_json_file.close();
-            g_sd.json_part++;
-            if (!sdOpenJsonPart()) sdRecoverOrFail("json_open");
-            sd_json_part_bytes = 0;
-        }
+        sdRollIfDue(g_sd_raw);
+        sdRollIfDue(g_sd_json);
 
-        uint32_t now = millis();
-        if (now - last_flush >= SD_FLUSH_MS) {
-            last_flush = now;
-            g_sd_raw_file.flush();
-            g_sd_json_file.flush();
+        if (flush_due) {
+            last_flush = millis();
+            g_sd_raw.file.flush();
+            g_sd_json.file.flush();
         }
-        if (now - last_free >= SD_FREE_CHECK_MS) {
-            last_free = now;
+        if (millis() - last_free >= SD_FREE_CHECK_MS) {
+            last_free = millis();
             sdUpdateFree();
         }
 
@@ -707,19 +711,33 @@ static void sdWriterTask(void*) {
     }
 }
 
+static bool sdInitRing(SdStream& s) {
+    s.storage = (uint8_t*) heap_caps_malloc(s.ring_bytes + 1, MALLOC_CAP_SPIRAM);
+    if (!s.storage) return false;
+    s.sb = xStreamBufferCreateStatic(s.ring_bytes, 1, s.storage, &s.sb_struct);
+    return s.sb != nullptr;
+}
+
 // Probe the card once and, only on success, start logging + spawn the writer.
 // Called from setup(); leaves the feature dormant (g_sd_active stays false) on
-// any failure so the firmware behaves exactly as a card-less tap.
+// any failure so the firmware behaves exactly as a card-less tap. Boot failures
+// latch state="error" with a fail_op right here — sdFail() self-deletes the
+// calling task, so it must never run on the setup/loop task.
 static void sdInit() {
-    g_sd_raw_storage  = (uint8_t*) heap_caps_malloc(SD_RAW_RING_BYTES + 1,  MALLOC_CAP_SPIRAM);
-    g_sd_json_storage = (uint8_t*) heap_caps_malloc(SD_JSON_RING_BYTES + 1, MALLOC_CAP_SPIRAM);
-    if (!g_sd_raw_storage || !g_sd_json_storage) { g_sd.state = "error"; return; }
-    g_sd_raw_sb  = xStreamBufferCreateStatic(SD_RAW_RING_BYTES,  1, g_sd_raw_storage,  &g_sd_raw_sb_struct);
-    g_sd_json_sb = xStreamBufferCreateStatic(SD_JSON_RING_BYTES, 1, g_sd_json_storage, &g_sd_json_sb_struct);
+    if (!sdInitRing(g_sd_raw) || !sdInitRing(g_sd_json)) {
+        g_sd.fail_op = "ring_alloc";
+        g_sd.state   = "error";
+        return;
+    }
 
     SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
-    if (!SD.begin(SD_CS_PIN))  { g_sd.state = "no_card"; return; }
-    if (!sdStartSession())     { g_sd.state = "error"; SD.end(); return; }
+    if (!SD.begin(SD_CS_PIN)) { g_sd.state = "no_card"; return; }
+    if (!sdStartSession()) {
+        g_sd.fail_op = "start_session";
+        g_sd.state   = "error";
+        SD.end();
+        return;
+    }
 
     g_sd.state = "logging";
     xTaskCreatePinnedToCore(sdWriterTask, "sdwriter", 8192, nullptr, 1, nullptr, 0);
@@ -1392,13 +1410,13 @@ String buildJson(bool pretty = true, bool minimal = false) {
         sd["state"] = g_sd.state;
         if (g_sd_active) {
             sd["session"]    = g_sd.session;
-            sd["raw_part"]   = g_sd.raw_part;
-            sd["json_part"]  = g_sd.json_part;
-            sd["mb_written"] = g_sd.mb_written;
+            sd["raw_part"]   = g_sd_raw.part;
+            sd["json_part"]  = g_sd_json.part;
+            sd["kb_written"] = g_sd.kb_written;
             sd["free_mb"]    = g_sd.free_mb;
         }
-        if (g_sd.raw_dropped)  sd["raw_dropped"]  = g_sd.raw_dropped;
-        if (g_sd.json_dropped) sd["json_dropped"] = g_sd.json_dropped;
+        if (g_sd_raw.dropped)  sd["raw_dropped"]  = g_sd_raw.dropped;
+        if (g_sd_json.dropped) sd["json_dropped"] = g_sd_json.dropped;
         if (g_sd.recoveries)   sd["recoveries"]   = g_sd.recoveries;
         if (g_sd.fail_op[0]) {
             sd["fail_op"] = g_sd.fail_op;

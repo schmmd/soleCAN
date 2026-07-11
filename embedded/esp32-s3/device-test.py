@@ -339,10 +339,18 @@ def stage_sd(args, j: dict) -> None:
 
     state = sd.get("state")
     if state == "error":
+        op = sd.get("fail_op")
+        if op in ("ring_alloc", "start_session"):
+            hint = ("failed during boot init, before any writes — "
+                    "check the card's FAT formatting"
+                    if op == "start_session" else
+                    "PSRAM ring allocation failed — wrong build/board?")
+        else:
+            hint = ("card unresponsive through all remount attempts; "
+                    "reseat or replace the card and reboot")
         check(False, "SD logging healthy",
-              f"latched error: fail_op={sd.get('fail_op')!r} after "
-              f"{sd.get('fail_kb')} KB — card unresponsive through all "
-              "remount attempts; reseat or replace the card and reboot")
+              f"latched error: fail_op={op!r} after "
+              f"{sd.get('fail_kb', 0)} KB — {hint}")
         return
     if state == "no_card":
         if args.expect_sd:
@@ -868,13 +876,14 @@ def stage_inject(args) -> None:
                              f"state={sd1.get('state')} "
                              f"fail_op={sd1.get('fail_op')!r}"):
                     return
-                # ~55 bytes per .asc line; require half the expectation so
-                # MB-granularity rounding can't fail a healthy run.
-                expect_mb = sent * 55 / (1 << 20)
-                got_mb = sd1.get("mb_written", 0) - sd0.get("mb_written", 0)
-                check(got_mb >= expect_mb / 2,
+                # ~55 bytes per .asc line; require half the expectation to
+                # absorb line-length variation. kb_written's ±1 KB
+                # quantization is negligible at soak volumes.
+                expect_kb = sent * 55 / 1024
+                got_kb = sd1.get("kb_written", 0) - sd0.get("kb_written", 0)
+                check(got_kb >= expect_kb / 2,
                       "soak bytes landed on the card",
-                      f"mb_written +{got_mb} (sent ≈ {expect_mb:.1f} MB)")
+                      f"kb_written +{got_kb} (sent ≈ {expect_kb:.0f} KB)")
                 rec = sd1.get("recoveries", 0) - sd0.get("recoveries", 0)
                 if rec:
                     report("WARN", f"{rec} remount recoveries during soak — "

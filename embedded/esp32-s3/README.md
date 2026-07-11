@@ -371,7 +371,7 @@ containing two streams, split into 64 MB parts:
   ring, whole lines are dropped and counted (`sd.raw_dropped` / `sd.json_dropped`
   in `/json`) rather than blocking the CAN receive path.
 
-Logging status shows in `/json` under `sd` (state, session, MB written, free MB,
+Logging status shows in `/json` under `sd` (state, session, KB written, free MB,
 drops) and on the dashboard footer. Tunables are `#define`s at the top of the
 "SD-card session logging" section in `main.cpp` (`SD_JSON_HZ`, `SD_FLUSH_MS`,
 `SD_MAX_PART_BYTES`, `SD_MIN_FREE_BYTES`, ring sizes).
