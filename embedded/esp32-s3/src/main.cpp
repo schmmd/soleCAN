@@ -31,6 +31,11 @@
   #include <SPI.h>
   #include <ACAN2515.h>
 #endif
+// Energy-saving deep sleep is on by default; build with -DNO_AUTOSHUTDOWN to
+// keep the board fully awake through CAN-bus silence.
+#if !defined(NO_AUTOSHUTDOWN) && !defined(AUTOSHUTDOWN)
+  #define AUTOSHUTDOWN
+#endif
 #if defined(AUTOSHUTDOWN)
   #include <esp_sleep.h>
   #include "driver/gpio.h"   // gpio_hold_en() etc. — only called on BOARD_REJSACAN, but cheap to include for all
@@ -1623,6 +1628,11 @@ void loop() {
         CANMessage frame;
         while (g_mcp.receive(frame)) {
             g_mcp_frames_rx++;
+            // Counts as bus activity for the quiet-sleep timer too: the board
+            // must not deep-sleep while CAN A still carries traffic (ext0 wake
+            // only watches the TWAI RX pin, so a sleep here would be terminal
+            // until CAN B traffic resumes).
+            g_last_frame_ms = millis();
             twai_message_t fwd = {};
             fwd.identifier       = frame.id;
             fwd.extd             = frame.ext ? 1 : 0;
