@@ -58,16 +58,17 @@ Wiring
                                    |         |
  red ---> 78L05 ---> 5V ---> VDD1 -| ADuM    |- VDD2 <--- 3V3
  black --------------------> GND1 -|  1201   |- GND2 <--- GND
- green (Kelly Tx) ---------> VIA  -| breakout|- VOA  ---> GPIO47 (RX)
- blue  (Kelly Rx) <--------- VOB  -|         |- VIB  <--- GPIO48 (TX)
+ green (Kelly Tx) ---------> VIB  -| breakout|- VOB  ---> GPIO47 (RX)
+ blue  (Kelly Rx) <--------- VOA  -|         |- VIA  <--- GPIO48 (TX)
 
-Pin map:
+Pin map (datasheet pin numbers — side 1 carries VOA/VIB, side 2 VOB/VIA;
+channel A runs board->Kelly, channel B Kelly->board):
 
-  Kelly side (isolated)                Board side (chassis)
-  VDD1  <- 5 V from regulator          VDD2  <- RejsaCAN 3V3
-  GND1  <- Kelly black (V-)            GND2  <- board GND
-  VIA   <- Kelly green (Tx), input     VOA   -> GPIO47 (RX), output
-  VOB   -> Kelly blue (Rx), output     VIB   <- GPIO48 (TX), input
+  Kelly side (isolated, side 1)        Board side (chassis, side 2)
+  VDD1 (1) <- 5 V from regulator       VDD2 (8) <- RejsaCAN 3V3
+  GND1 (2) <- Kelly black (V-)         GND2 (5) <- board GND
+  VIB  (4) <- Kelly green (Tx), input  VOB  (6) -> GPIO47 (RX), output
+  VOA  (3) -> Kelly blue (Rx), output  VIA  (7) <- GPIO48 (TX), input
 
 There is no longer any wire between Kelly V- and board GND, and no series
 resistor anywhere on the link.
