@@ -13,6 +13,9 @@ interface of the firmware against real hardware:
     bench CAN adapter and checks the decoded engineering values in /json,
     plus the raw-frame taps (socketcand and SLCAN)
   - VIN sense (RejsaCAN): 12 V rail reading
+  - SD session logging (RejsaCAN): card mounted and logging, no latched
+    failure, drop/recovery counters; plus an optional sustained-write soak
+    (--sd-soak) that streams frames and checks bytes land on the card
   - BLE (optional, needs `bleak`): NUS notify stream reassembles to valid JSON
   - LEDs (optional, --interactive): operator visual checks
 
@@ -50,6 +53,7 @@ Examples (from the repo root, where the uv project lives):
       --inject-interface slcan --inject-channel /dev/cu.usbserial-A50 \
       --ack-interface canalystii --ack-channel 0 \
       --expect-version $(git rev-parse --short HEAD) \
+      --expect-sd --sd-soak 60 \
       --ble --interactive
 
 Exit code 0 when every executed check passes, 1 otherwise.
@@ -320,6 +324,51 @@ def stage_http(args) -> dict | None:
           "unknown path 302-redirects (captive portal)",
           f"status={status}, Location={loc!r}")
     return j
+
+
+def stage_sd(args, j: dict) -> None:
+    section("SD logging")
+    sd = j.get("sd")
+    if sd is None:
+        if args.expect_sd:
+            check(False, "sd status present",
+                  "no 'sd' object in /json — is this an SD-capable build?")
+        else:
+            report("SKIP", "no 'sd' object in /json (board without microSD)")
+        return
+
+    state = sd.get("state")
+    if state == "error":
+        check(False, "SD logging healthy",
+              f"latched error: fail_op={sd.get('fail_op')!r} after "
+              f"{sd.get('fail_kb')} KB — card unresponsive through all "
+              "remount attempts; reseat or replace the card and reboot")
+        return
+    if state == "no_card":
+        if args.expect_sd:
+            check(False, "card mounted", "state=no_card — insert a card and "
+                  "reboot (the card is probed once at boot)")
+        else:
+            report("WARN", "no card at boot — session logging dormant "
+                           "(pass --expect-sd to make this a failure)")
+        return
+
+    check(state == "logging", "SD session logging", f"state={state}")
+    check(sd.get("session", 0) >= 1, "session directory open",
+          f"session={sd.get('session')}")
+    free_mb = sd.get("free_mb", 0)
+    check(free_mb > 0, "card has free space", f"free_mb={free_mb}")
+    if free_mb < 1024:
+        report("WARN", f"only {free_mb} MB free — the reaper will start "
+                       "deleting old sessions below 512 MB")
+
+    drops = sd.get("raw_dropped", 0) + sd.get("json_dropped", 0)
+    check(drops == 0, "no ring-buffer drops",
+          f"raw={sd.get('raw_dropped', 0)} json={sd.get('json_dropped', 0)}")
+    recoveries = sd.get("recoveries", 0)
+    if recoveries:
+        report("WARN", f"{recoveries} remount recoveries this boot — "
+                       "logging survived, but the card link is glitching")
 
 
 def stage_mdns(args) -> None:
@@ -789,6 +838,51 @@ def stage_inject(args) -> None:
         check(jget(j, "can.frames_decoded", 0) > base_decoded,
               "frames_decoded counter advanced",
               f"{base_decoded} -> {jget(j, 'can.frames_decoded')}")
+
+        # SD write soak: stream frames flat-out and confirm bytes actually
+        # land on the card. This is the regression test for the sustained-
+        # write card lockups: the pass condition is that the session is
+        # still "logging" afterwards, with the byte counter tracking what
+        # was sent. Recoveries during the soak are tolerated (the firmware
+        # absorbs them losslessly) but reported, so a worsening card link
+        # is visible at ship time.
+        if args.sd_soak:
+            sd0 = jget(j, "sd")
+            if not isinstance(sd0, dict) or sd0.get("state") != "logging":
+                report("SKIP", "SD write soak (sd state: "
+                               f"{sd0.get('state') if isinstance(sd0, dict) else 'absent'})")
+            else:
+                can_id, data_hex = FIX_MOTOR
+                msg = can.Message(arbitration_id=can_id, is_extended_id=True,
+                                  data=bytes.fromhex(data_hex))
+                sent = 0
+                end = time.monotonic() + args.sd_soak
+                while time.monotonic() < end:
+                    bus.send(msg, timeout=1.0)
+                    sent += 1
+                time.sleep(2.5)  # let the writer drain and hit a flush cycle
+                sd1 = jget(fetch_json(args.host), "sd", {})
+                report("INFO", f"soak sent {sent} frames in {args.sd_soak} s")
+                if not check(sd1.get("state") == "logging",
+                             "SD still logging after write soak",
+                             f"state={sd1.get('state')} "
+                             f"fail_op={sd1.get('fail_op')!r}"):
+                    return
+                # ~55 bytes per .asc line; require half the expectation so
+                # MB-granularity rounding can't fail a healthy run.
+                expect_mb = sent * 55 / (1 << 20)
+                got_mb = sd1.get("mb_written", 0) - sd0.get("mb_written", 0)
+                check(got_mb >= expect_mb / 2,
+                      "soak bytes landed on the card",
+                      f"mb_written +{got_mb} (sent ≈ {expect_mb:.1f} MB)")
+                rec = sd1.get("recoveries", 0) - sd0.get("recoveries", 0)
+                if rec:
+                    report("WARN", f"{rec} remount recoveries during soak — "
+                                   "absorbed, but the card link is glitching")
+                soak_drops = (sd1.get("raw_dropped", 0) - sd0.get("raw_dropped", 0)
+                              + sd1.get("json_dropped", 0) - sd0.get("json_dropped", 0))
+                check(soak_drops == 0, "no ring drops during soak",
+                      f"dropped {soak_drops} lines")
     except Exception as e:  # noqa: BLE001 — HTTP, socket, and can.CanError
         check(False, "injection stage aborted", str(e))
     finally:
@@ -917,6 +1011,13 @@ def main() -> int:
                     help="git short SHA the flashed build should report")
     ap.add_argument("--expect-vin", type=float, metavar="VOLTS",
                     help="expected 12 V rail reading (RejsaCAN VIN sense)")
+    ap.add_argument("--expect-sd", action="store_true",
+                    help="require a mounted, logging microSD (RejsaCAN); "
+                         "without this, a missing card is only a warning")
+    ap.add_argument("--sd-soak", type=int, metavar="SECONDS", default=0,
+                    help="stream frames flat-out for this long during the "
+                         "injection stage and verify the bytes land on the "
+                         "card (30+ recommended; needs --inject-channel)")
     ap.add_argument("--vin-tol", type=float, default=0.8,
                     help="VIN sense tolerance in volts")
     ap.add_argument("--channels", type=int, default=1,
@@ -941,6 +1042,7 @@ def main() -> int:
               "--host with its bench-network address.")
         return 1
 
+    stage_sd(args, j)
     stage_mdns(args)
     stage_socketcand(args)
     stage_slcan(args)
