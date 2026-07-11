@@ -400,7 +400,8 @@ uint8_t     g_kelly_last_rx[32];    // last raw chunk received
 uint8_t     g_kelly_last_rx_len = 0;
 // Flicker/reliability counters: how cleanly frames land.
 uint32_t    g_kelly_frames_ok   = 0;      // replies that checksummed
-uint32_t    g_kelly_frames_bad  = 0;      // header seen but checksum failed
+uint32_t    g_kelly_frames_bad  = 0;      // bytes arrived but no frame checksummed
+uint32_t    g_kelly_timeouts    = 0;      // no bytes at all (controller unpowered/absent)
 uint32_t    g_kelly_blocks_ok   = 0;      // full 48-byte blocks decoded (a card update)
 uint32_t    g_kelly_last_block_ms    = 0; // millis() of last full decode
 uint32_t    g_kelly_block_gap_max_ms = 0; // worst gap between full decodes (worst flicker)
@@ -1348,6 +1349,7 @@ void kellyPoll() {
     static uint8_t  cur    = 0;      // command index currently in flight
     static uint32_t next_ms = 0;     // earliest time to send the next query
     static uint32_t sent_ms = 0;     // when the current query went out
+    static uint32_t sent_rx_total = 0;   // g_kelly_rx_total when the query went out
 
     uint32_t now = millis();
 
@@ -1358,6 +1360,7 @@ void kellyPoll() {
         g_kelly_polls++;
         kellySendQuery(KELLY_MON_CMDS[cur]);
         sent_ms = now;
+        sent_rx_total = g_kelly_rx_total;
         state   = KWAIT;
         return;
     }
@@ -1410,7 +1413,10 @@ void kellyPoll() {
         rxlen = 18;
     }
     if (now - sent_ms > KELLY_CMD_TIMEOUT_MS) {   // no valid reply this attempt
-        g_kelly_frames_bad++;                     // one clean count per failed attempt
+        if (g_kelly_rx_total == sent_rx_total)
+            g_kelly_timeouts++;                   // silence: unpowered/absent, not corruption
+        else
+            g_kelly_frames_bad++;                 // one clean count per failed attempt
         cur     = (cur + 1) % KELLY_N_POLL;       // advance so a dead slot can't stall
         next_ms = now + KELLY_POLL_INTERVAL_MS;
         state   = KIDLE;
@@ -1697,8 +1703,10 @@ String buildJson(bool pretty = true, bool minimal = false) {
 #if defined(KELLY_DEBUG)
     // Serial-path diagnostics (build with -DKELLY_DEBUG). polls should climb
     // (board is querying); rx_total > 0 means the Kelly is answering; frames_ok
-    // vs frames_bad is the per-attempt success rate; block_gap_max_ms is the
-    // worst flicker; last_rx shows raw bytes for framing/baud checks.
+    // vs frames_bad is the per-attempt success rate on a live link; timeouts
+    // counts attempts with zero bytes back (controller unpowered, e.g. key-off);
+    // block_gap_max_ms is the worst flicker; last_rx shows raw bytes for
+    // framing/baud checks.
     if (!minimal) {
         auto kd = doc["kelly_dbg"].to<JsonObject>();
         kd["polls"]       = g_kelly_polls;
@@ -1706,6 +1714,7 @@ String buildJson(bool pretty = true, bool minimal = false) {
         kd["baud"]        = KELLY_BAUD;
         kd["frames_ok"]   = g_kelly_frames_ok;
         kd["frames_bad"]  = g_kelly_frames_bad;
+        kd["timeouts"]    = g_kelly_timeouts;
         kd["blocks_ok"]   = g_kelly_blocks_ok;
         kd["block_gap_max_ms"] = g_kelly_block_gap_max_ms;
         kd["block_gap_ms"]     = g_kelly_last_block_ms ? (millis() - g_kelly_last_block_ms) : 0;
