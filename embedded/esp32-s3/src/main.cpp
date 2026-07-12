@@ -25,7 +25,6 @@
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
-#include <BLE2902.h>
 #include "driver/twai.h"
 #include <sys/select.h>
 #if defined(BOARD_LILYGO_T2CAN)
@@ -40,8 +39,24 @@
   #include <esp_heap_caps.h>
   #include "freertos/stream_buffer.h"
 #endif
+// Energy-saving deep sleep is on by default; build with -DNO_AUTOSHUTDOWN to
+// keep the board fully awake through CAN-bus silence.
+#if !defined(NO_AUTOSHUTDOWN) && !defined(AUTOSHUTDOWN)
+  #define AUTOSHUTDOWN
+#endif
+#if defined(AUTOSHUTDOWN)
+  #include <esp_sleep.h>
+  #include "driver/gpio.h"   // gpio_hold_en() etc. — only called on BOARD_REJSACAN, but cheap to include for all
+#endif
 
 // ── Configuration ─────────────────────────────────────────────────────────────
+
+// WiFi identity overrides (WIFI_SSID / WIFI_PASS / AP_SSID / AP_PASS /
+// MDNS_NAME env vars), generated into the build dir by
+// inject_build_overrides.py. Absent when no override is set.
+#if __has_include("wifi_overrides.h")
+#include "wifi_overrides.h"
+#endif
 
 // Optional home network the board also joins (for bench use). Leave unset to
 // run AP-only — the board still broadcasts its own hotspot (see AP_SSID below),
@@ -343,6 +358,12 @@ uint32_t    g_socketcand_tx_dropped = 0;   // frames dropped on full client TCP 
 bool        g_can_initialized = false;
 bool        g_ap_running      = false;
 
+// STA join telemetry for /config. Written by the WiFi event callback, which
+// runs on the system event task rather than the loop task — hence volatile
+// single-word values (torn reads aren't possible at word width or below).
+volatile uint32_t g_sta_disconnects = 0;
+volatile uint8_t  g_sta_last_disconnect_reason = 0;   // 0 = never disconnected
+
 #if defined(HAS_MCP2515)
 bool        g_mcp_initialized = false;
 uint32_t    g_mcp_init_err    = 0xFFFFFFFFUL;   // sentinel: never attempted
@@ -356,6 +377,10 @@ static ACAN2515 g_mcp(MCP2515_CS_PIN, SPI, MCP2515_INT_PIN);
 
 #if defined(HAS_VIN_SENSE)
 float       g_vin_v = NAN;   // most recent 12 V supply reading, averaged
+#endif
+
+#if defined(AUTOSHUTDOWN)
+esp_sleep_wakeup_cause_t g_wake_cause = ESP_SLEEP_WAKEUP_UNDEFINED;   // set once in setup()
 #endif
 
 // Session energy tracking (integrated power since boot)
@@ -910,6 +935,58 @@ static void canRecoveryTick() {
     }
 }
 
+#if defined(AUTOSHUTDOWN)
+// ── Energy-saving deep sleep ──────────────────────────────────────────────────
+// A parked tractor (or bench setup) produces no CAN traffic, so there's
+// nothing to log. Deep sleep + wake-on-CAN needs nothing board-specific: any
+// board's CAN_RX_PIN can be an ext0 wake source (0–21 are RTC-capable on the
+// S3, and every board map here picks one in that range).
+//
+// Wake source is CAN traffic only (ext0 on CAN_RX: the first dominant bit
+// pulls the line low). There is deliberately no voltage-rise wake: on the
+// RejsaCAN, the tractor's measured 12 V rail is ~12.4 V key-off / ~12.7 V
+// key-on (issue #41 comments), both below the comparator's assumed on/off
+// thresholds (~13.0/13.7 V for the genuine R4=91k board), so SENSE_V_DIG would
+// not reliably fire even at key-on, let alone during a charge session. CAN
+// wake covers both cases: ECUs broadcast at key-on, and the charger/BMS
+// broadcast during charging.
+//
+// TENTATIVE: assumes gpio_hold_en() holds a non-RTC digital output through
+// deep sleep on the S3, and that ext0 wakes with the transceiver left in
+// normal mode (RS held LOW, not standby) — neither is bench-verified yet.
+#define CAN_QUIET_SLEEP_MS   (10UL * 60UL * 1000UL)   // 10 min of silence
+
+static void checkCanQuietSleep() {
+    if (millis() - g_last_frame_ms < CAN_QUIET_SLEEP_MS) return;
+
+    WiFi.mode(WIFI_OFF);
+    BLEDevice::deinit(true);
+    twai_stop();
+    twai_driver_uninstall();
+
+#if defined(BOARD_REJSACAN)
+    // RejsaCAN-only: these pins are firmware-driven and float during deep
+    // sleep unless held, which would cause real problems on this board —
+    // CAN_RS floating drops the transceiver into slope-control mode (mangles
+    // frames, including the one meant to wake us) and FORCE_ON floating risks
+    // a spurious auto-shutdown edge. The other boards don't define these pins
+    // (transceiver mode is fixed in hardware, no auto-shutdown circuit), so
+    // there's nothing to hold there.
+    digitalWrite(WARN_LED_PIN, LOW);
+    digitalWrite(ACTIVITY_LED_PIN, LOW);
+    gpio_hold_en(CAN_RS_PIN);
+    gpio_hold_en(FORCE_ON_PIN);
+    gpio_hold_en(WARN_LED_PIN);
+    gpio_hold_en(ACTIVITY_LED_PIN);
+    gpio_deep_sleep_hold_en();
+#endif
+
+    esp_sleep_enable_ext0_wakeup(CAN_RX_PIN, 0 /*wake when pulled LOW*/);
+    esp_deep_sleep_start();
+    // Never returns — waking from deep sleep is a full reboot back into setup().
+}
+#endif
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 static inline uint16_t be16(uint8_t hi, uint8_t lo) {
@@ -1359,6 +1436,14 @@ String buildJson(bool pretty = true, bool minimal = false) {
     }
 #endif
 
+#if defined(AUTOSHUTDOWN)
+    switch (g_wake_cause) {
+        case ESP_SLEEP_WAKEUP_EXT0:  doc["wake_cause"] = "can";      break;
+        case ESP_SLEEP_WAKEUP_UNDEFINED: doc["wake_cause"] = "power_on"; break;
+        default:                     doc["wake_cause"] = "other";    break;
+    }
+#endif
+
     // Charger
     if (g_charger.valid) {
         auto chg = doc["charger"].to<JsonObject>();
@@ -1435,6 +1520,101 @@ String buildJson(bool pretty = true, bool minimal = false) {
 
 void handleJson() {
     server.send(200, "application/json", buildJson());
+}
+
+// Names for the STA disconnect reasons that come up when a credentials build
+// goes wrong: auth_fail / handshake_timeout usually mean a wrong password,
+// no_ap_found a wrong SSID or out-of-range network. Rare codes stay numeric.
+static String staDisconnectReasonName(uint8_t reason) {
+    switch (reason) {
+        case WIFI_REASON_UNSPECIFIED:                return "unspecified";
+        case WIFI_REASON_AUTH_EXPIRE:                return "auth_expire";
+        case WIFI_REASON_AUTH_LEAVE:                 return "auth_leave";
+        case WIFI_REASON_ASSOC_EXPIRE:               return "assoc_expire";
+        case WIFI_REASON_ASSOC_TOOMANY:              return "assoc_toomany";
+        case WIFI_REASON_NOT_AUTHED:                 return "not_authed";
+        case WIFI_REASON_NOT_ASSOCED:                return "not_assoced";
+        case WIFI_REASON_ASSOC_LEAVE:                return "assoc_leave";
+        case WIFI_REASON_MIC_FAILURE:                return "mic_failure";
+        case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:     return "4way_handshake_timeout";
+        case WIFI_REASON_GROUP_KEY_UPDATE_TIMEOUT:   return "group_key_update_timeout";
+        case WIFI_REASON_802_1X_AUTH_FAILED:         return "802_1x_auth_failed";
+        case WIFI_REASON_BEACON_TIMEOUT:             return "beacon_timeout";
+        case WIFI_REASON_NO_AP_FOUND:                return "no_ap_found";
+        case WIFI_REASON_AUTH_FAIL:                  return "auth_fail";
+        case WIFI_REASON_ASSOC_FAIL:                 return "assoc_fail";
+        case WIFI_REASON_HANDSHAKE_TIMEOUT:          return "handshake_timeout";
+        case WIFI_REASON_CONNECTION_FAIL:            return "connection_fail";
+        case WIFI_REASON_AP_TSF_RESET:               return "ap_tsf_reset";
+        case WIFI_REASON_ROAMING:                    return "roaming";
+        default:                                     return String(reason);
+    }
+}
+
+// Build + WiFi diagnostics, deliberately separate from the /json telemetry:
+// this reports what was baked into the binary and how the home-network join
+// is going. The soft-AP is always up, so /config stays reachable at
+// 192.168.4.1 even when the STA join failed — one request distinguishes
+// "wrong password" from "wrong SSID" from "built with empty credentials".
+void handleConfig() {
+    JsonDocument doc;
+
+    doc["uptime"] = millis() / 1000.0;
+#ifdef GIT_SHA
+    doc["version"] = GIT_SHA;
+#endif
+#if defined(BOARD_ADAFRUIT_FEATHER_S3)
+    doc["board"] = "adafruit_feather_s3";
+#elif defined(BOARD_LILYGO_T2CAN)
+    doc["board"] = "lilygo_t2can";
+#elif defined(BOARD_REJSACAN)
+    doc["board"] = "rejsacan";
+#endif
+    doc["mdns"] = MDNS_NAME;
+
+    auto features = doc["features"].to<JsonObject>();
+    features["can_tx"]    = (bool)CAN_TX_ENABLED;
+#if defined(HAS_MCP2515)
+    features["mcp2515"]   = true;
+#else
+    features["mcp2515"]   = false;
+#endif
+#if defined(HAS_VIN_SENSE)
+    features["vin_sense"] = true;
+#else
+    features["vin_sense"] = false;
+#endif
+
+    auto wifi = doc["wifi"].to<JsonObject>();
+
+    auto sta = wifi["sta"].to<JsonObject>();
+    const bool join_sta = (sizeof(WIFI_SSID) > 1);
+    sta["ssid"]     = WIFI_SSID;                    // exactly what was compiled in
+    sta["pass_set"] = (sizeof(WIFI_PASS) > 1);      // presence only, never the password
+    sta["enabled"]  = join_sta;
+    const bool sta_connected = join_sta && WiFi.status() == WL_CONNECTED;
+    sta["status"] = !join_sta ? "disabled"
+                  : sta_connected ? "connected" : "connecting";
+    if (sta_connected) {
+        sta["ip"]   = WiFi.localIP().toString();
+        sta["rssi"] = WiFi.RSSI();
+    }
+    sta["disconnects"] = (uint32_t)g_sta_disconnects;
+    if (g_sta_disconnects > 0)
+        sta["last_disconnect_reason"] =
+            staDisconnectReasonName(g_sta_last_disconnect_reason);
+
+    auto ap = wifi["ap"].to<JsonObject>();
+    ap["ssid"]    = AP_SSID;
+    ap["running"] = g_ap_running;
+    if (g_ap_running) {
+        ap["ip"]      = WiFi.softAPIP().toString();
+        ap["clients"] = WiFi.softAPgetStationNum();
+    }
+
+    String out;
+    serializeJsonPretty(doc, out);
+    server.send(200, "application/json", out);
 }
 
 void handleRoot() {
@@ -1732,7 +1912,7 @@ static void socketcandHandleCommand(SocketcandSlot& slot, const char* cmd) {
 }
 
 void socketcandPoll() {
-    WiFiClient new_client = socketcand_server.available();
+    WiFiClient new_client = socketcand_server.accept();
     if (new_client) {
         int free_idx = -1;
         for (int i = 0; i < SOCKETCAND_NUM_CHANNELS; i++) {
@@ -1836,8 +2016,9 @@ void bleInit() {
     g_ble_server->setCallbacks(new BleServerCb());
 
     BLEService* svc = g_ble_server->createService(NUS_SVC_UUID);
+    // NimBLE adds the 0x2902 CCC descriptor automatically for NOTIFY
+    // characteristics; adding one manually is deprecated.
     g_ble_tx = svc->createCharacteristic(NUS_TX_UUID, BLECharacteristic::PROPERTY_NOTIFY);
-    g_ble_tx->addDescriptor(new BLE2902());
     svc->createCharacteristic(NUS_RX_UUID,
         BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
     svc->start();
@@ -1908,6 +2089,22 @@ void setup() {
     ledInit();
     ledWrite(4, 4, 4);   // dim white the moment firmware starts running
 
+#if defined(AUTOSHUTDOWN)
+    // A wake from deep sleep is a full reboot, so this runs on every wake too.
+    // Capture the cause for /json before anything else touches the RTC state.
+    g_wake_cause = esp_sleep_get_wakeup_cause();
+
+#if defined(BOARD_REJSACAN)
+    // Release the pins checkCanQuietSleep() held through the previous sleep
+    // (no-op on a cold boot / power-on reset) before reconfiguring them below.
+    gpio_hold_dis(CAN_RS_PIN);
+    gpio_hold_dis(FORCE_ON_PIN);
+    gpio_hold_dis(WARN_LED_PIN);
+    gpio_hold_dis(ACTIVITY_LED_PIN);
+    gpio_deep_sleep_hold_dis();
+#endif
+#endif
+
 #if defined(BOARD_REJSACAN)
     // Drive the transceiver into high-speed normal mode (RS=LOW) and assert
     // the auto-shutdown override so the board stays on across vehicle/key
@@ -1961,10 +2158,40 @@ void setup() {
     // makes the soft-AP beacon hop channels and drop out (it appears briefly
     // then vanishes and won't accept clients). Build with an empty WIFI_SSID
     // for a rock-solid AP-only setup; set it to join a bench network as before.
+    // Record STA join outcomes for /config and the serial log. Registered
+    // before begin() so even the very first failure is captured. The callback
+    // runs on the WiFi event task; it only writes the volatile g_sta_* words.
+    // Serial output is suppressed while an SLCAN session is open — the USB
+    // serial port is the SLCAN channel, and a stray text line would corrupt
+    // the frame stream a python-can client is parsing.
+    WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
+        if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+            g_sta_last_disconnect_reason = info.wifi_sta_disconnected.reason;
+            g_sta_disconnects = g_sta_disconnects + 1;
+            if (!slcan_open)
+                Serial.printf("WiFi: STA disconnected, reason %u (%s)\r\n",
+                              info.wifi_sta_disconnected.reason,
+                              staDisconnectReasonName(
+                                  info.wifi_sta_disconnected.reason).c_str());
+        } else if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
+            if (!slcan_open)
+                Serial.printf("WiFi: STA connected, IP %s\r\n",
+                              WiFi.localIP().toString().c_str());
+        }
+    });
+
     const bool join_sta = (sizeof(WIFI_SSID) > 1);
     WiFi.mode(join_sta ? WIFI_AP_STA : WIFI_AP);
     g_ap_running = WiFi.softAP(AP_SSID, AP_PASS);
     if (join_sta) WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+    if (join_sta)
+        Serial.printf("WiFi: AP \"%s\" %s; STA joining \"%s\" (pass %u chars)\r\n",
+                      AP_SSID, g_ap_running ? "up" : "FAILED",
+                      WIFI_SSID, (unsigned)(sizeof(WIFI_PASS) - 1));
+    else
+        Serial.printf("WiFi: AP \"%s\" %s; STA disabled (no WIFI_SSID baked in)\r\n",
+                      AP_SSID, g_ap_running ? "up" : "FAILED");
 
     // Wildcard DNS on the soft-AP: any hostname (tractor.local, tractor,
     // captive-portal probes, etc.) resolves to the board's AP IP. Needed
@@ -1973,8 +2200,9 @@ void setup() {
 
     MDNS.begin(MDNS_NAME);
 
-    server.on("/",     handleRoot);
-    server.on("/json", handleJson);
+    server.on("/",       handleRoot);
+    server.on("/json",   handleJson);
+    server.on("/config", handleConfig);
     server.onNotFound(handleNotFound);
     server.begin();
     MDNS.addService("http", "tcp", 80);
@@ -2049,6 +2277,11 @@ void loop() {
         CANMessage frame;
         while (g_mcp.receive(frame)) {
             g_mcp_frames_rx++;
+            // Counts as bus activity for the quiet-sleep timer too: the board
+            // must not deep-sleep while CAN A still carries traffic (ext0 wake
+            // only watches the TWAI RX pin, so a sleep here would be terminal
+            // until CAN B traffic resumes).
+            g_last_frame_ms = millis();
             twai_message_t fwd = {};
             fwd.identifier       = frame.id;
             fwd.extd             = frame.ext ? 1 : 0;
@@ -2082,5 +2315,8 @@ void loop() {
     updateLed();
 #if defined(HAS_VIN_SENSE)
     updateVinSense();
+#endif
+#if defined(AUTOSHUTDOWN)
+    checkCanQuietSleep();
 #endif
 }
