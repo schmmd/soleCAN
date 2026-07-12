@@ -380,8 +380,22 @@ function update(d){
   if(d.version)vers.push('fw '+d.version);
   var br=window.DashboardBridge;
   if(br&&br.appVersion){try{var av=br.appVersion();if(av)vers.push('app '+av);}catch(e){}}
+  // SD session-logging status (only present on boards with a card reader).
+  var sd=d.sd, sdTxt='';
+  if(sd){
+    var drop=(sd.raw_dropped||0)+(sd.json_dropped||0);
+    if(sd.state==='logging'){
+      var sess='s'+sd.session+(sd.raw_part?'.'+sd.raw_part:'');
+      sdTxt='<span class="ok">●</span> SD '+sess+' · '+((sd.kb_written||0)/1024).toFixed(1)+' MB'+
+        (sd.free_mb!=null?' · '+(sd.free_mb/1024).toFixed(1)+' GB free':'')+
+        (drop?' · <span class="bad">⚠ '+drop+' dropped</span>':'');
+    } else {
+      sdTxt='<span class="bad">●</span> SD '+sd.state;   // no_card / error
+    }
+  }
   document.getElementById('foot').innerHTML=
     dot+' '+can.state+' · '+(can.frames_rx||0)+' rx · age '+(age!=null?age.toFixed(1)+'s':'–')+' · up '+f(d.uptime/3600,1)+'h'+
+    (sdTxt?'<br>'+sdTxt:'')+
     (vers.length?'<br>'+vers.join(' · '):'');
   lastData=d;
   if(detailOpen)renderDetail(d);
