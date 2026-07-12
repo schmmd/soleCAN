@@ -358,7 +358,7 @@ containing two streams, split into 64 MB parts:
 
 | File | Contents |
 |---|---|
-| `raw_PP.asc` | every received CAN frame, Vector ASCII — replayable by the Python tools unchanged |
+| `can_PP.asc` | every received CAN frame, Vector ASCII — replayable by the Python tools unchanged |
 | `data_PP.jsonl` | one full `/json` snapshot per line at `SD_JSON_HZ` (default **1 Hz**) |
 
 - **Crash-safe-ish:** the writer `fsync`s every ~1 s (`SD_FLUSH_MS`), so any
@@ -380,8 +380,8 @@ drops) and on the dashboard footer. Tunables are `#define`s at the top of the
 log feeds the existing tools directly:
 
 ```bash
-python3 solecan-analyze.py -o out /Volumes/SD/s00007/raw_00.asc   # decode → CSVs
-python3 solecan-stream.py --replay /Volumes/SD/s00007/raw_00.asc  # TUI replay
+python3 solecan-analyze.py -o out /Volumes/SD/s00007/can_00.asc   # decode → CSVs
+python3 solecan-stream.py --replay /Volumes/SD/s00007/can_00.asc  # TUI replay
 jq . /Volumes/SD/s00007/data_00.jsonl | less                       # decoded timeline
 ```
 

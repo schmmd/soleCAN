@@ -380,7 +380,7 @@ extern const uint8_t dashboard_html_end[]   asm("_binary_src_dashboard_html_end"
 // ── SD-card session logging (RejsaCAN) ──────────────────────────────────────────
 // Records two streams to the onboard microSD whenever a card is present at boot:
 //
-//   /sNNNNN/raw_PP.asc    every received CAN frame, Vector ASCII — replayable by
+//   /sNNNNN/can_PP.asc    every received CAN frame, Vector ASCII — replayable by
 //                         solecan-analyze.py / solecan-stream.py --replay unchanged
 //   /sNNNNN/data_PP.jsonl one buildJson() snapshot per line at SD_JSON_HZ (default 1)
 //
@@ -448,7 +448,7 @@ struct SdStream {
     volatile uint16_t    part = 0;
     volatile uint32_t    dropped = 0;     // producer (core 1) owns this
 };
-static SdStream g_sd_raw  = { "/s%05lu/raw_%02u.asc",    "raw_write",  "raw_open",  true,  SD_RAW_RING_BYTES };
+static SdStream g_sd_raw  = { "/s%05lu/can_%02u.asc",    "raw_write",  "raw_open",  true,  SD_RAW_RING_BYTES };
 static SdStream g_sd_json = { "/s%05lu/data_%02u.jsonl", "json_write", "json_open", false, SD_JSON_RING_BYTES };
 
 static int64_t g_sd_session_start_us = 0;   // esp_timer µs at session open (log t=0)
@@ -562,7 +562,7 @@ static bool sdStartSession() {
     return true;
 }
 
-// Delete a session directory. Sessions hold only flat files (raw_PP.asc /
+// Delete a session directory. Sessions hold only flat files (can_PP.asc /
 // data_PP.jsonl), so remove them one at a time — re-opening the dir each pass
 // avoids invalidating the FatFS iterator by deleting during a walk.
 static bool sdRemoveSessionDir(const char* path) {
