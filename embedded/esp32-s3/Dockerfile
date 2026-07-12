@@ -22,8 +22,10 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Pin PlatformIO Core so builds are reproducible.
-RUN pip install --no-cache-dir "platformio==6.1.19"
+# Pin PlatformIO Core so builds are reproducible. --root-user-action=ignore:
+# root is the norm inside a single-purpose build image, so pip's root warning
+# is noise here.
+RUN pip install --no-cache-dir --root-user-action=ignore "platformio==6.1.19"
 
 WORKDIR /project
 

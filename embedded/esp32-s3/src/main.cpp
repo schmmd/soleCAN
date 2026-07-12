@@ -25,7 +25,6 @@
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
-#include <BLE2902.h>
 #include "driver/twai.h"
 #include <sys/select.h>
 #if defined(BOARD_LILYGO_T2CAN)
@@ -1503,7 +1502,7 @@ static void socketcandHandleCommand(SocketcandSlot& slot, const char* cmd) {
 }
 
 void socketcandPoll() {
-    WiFiClient new_client = socketcand_server.available();
+    WiFiClient new_client = socketcand_server.accept();
     if (new_client) {
         int free_idx = -1;
         for (int i = 0; i < SOCKETCAND_NUM_CHANNELS; i++) {
@@ -1607,8 +1606,9 @@ void bleInit() {
     g_ble_server->setCallbacks(new BleServerCb());
 
     BLEService* svc = g_ble_server->createService(NUS_SVC_UUID);
+    // NimBLE adds the 0x2902 CCC descriptor automatically for NOTIFY
+    // characteristics; adding one manually is deprecated.
     g_ble_tx = svc->createCharacteristic(NUS_TX_UUID, BLECharacteristic::PROPERTY_NOTIFY);
-    g_ble_tx->addDescriptor(new BLE2902());
     svc->createCharacteristic(NUS_RX_UUID,
         BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
     svc->start();
