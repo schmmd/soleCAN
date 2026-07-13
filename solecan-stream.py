@@ -849,8 +849,9 @@ def render_pack(state: State, now: float) -> Panel:
         p_style = "green" if dc_w > 0 else None
         t.add_row("power", Text(f"{dc_w:+.0f} W", style=p_style))
 
-    # 60 s sparkline of pack power. Glyphs above the baseline (red) =
-    # drawing, below (green) = charging. Empty until the first F100F3.
+    # 60 s sparkline of pack power. Bar height encodes |power|; colour
+    # encodes sign (default = drawing, green = charging). Empty until the
+    # first F100F3.
     if state.power_history:
         spark = power_sparkline(state)
         t.add_row(

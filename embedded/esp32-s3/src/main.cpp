@@ -1015,6 +1015,8 @@ void decodeCAN(uint32_t can_id, const uint8_t* raw, uint8_t len) {
 
     // Count any frame from a known source as decoded, before the per-PGN
     // decoders below — they often early-return on all-zero idle frames.
+    // This is a by-source count, not by-signal: a frame from a known SA
+    // whose PGN matches no branch below still counts here.
     if (src == SRC_BMS || src == SRC_BMS_CHGR_IF || src == SRC_CHARGER ||
         src == SRC_VEHICLE || src == SRC_MOTOR || src == SRC_DASH)
         g_frames_decoded++;

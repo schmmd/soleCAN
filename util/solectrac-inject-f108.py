@@ -24,7 +24,7 @@ Before probing unknown bits, send an all-zero payload:
 
     solectrac-inject-f108.py ... --bytes 00:00:00:00:00:00:00:00
 
-Code 124 (Clock fault, byte 7 bit 0) is normally always on. If the
+Code 124 (Clock fault, byte 5 bit 0) is normally always on. If the
 dashboard drops it while you're injecting zeros, the spoof is
 winning. If 124 stays lit, raise --rate or pull the BMS CAN
 connector and try again.
