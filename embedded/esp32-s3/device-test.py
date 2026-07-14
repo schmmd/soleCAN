@@ -17,7 +17,8 @@ interface of the firmware against real hardware:
     failure, drop/recovery counters; plus an optional sustained-write soak
     (--sd-soak) that streams frames and checks bytes land on the card
   - BLE (optional, needs `bleak`): NUS notify stream reassembles to valid JSON
-  - LEDs (optional, --interactive): operator visual checks
+  - LEDs (optional, --interactive): operator visual checks, run FIRST so the
+    operator only has to be present at the start, then can walk away
 
 Stages degrade gracefully: anything whose prerequisite flag isn't given is
 reported as SKIP, so the suite is useful even WiFi-only.
@@ -551,6 +552,49 @@ class MotorInjector(threading.Thread):
             self.stop_evt.wait(0.05)
 
 
+def open_ack_bus(args):
+    """Open the optional ACK adapter in normal mode, with a background drain.
+
+    A second adapter opened in normal mode ACKs every frame in hardware, so the
+    listen-only device under test doesn't leave the injector un-ACKed. Returns
+    the bus, or None when not configured or it wouldn't open (reported WARN).
+    """
+    if not args.ack_channel:
+        return None
+    import can
+    ack_channel = args.ack_channel
+    if ack_channel.isdigit():
+        ack_channel = int(ack_channel)
+    try:
+        ack_bus = can.Bus(interface=args.ack_interface, channel=ack_channel,
+                          bitrate=args.inject_bitrate)
+    except Exception as e:  # noqa: BLE001
+        report("WARN", f"could not open ACK adapter "
+                       f"({args.ack_interface}:{args.ack_channel}): {e}")
+        return None
+
+    def drain():  # keep host-side buffers empty; ACKs are hardware
+        try:
+            while True:
+                ack_bus.recv(1.0)
+        except Exception:  # noqa: BLE001 — ends at bus shutdown
+            pass
+
+    threading.Thread(target=drain, daemon=True).start()
+    report("INFO", f"ACK node up on {args.ack_interface}:{ack_channel}")
+    return ack_bus
+
+
+def open_injector_bus(args):
+    """Open the bench injector adapter. Raises on failure (caller reports)."""
+    import can
+    channel = args.inject_channel
+    if channel.isdigit():
+        channel = int(channel)
+    return can.Bus(interface=args.inject_interface, channel=channel,
+                   bitrate=args.inject_bitrate)
+
+
 def stage_inject(args) -> None:
     section("CAN receive + decode (bench injection)")
     if not args.inject_channel:
@@ -562,40 +606,14 @@ def stage_inject(args) -> None:
         check(False, "import python-can", str(e))
         return
 
-    # Optional ACK node: a second adapter opened in normal mode ACKs every
-    # frame in hardware, so the listen-only device under test doesn't leave
-    # the injector un-ACKed. Opened first so it's live before the first send.
-    ack_bus = None
-    if args.ack_channel:
-        ack_channel = args.ack_channel
-        if ack_channel.isdigit():
-            ack_channel = int(ack_channel)
-        try:
-            ack_bus = can.Bus(interface=args.ack_interface,
-                              channel=ack_channel,
-                              bitrate=args.inject_bitrate)
+    # Optional ACK node — opened first so it's live before the first send.
+    ack_bus = open_ack_bus(args)
 
-            def drain():  # keep host-side buffers empty; ACKs are hardware
-                try:
-                    while True:
-                        ack_bus.recv(1.0)
-                except Exception:  # noqa: BLE001 — ends at bus shutdown
-                    pass
-
-            threading.Thread(target=drain, daemon=True).start()
-            report("INFO", f"ACK node up on {args.ack_interface}:{ack_channel}")
-        except Exception as e:  # noqa: BLE001
-            report("WARN", f"could not open ACK adapter "
-                           f"({args.ack_interface}:{args.ack_channel}): {e}")
-
-    channel = args.inject_channel
-    if channel.isdigit():
-        channel = int(channel)
     try:
-        bus = can.Bus(interface=args.inject_interface, channel=channel,
-                      bitrate=args.inject_bitrate)
+        bus = open_injector_bus(args)
     except Exception as e:  # noqa: BLE001
-        check(False, f"open injector ({args.inject_interface}:{channel})", str(e))
+        check(False, f"open injector "
+              f"({args.inject_interface}:{args.inject_channel})", str(e))
         if ack_bus:
             ack_bus.shutdown()
         return
@@ -824,11 +842,6 @@ def stage_inject(args) -> None:
               "motor telemetry decode (1500 RPM fwd, R2, 25/30 C)",
               f"got {jget(j, 'motor')}")
 
-        if args.interactive:
-            ans = input("      >> Is the BLUE LED blinking right now? [y/n] ")
-            check(ans.strip().lower().startswith("y"),
-                  "blue LED blinks on CAN activity (operator)")
-
         injector.stop_evt.set()
         injector.join(2)
         if injector.error:
@@ -972,6 +985,14 @@ def stage_ble(args) -> None:
 
 
 def stage_interactive(args) -> None:
+    """Operator visual checks, front-loaded so the operator only needs to be
+    present at the very start of the run — then they can walk away for the
+    long unattended stages. The green/yellow prompts are position-independent
+    (the board at rest). The blue LED blinks only on live CAN traffic, so when
+    an injector is configured this stage briefly streams the motor fixture
+    (ACK-backed if --ack-channel is given) purely to make the LED blink while
+    the operator watches; the adapters are torn down before stage_inject
+    reopens them for the decode sweep."""
     if not args.interactive:
         return
     section("Operator checks")
@@ -983,6 +1004,43 @@ def stage_interactive(args) -> None:
     for question, name in prompts:
         ans = input(f"      >> {question} [y/n] ")
         check(ans.strip().lower().startswith("y"), f"{name} (operator)")
+
+    # Blue LED blinks on CAN activity — meaningless without live frames, so it
+    # needs the injector. Generate a short burst now rather than leaving the
+    # prompt stranded mid-run in stage_inject.
+    if not args.inject_channel:
+        report("SKIP", "blue LED / CAN-activity check (needs --inject-channel)")
+        return
+    try:
+        import can  # noqa: F401 — probe availability before opening adapters
+    except ImportError as e:
+        check(False, "import python-can", str(e))
+        return
+    ack_bus = open_ack_bus(args)
+    try:
+        bus = open_injector_bus(args)
+    except Exception as e:  # noqa: BLE001
+        check(False, f"open injector "
+              f"({args.inject_interface}:{args.inject_channel})", str(e))
+        if ack_bus:
+            ack_bus.shutdown()
+        return
+    injector = MotorInjector(bus)
+    injector.start()
+    try:
+        time.sleep(0.3)  # let a few frames flow before prompting
+        ans = input("      >> Is the BLUE LED blinking right now? [y/n] ")
+        check(ans.strip().lower().startswith("y"),
+              "blue LED blinks on CAN activity (operator)")
+    finally:
+        injector.stop_evt.set()
+        injector.join(2)
+        if injector.error:
+            report("WARN", f"blue-LED burst injector stopped early: "
+                           f"{injector.error}")
+        bus.shutdown()
+        if ack_bus:
+            ack_bus.shutdown()
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -1035,7 +1093,9 @@ def main() -> int:
     ap.add_argument("--ble", action="store_true",
                     help="run the BLE stage (requires bleak)")
     ap.add_argument("--interactive", action="store_true",
-                    help="prompt the operator for LED checks")
+                    help="prompt the operator for LED checks up front, before "
+                         "the unattended stages (the blue-LED check briefly "
+                         "injects when --inject-channel is set)")
     ap.add_argument("--slow", action="store_true",
                     help="include the ~12 s socketcand handshake-timeout check")
     args = ap.parse_args()
@@ -1051,13 +1111,15 @@ def main() -> int:
               "--host with its bench-network address.")
         return 1
 
+    # Operator prompts run first so the human can leave once they're done;
+    # every stage below is unattended.
+    stage_interactive(args)
     stage_sd(args, j)
     stage_mdns(args)
     stage_socketcand(args)
     stage_slcan(args)
     stage_inject(args)
     stage_ble(args)
-    stage_interactive(args)
 
     counts = {s: sum(1 for st, _ in RESULTS if st == s)
               for s in ("PASS", "FAIL", "WARN", "SKIP")}
