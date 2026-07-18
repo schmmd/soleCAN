@@ -455,6 +455,18 @@ static SdState g_sd;
 // in the ring buffers.
 volatile bool g_sd_active = false;
 
+// Serializes every SD/SPI touch between the writer task (core 0) and the
+// /sd/* HTTP handlers (loop task, core 1). The writer holds it per
+// drain/flush/roll burst; HTTP holds it per operation — and per read chunk
+// while streaming a tar — so a download stalls logging only briefly and the
+// PSRAM rings absorb it. sdFail() must release it before self-deleting.
+static SemaphoreHandle_t g_sd_mutex = nullptr;
+
+struct SdLock {
+    SdLock()  { xSemaphoreTake(g_sd_mutex, portMAX_DELAY); }
+    ~SdLock() { xSemaphoreGive(g_sd_mutex); }
+};
+
 // One logged stream: a PSRAM ring fed by loop() (core 1) and drained to the
 // current part file by the writer task (core 0). The raw .asc and the json
 // .jsonl are two instances; everything that touches a stream goes through the
@@ -644,6 +656,7 @@ static void sdFail(const char* op) {
     g_sd.state   = "error";
     if (g_sd_raw.file)  g_sd_raw.file.close();
     if (g_sd_json.file) g_sd_json.file.close();
+    xSemaphoreGive(g_sd_mutex);   // held by the writer's burst — free it or HTTP deadlocks
     vTaskDelete(nullptr);
 }
 
@@ -715,6 +728,7 @@ static void sdWriterTask(void*) {
     for (;;) {
         bool flush_due = (millis() - last_flush >= SD_FLUSH_MS);
 
+        xSemaphoreTake(g_sd_mutex, portMAX_DELAY);
         bool did = sdDrainStream(g_sd_raw, flush_due, buf);
         did     |= sdDrainStream(g_sd_json, flush_due, buf);
         g_sd.kb_written = (uint32_t)(sd_total_bytes >> 10);
@@ -731,6 +745,7 @@ static void sdWriterTask(void*) {
             last_free = millis();
             sdUpdateFree();
         }
+        xSemaphoreGive(g_sd_mutex);
 
         if (!did) vTaskDelay(pdMS_TO_TICKS(20));   // both rings empty — yield
     }
@@ -749,7 +764,8 @@ static bool sdInitRing(SdStream& s) {
 // latch state="error" with a fail_op right here — sdFail() self-deletes the
 // calling task, so it must never run on the setup/loop task.
 static void sdInit() {
-    if (!sdInitRing(g_sd_raw) || !sdInitRing(g_sd_json)) {
+    g_sd_mutex = xSemaphoreCreateMutex();
+    if (!g_sd_mutex || !sdInitRing(g_sd_raw) || !sdInitRing(g_sd_json)) {
         g_sd.fail_op = "ring_alloc";
         g_sd.state   = "error";
         return;
