@@ -22,7 +22,7 @@ no idle state, so file access must coexist with active logging.
 
 All served by the existing `WebServer` on port 80, unauthenticated like `/json`
 and `/config`. Session routes are registered with `UriBraces`
-(`/sd/session/{}`), which the ESP32 Arduino `WebServer` supports.
+(`/sd/sessions/{}`), which the ESP32 Arduino `WebServer` supports.
 
 ### `GET /sd/status`
 
@@ -32,7 +32,7 @@ diagnostic fields evicted from `/json`: `raw_part`, `json_part`,
 `recoveries`, `fail_op`, `fail_kb`. Always answers `200`, whatever the card
 state (that's the point — it reports it).
 
-### `GET /sd/list`
+### `GET /sd/sessions`
 
 Session inventory: `sessions` array of
 `{ id, active, bytes, files: [{ name, size }] }`, built from one
@@ -40,7 +40,7 @@ mutex-guarded directory walk.
 
 Returns `503` when `state` is `no_card`/`error`/dormant.
 
-### `GET /sd/session/{id}`
+### `GET /sd/sessions/{id}`
 
 Streams the entire session directory as an **uncompressed USTAR tar**
 (`application/x-tar`, `Content-Disposition: attachment; filename=sNNNNN.tar`).
@@ -61,7 +61,7 @@ is not included — inherent to snapshotting a live session.
 
 `404` if the session directory does not exist; `503` as above.
 
-### `DELETE /sd/session/{id}`
+### `DELETE /sd/sessions/{id}`
 
 Recursively removes `/sNNNNN` using the existing session-directory removal
 helper (same code path as the free-space reaper). Responses:
@@ -108,7 +108,7 @@ Extend `embedded/esp32-s3/device-test.py` with a bench stage (requires a card
 in the device):
 
 1. `GET /sd/status` — `state == "logging"`, sane counters.
-2. `GET /sd/list` — valid shape, active session present.
+2. `GET /sd/sessions` — valid shape, active session present.
 3. Download a session tar — verify member names/sizes against the listing.
 4. `DELETE` an old session — gone from the next listing, `free_mb` updated.
 5. `DELETE` the active session — refused with `409`.

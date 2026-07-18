@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** HTTP endpoints on the ESP32-S3 firmware to list (`/sd/status`, `/sd/list`), download (`GET /sd/session/{id}` as tar), and delete (`DELETE /sd/session/{id}`) SD-card session logs while logging continues, per the approved spec `docs/superpowers/specs/2026-07-18-sd-file-api-design.md`.
+**Goal:** HTTP endpoints on the ESP32-S3 firmware to list (`/sd/status`, `/sd/sessions`), download (`GET /sd/sessions/{id}` as tar), and delete (`DELETE /sd/sessions/{id}`) SD-card session logs while logging continues, per the approved spec `docs/superpowers/specs/2026-07-18-sd-file-api-design.md`.
 
 **Architecture:** All firmware changes live in `embedded/esp32-s3/src/main.cpp` (the project keeps all firmware logic in this one file — follow that). A new FreeRTOS mutex serializes SD/SPI access between the existing writer task (core 0) and the new HTTP handlers (loop task, core 1). Tar downloads stream a USTAR archive chunk-by-chunk, taking the mutex per chunk so a multi-MB download never starves the writer. `/json` sheds five diagnostic `sd` fields, which move to `/sd/status`.
 
@@ -125,7 +125,7 @@ git commit -m "Add SD mutex serializing writer task and HTTP access"
 
 ---
 
-### Task 2: `GET /sd/status` and `GET /sd/list`
+### Task 2: `GET /sd/status` and `GET /sd/sessions`
 
 **Files:**
 - Modify: `embedded/esp32-s3/src/main.cpp` (HTTP handlers section, after `handleRoot()` ~line 1625; registration in `setup()` ~line 2205)
@@ -142,7 +142,7 @@ In the HTTP handlers section, insert after `handleRoot()` (search for `void hand
 #if defined(HAS_SD)
 // ── SD file access API ────────────────────────────────────────────────────────
 // See docs/superpowers/specs/2026-07-18-sd-file-api-design.md. /sd/status is
-// in-RAM only (poll freely); /sd/list, /sd/session/{id} GET (tar) and DELETE
+// in-RAM only (poll freely); /sd/sessions, /sd/sessions/{id} GET (tar) and DELETE
 // touch the card under g_sd_mutex and answer 503 unless a session is logging.
 
 static void sdSendError(int code, const char* msg) {
@@ -227,7 +227,7 @@ In `setup()`, after `server.on("/config", handleConfig);` (search for that exact
 ```cpp
 #if defined(HAS_SD)
     server.on("/sd/status", HTTP_GET, handleSdStatus);
-    server.on("/sd/list",   HTTP_GET, handleSdList);
+    server.on("/sd/sessions",   HTTP_GET, handleSdList);
 #endif
 ```
 
@@ -242,7 +242,7 @@ Expected: `SUCCESS`. Also build a non-SD board to prove the `#if` guards hold: `
 
 ```bash
 git add embedded/esp32-s3/src/main.cpp
-git commit -m "Add /sd/status and /sd/list endpoints"
+git commit -m "Add /sd/status and /sd/sessions endpoints"
 ```
 
 ---
@@ -308,7 +308,7 @@ git commit -m "Move SD diagnostics from /json to /sd/status"
 
 ---
 
-### Task 4: `GET /sd/session/{id}` — streamed USTAR tar download
+### Task 4: `GET /sd/sessions/{id}` — streamed USTAR tar download
 
 **Files:**
 - Modify: `embedded/esp32-s3/src/main.cpp` (extend the Task 2 `HAS_SD` handler block; add includes; register route)
@@ -390,7 +390,7 @@ static bool sdParseIdArg(uint32_t& id) {
     return end && *end == '\0';
 }
 
-// GET /sd/session/{id} — the whole session directory as one uncompressed
+// GET /sd/sessions/{id} — the whole session directory as one uncompressed
 // USTAR stream. Member sizes freeze at header time (the walk below), so the
 // active session yields a consistent snapshot ≤~1 s stale; if a member reads
 // short of its frozen size the remainder is zero-padded so the archive stays
@@ -475,7 +475,7 @@ static void handleSdSessionGet() {
 In `setup()`, inside the Task 2 `#if defined(HAS_SD)` registration block, add:
 
 ```cpp
-    server.on(UriBraces("/sd/session/{}"), HTTP_GET, handleSdSessionGet);
+    server.on(UriBraces("/sd/sessions/{}"), HTTP_GET, handleSdSessionGet);
 ```
 
 - [ ] **Step 4: Build**
@@ -487,12 +487,12 @@ Expected: `SUCCESS`.
 
 ```bash
 git add embedded/esp32-s3/src/main.cpp
-git commit -m "Add GET /sd/session/{id} streaming tar download"
+git commit -m "Add GET /sd/sessions/{id} streaming tar download"
 ```
 
 ---
 
-### Task 5: `DELETE /sd/session/{id}`
+### Task 5: `DELETE /sd/sessions/{id}`
 
 **Files:**
 - Modify: `embedded/esp32-s3/src/main.cpp` (extend the `HAS_SD` handler block; register route)
@@ -506,7 +506,7 @@ git commit -m "Add GET /sd/session/{id} streaming tar download"
 After `handleSdSessionGet()` in the `HAS_SD` handler block, add:
 
 ```cpp
-// DELETE /sd/session/{id} — recursively remove a session directory via the
+// DELETE /sd/sessions/{id} — recursively remove a session directory via the
 // reaper's helper. The active session is never deletable. free_mb is
 // recomputed here (usedBytes() is slow, but deletes are rare) so the response
 // reflects the space just reclaimed.
@@ -542,7 +542,7 @@ static void handleSdSessionDelete() {
 In the `setup()` registration block:
 
 ```cpp
-    server.on(UriBraces("/sd/session/{}"), HTTP_DELETE, handleSdSessionDelete);
+    server.on(UriBraces("/sd/sessions/{}"), HTTP_DELETE, handleSdSessionDelete);
 ```
 
 - [ ] **Step 3: Build**
@@ -554,7 +554,7 @@ Expected: `SUCCESS`. Rebuild the non-SD board too: `pio run -e lilygo_t2can` →
 
 ```bash
 git add embedded/esp32-s3/src/main.cpp
-git commit -m "Add DELETE /sd/session/{id}"
+git commit -m "Add DELETE /sd/sessions/{id}"
 ```
 
 ---
@@ -674,8 +674,8 @@ def stage_sd_files(args, sd_ok: bool) -> None:
 
     kb0 = json.loads(http_get(args.host, "/sd/status")[2]).get("kb_written", 0)
 
-    status, _, body = http_get(args.host, "/sd/list")
-    if not check(status == 200, "GET /sd/list", f"HTTP {status}"):
+    status, _, body = http_get(args.host, "/sd/sessions")
+    if not check(status == 200, "GET /sd/sessions", f"HTTP {status}"):
         return
     sessions = json.loads(body).get("sessions", [])
     active = [s for s in sessions if s.get("active")]
@@ -690,9 +690,9 @@ def stage_sd_files(args, sd_ok: bool) -> None:
     # archive, expected members. Sizes may exceed the earlier listing (the
     # session is live) — internal consistency is what's checked.
     sid = active[0]["id"]
-    status, hdrs, body = http_request(args.host, f"/sd/session/{sid}",
+    status, hdrs, body = http_request(args.host, f"/sd/sessions/{sid}",
                                       timeout=120)
-    if check(status == 200, f"GET /sd/session/{sid}", f"HTTP {status}"):
+    if check(status == 200, f"GET /sd/sessions/{sid}", f"HTTP {status}"):
         ctype = hdrs.get("Content-Type", "")
         check(ctype.startswith("application/x-tar"), "tar content-type", ctype)
         clen = int(hdrs.get("Content-Length", -1))
@@ -712,10 +712,10 @@ def stage_sd_files(args, sd_ok: bool) -> None:
             check(False, "tar parses", str(e))
 
     # Refusals.
-    status, _, _ = http_request(args.host, f"/sd/session/{sid}",
+    status, _, _ = http_request(args.host, f"/sd/sessions/{sid}",
                                 method="DELETE")
     check(status == 409, "DELETE active session refused", f"HTTP {status}")
-    status, _, _ = http_request(args.host, "/sd/session/99999",
+    status, _, _ = http_request(args.host, "/sd/sessions/99999",
                                 method="DELETE")
     check(status == 404, "DELETE missing session -> 404", f"HTTP {status}")
 
@@ -728,12 +728,12 @@ def stage_sd_files(args, sd_ok: bool) -> None:
         report("SKIP", "delete test: no non-active session on the card")
     else:
         victim = others[0]
-        status, _, body = http_request(args.host, f"/sd/session/{victim}",
+        status, _, body = http_request(args.host, f"/sd/sessions/{victim}",
                                        method="DELETE")
-        if check(status == 200, f"DELETE /sd/session/{victim}",
+        if check(status == 200, f"DELETE /sd/sessions/{victim}",
                  f"HTTP {status}"):
             check("free_mb" in json.loads(body), "delete reports free_mb")
-        _, _, body = http_get(args.host, "/sd/list")
+        _, _, body = http_get(args.host, "/sd/sessions")
         remaining = [s["id"] for s in json.loads(body).get("sessions", [])]
         check(victim not in remaining, "deleted session gone from listing",
               f"remaining={remaining}")
@@ -755,7 +755,7 @@ Next to the existing `--sd-soak` argument (search for `--sd-soak`), add:
 
 ```python
     ap.add_argument("--sd-delete-test", action="store_true",
-                    help="exercise DELETE /sd/session/{id} by removing the "
+                    help="exercise DELETE /sd/sessions/{id} by removing the "
                          "oldest non-active session (destructive)")
 ```
 
@@ -793,8 +793,8 @@ In the `## Endpoints` table (search for `| \`http://tractor.local/json\` |`), ad
 
 ```markdown
 | `http://tractor.local/sd/status` | SD logging status + diagnostics (RejsaCAN only) |
-| `http://tractor.local/sd/list` | SD session/file inventory as JSON |
-| `http://tractor.local/sd/session/N` | `GET` whole session as a `.tar`; `DELETE` removes it |
+| `http://tractor.local/sd/sessions` | SD session/file inventory as JSON |
+| `http://tractor.local/sd/sessions/N` | `GET` whole session as a `.tar`; `DELETE` removes it |
 ```
 
 - [ ] **Step 2: Document the API in the SD section**
@@ -825,9 +825,9 @@ writer; the PSRAM rings absorb the brief stalls):
 
 ```bash
 curl http://tractor.local/sd/status                    # logging state + diagnostics
-curl http://tractor.local/sd/list                      # sessions and their files
-curl -O -J http://tractor.local/sd/session/7           # download session 7 → s00007.tar
-curl -X DELETE http://tractor.local/sd/session/7       # delete session 7
+curl http://tractor.local/sd/sessions                      # sessions and their files
+curl -O -J http://tractor.local/sd/sessions/7           # download session 7 → s00007.tar
+curl -X DELETE http://tractor.local/sd/sessions/7       # delete session 7
 ```
 
 Downloads are uncompressed USTAR archives with an exact `Content-Length`.
