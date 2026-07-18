@@ -1847,6 +1847,36 @@ static void handleSdSessionGet() {
     memset(buf, 0, 1024);
     sdClientWrite(client, buf, 1024);   // end-of-archive trailer
 }
+
+// DELETE /sd/session/{id} — recursively remove a session directory via the
+// reaper's helper. The active session is never deletable. free_mb is
+// recomputed here (usedBytes() is slow, but deletes are rare) so the response
+// reflects the space just reclaimed.
+static void handleSdSessionDelete() {
+    if (!g_sd_active) { sdSendError(503, "sd_unavailable"); return; }
+    uint32_t id;
+    if (!sdParseIdArg(id)) { sdSendError(404, "not_found"); return; }
+    if (id == g_sd.session) { sdSendError(409, "active_session"); return; }
+
+    char dir[16];
+    snprintf(dir, sizeof dir, "/s%05lu", (unsigned long)id);
+
+    SdLock lock;
+    File d = SD.open(dir);
+    if (!d || !d.isDirectory()) {
+        if (d) d.close();
+        sdSendError(404, "not_found");
+        return;
+    }
+    d.close();
+    if (!sdRemoveSessionDir(dir)) { sdSendError(500, "remove_failed"); return; }
+
+    uint64_t total = SD.totalBytes();
+    uint64_t used  = SD.usedBytes();
+    g_sd.free_mb = (uint32_t)((total > used ? total - used : 0) >> 20);
+    server.send(200, "application/json",
+                String("{\"free_mb\":") + g_sd.free_mb + "}");
+}
 #endif  // HAS_SD
 
 void handleNotFound() {
@@ -2432,6 +2462,7 @@ void setup() {
     server.on("/sd/status", HTTP_GET, handleSdStatus);
     server.on("/sd/list",   HTTP_GET, handleSdList);
     server.on(UriBraces("/sd/session/{}"), HTTP_GET, handleSdSessionGet);
+    server.on(UriBraces("/sd/session/{}"), HTTP_DELETE, handleSdSessionDelete);
 #endif
     server.onNotFound(handleNotFound);
     server.begin();
