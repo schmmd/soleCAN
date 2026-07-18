@@ -317,8 +317,8 @@ via mDNS.
 | `tractor.local:28600` | socketcand TCP stream of raw CAN frames |
 | `/dev/cu.usbmodem*` (USB CDC) | SLCAN stream of raw CAN frames |
 | `http://tractor.local/sd/status` | SD logging status + diagnostics (RejsaCAN only) |
-| `http://tractor.local/sd/list` | SD session/file inventory as JSON |
-| `http://tractor.local/sd/session/N` | `GET` whole session as a `.tar`; `DELETE` removes it |
+| `http://tractor.local/sd/sessions` | SD session/file inventory as JSON |
+| `http://tractor.local/sd/sessions/N` | `GET` whole session as a `.tar`; `DELETE` removes it |
 
 ### Consuming raw frames with `python-can`
 
@@ -399,10 +399,10 @@ over HTTP while logging continues (SD access is mutex-shared with the
 writer; the PSRAM rings absorb the brief stalls):
 
 ```bash
-curl http://tractor.local/sd/status                    # logging state + diagnostics
-curl http://tractor.local/sd/list                      # sessions and their files
-curl -O -J http://tractor.local/sd/session/7           # download session 7 → s00007.tar
-curl -X DELETE http://tractor.local/sd/session/7       # delete session 7
+curl http://tractor.local/sd/status               # logging state + diagnostics
+curl http://tractor.local/sd/sessions             # sessions and their files
+curl -O -J http://tractor.local/sd/sessions/7     # download session 7 → s00007.tar
+curl -X DELETE http://tractor.local/sd/sessions/7 # delete session 7
 ```
 
 Downloads are uncompressed USTAR archives with an exact `Content-Length`.
@@ -412,7 +412,7 @@ session by up to ~1 s (the writer's flush cadence). If the card errors
 mid-transfer the stream is truncated and the socket closed, so the client
 detects a short read against `Content-Length` rather than a silently
 zero-filled file. Deleting the active
-session is refused (`409`); `/sd/list` and `/sd/session/N` answer `503` when
+session is refused (`409`); `/sd/sessions` and `/sd/sessions/N` answer `503` when
 no card was present at boot or logging has latched an error, while
 `/sd/status` always answers `200` and reports that state.
 

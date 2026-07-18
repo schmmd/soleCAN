@@ -1673,11 +1673,11 @@ void handleRoot() {
 #if defined(HAS_SD)
 // ── SD file access API ────────────────────────────────────────────────────────
 // See docs/superpowers/specs/2026-07-18-sd-file-api-design.md. /sd/status is
-// in-RAM only (poll freely); /sd/list, /sd/session/{id} GET (tar) and DELETE
+// in-RAM only (poll freely); /sd/sessions, /sd/sessions/{id} GET (tar) and DELETE
 // touch the card under g_sd_mutex and answer 503 unless a session is logging.
 
-// Minimal built-in browser UI at /sd: shows /sd/status and the /sd/list
-// sessions, each with a download link (its tar). Self-contained — no embedded
+// Minimal built-in browser UI at /sd: shows /sd/status and the /sd/sessions
+// inventory, each session with a download link (its tar). Self-contained — no embedded
 // asset, no external resources — so it costs only this string in flash. It
 // fetches the two JSON endpoints once on load (Refresh re-fetches); it does not
 // poll, so an open tab won't keep the board awake past the download.
@@ -1716,11 +1716,11 @@ async function loadStatus(){var el=document.getElementById('status');
   el.textContent=t;el.className='';
  }catch(e){el.textContent='status: '+e.message;el.className='muted'}}
 async function loadList(){var tb=document.getElementById('rows'),err=document.getElementById('err');
- try{var d=await jget('/sd/list');err.textContent='';
+ try{var d=await jget('/sd/sessions');err.textContent='';
   tb.innerHTML=(d.sessions||[]).sort(function(a,b){return b.id-a.id}).map(function(s){
    return '<tr><td>'+pad(s.id)+(s.active?' <span class=muted>(active)</span>':'')+
     '<td class=num>'+((s.files||[]).length)+'<td class=num>'+human(s.bytes)+
-    '<td><a href="/sd/session/'+s.id+'" download>'+pad(s.id)+'.tar</a>';
+    '<td><a href="/sd/sessions/'+s.id+'" download>'+pad(s.id)+'.tar</a>';
   }).join('')||'<tr><td colspan=4 class=muted>No sessions</td></tr>';
  }catch(e){err.textContent=e.message}}
 function load(){loadStatus();loadList()}
@@ -1871,7 +1871,7 @@ static bool sdParseIdArg(uint32_t& id) {
 // the sole CAN consumer.
 static void canServiceTick();
 
-// GET /sd/session/{id} — the whole session directory as one uncompressed
+// GET /sd/sessions/{id} — the whole session directory as one uncompressed
 // USTAR stream. Member sizes freeze at header time (the walk below), so the
 // active session yields a consistent snapshot ≤~1 s stale. If a member reads
 // short of its frozen size (read error / file gone), the stream is truncated
@@ -1962,7 +1962,7 @@ static void handleSdSessionGet() {
     sdClientWrite(client, buf, 1024);   // end-of-archive trailer
 }
 
-// DELETE /sd/session/{id} — recursively remove a session directory via the
+// DELETE /sd/sessions/{id} — recursively remove a session directory via the
 // reaper's helper. The active session is never deletable. free_mb is
 // recomputed here (usedBytes() is slow, but deletes are rare) so the response
 // reflects the space just reclaimed.
@@ -2588,9 +2588,9 @@ void setup() {
 #if defined(HAS_SD)
     server.on("/sd",        HTTP_GET, handleSdIndex);
     server.on("/sd/status", HTTP_GET, handleSdStatus);
-    server.on("/sd/list",   HTTP_GET, handleSdList);
-    server.on(UriBraces("/sd/session/{}"), HTTP_GET, handleSdSessionGet);
-    server.on(UriBraces("/sd/session/{}"), HTTP_DELETE, handleSdSessionDelete);
+    server.on("/sd/sessions",   HTTP_GET, handleSdList);
+    server.on(UriBraces("/sd/sessions/{}"), HTTP_GET, handleSdSessionGet);
+    server.on(UriBraces("/sd/sessions/{}"), HTTP_DELETE, handleSdSessionDelete);
 #endif
     server.onNotFound(handleNotFound);
     server.begin();
