@@ -1676,6 +1676,63 @@ void handleRoot() {
 // in-RAM only (poll freely); /sd/list, /sd/session/{id} GET (tar) and DELETE
 // touch the card under g_sd_mutex and answer 503 unless a session is logging.
 
+// Minimal built-in browser UI at /sd: shows /sd/status and the /sd/list
+// sessions, each with a download link (its tar). Self-contained — no embedded
+// asset, no external resources — so it costs only this string in flash. It
+// fetches the two JSON endpoints once on load (Refresh re-fetches); it does not
+// poll, so an open tab won't keep the board awake past the download.
+static const char SD_INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
+<meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>SD sessions</title>
+<style>
+ body{font:14px/1.5 system-ui,sans-serif;margin:1rem;max-width:760px}
+ h1{font-size:1.1rem}
+ #status{margin:.5rem 0;padding:.5rem .7rem;border:1px solid #ccc;border-radius:6px}
+ table{border-collapse:collapse;width:100%}
+ th,td{text-align:left;padding:.35rem .5rem;border-bottom:1px solid #ddd}
+ td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+ .muted{color:#777}
+ button{font:inherit;padding:.2rem .7rem}
+ @media (prefers-color-scheme:dark){
+  body{background:#111;color:#ddd}#status{border-color:#444}
+  th,td{border-color:#333}a{color:#6bf}}
+</style>
+<h1>SD sessions</h1>
+<div id=status class=muted>Loading&hellip;</div>
+<p><button onclick=load()>Refresh</button> <span id=err class=muted></span></p>
+<table><thead><tr><th>Session<th class=num>Files<th class=num>Size<th>Download</thead>
+<tbody id=rows></tbody></table>
+<script>
+function mb(kb){return((kb||0)/1024).toFixed(1)+' MB'}
+function human(b){if(b==null)return'';var u=['B','KB','MB','GB'],i=0;b=+b;
+ while(b>=1024&&i<u.length-1){b/=1024;i++}return b.toFixed(i?1:0)+' '+u[i]}
+function pad(n){return 's'+String(n).padStart(5,'0')}
+async function jget(u){var r=await fetch(u);if(!r.ok)throw Error(u+' → '+r.status);return r.json()}
+async function loadStatus(){var el=document.getElementById('status');
+ try{var s=await jget('/sd/status'),t=s.state;
+  if(s.state==='logging')t='logging '+pad(s.session)+' · '+mb(s.kb_written)+
+   ' written · '+human((s.free_mb||0)*1048576)+' free';
+  el.textContent=t;el.className='';
+ }catch(e){el.textContent='status: '+e.message;el.className='muted'}}
+async function loadList(){var tb=document.getElementById('rows'),err=document.getElementById('err');
+ try{var d=await jget('/sd/list');err.textContent='';
+  tb.innerHTML=(d.sessions||[]).sort(function(a,b){return b.id-a.id}).map(function(s){
+   return '<tr><td>'+pad(s.id)+(s.active?' <span class=muted>(active)</span>':'')+
+    '<td class=num>'+((s.files||[]).length)+'<td class=num>'+human(s.bytes)+
+    '<td><a href="/sd/session/'+s.id+'" download>'+pad(s.id)+'.tar</a>';
+  }).join('')||'<tr><td colspan=4 class=muted>No sessions</td></tr>';
+ }catch(e){err.textContent=e.message}}
+function load(){loadStatus();loadList()}
+load();
+</script>
+)HTML";
+
+static void handleSdIndex() {
+    noteHttpActivity();
+    server.send_P(200, "text/html", SD_INDEX_HTML);
+}
+
 static void sdSendError(int code, const char* msg) {
     server.send(code, "application/json",
                 String("{\"error\":\"") + msg + "\"}");
@@ -2529,6 +2586,7 @@ void setup() {
     server.on("/json",   handleJson);
     server.on("/config", handleConfig);
 #if defined(HAS_SD)
+    server.on("/sd",        HTTP_GET, handleSdIndex);
     server.on("/sd/status", HTTP_GET, handleSdStatus);
     server.on("/sd/list",   HTTP_GET, handleSdList);
     server.on(UriBraces("/sd/session/{}"), HTTP_GET, handleSdSessionGet);
