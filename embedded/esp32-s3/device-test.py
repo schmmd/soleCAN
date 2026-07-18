@@ -411,9 +411,14 @@ def stage_sd_files(args, sd_ok: bool) -> None:
     try:
         kb0 = json.loads(http_get(args.host, "/sd/status")[2]).get("kb_written", 0)
     except Exception as e:  # noqa: BLE001
-        kb0 = 0
+        kb0 = None   # sentinel: baseline unsampled, skip the final advance check
+        report("WARN", f"could not sample kb_written baseline: {e}")
 
-    status, _, body = http_get(args.host, "/sd/list")
+    try:
+        status, _, body = http_get(args.host, "/sd/list")
+    except Exception as e:  # noqa: BLE001
+        check(False, "GET /sd/list", f"transport error: {e}")
+        return
     if not check(status == 200, "GET /sd/list", f"HTTP {status}"):
         return
     try:
@@ -433,12 +438,20 @@ def stage_sd_files(args, sd_ok: bool) -> None:
     # archive, expected members. Sizes may exceed the earlier listing (the
     # session is live) — internal consistency is what's checked.
     sid = active[0]["id"]
-    status, hdrs, body = http_request(args.host, f"/sd/session/{sid}",
-                                      timeout=120)
-    if check(status == 200, f"GET /sd/session/{sid}", f"HTTP {status}"):
+    try:
+        status, hdrs, body = http_request(args.host, f"/sd/session/{sid}",
+                                          timeout=120)
+    except Exception as e:  # noqa: BLE001
+        status, hdrs, body = None, {}, b""
+        check(False, f"GET /sd/session/{sid}", f"transport error: {e}")
+    if status is not None and check(status == 200, f"GET /sd/session/{sid}",
+                                    f"HTTP {status}"):
         ctype = hdrs.get("Content-Type", "")
         check(ctype.startswith("application/x-tar"), "tar content-type", ctype)
-        clen = int(hdrs.get("Content-Length", -1))
+        try:
+            clen = int(hdrs.get("Content-Length", -1))
+        except (TypeError, ValueError):
+            clen = -1
         check(len(body) == clen, "body matches Content-Length",
               f"{len(body)} vs {clen}")
         try:
@@ -455,12 +468,18 @@ def stage_sd_files(args, sd_ok: bool) -> None:
             check(False, "tar parses", str(e))
 
     # Refusals.
-    status, _, _ = http_request(args.host, f"/sd/session/{sid}",
-                                method="DELETE")
-    check(status == 409, "DELETE active session refused", f"HTTP {status}")
-    status, _, _ = http_request(args.host, "/sd/session/99999",
-                                method="DELETE")
-    check(status == 404, "DELETE missing session -> 404", f"HTTP {status}")
+    try:
+        status, _, _ = http_request(args.host, f"/sd/session/{sid}",
+                                    method="DELETE")
+        check(status == 409, "DELETE active session refused", f"HTTP {status}")
+    except Exception as e:  # noqa: BLE001
+        check(False, "DELETE active session refused", f"transport error: {e}")
+    try:
+        status, _, _ = http_request(args.host, "/sd/session/99999",
+                                    method="DELETE")
+        check(status == 404, "DELETE missing session -> 404", f"HTTP {status}")
+    except Exception as e:  # noqa: BLE001
+        check(False, "DELETE missing session -> 404", f"transport error: {e}")
 
     # Destructive delete of the oldest non-active session — opt-in.
     others = sorted(s["id"] for s in sessions if not s.get("active"))
@@ -502,8 +521,11 @@ def stage_sd_files(args, sd_ok: bool) -> None:
     if st2 is not None:
         check(st2.get("state") == "logging", "still logging after file ops",
               f"state={st2.get('state')}")
-        check(st2.get("kb_written", 0) > kb0, "kb_written advanced",
-              f"{kb0} -> {st2.get('kb_written')}")
+        if kb0 is None:
+            report("SKIP", "kb_written advanced — baseline was not sampled")
+        else:
+            check(st2.get("kb_written", 0) > kb0, "kb_written advanced",
+                  f"{kb0} -> {st2.get('kb_written')}")
 
 
 def stage_mdns(args) -> None:
