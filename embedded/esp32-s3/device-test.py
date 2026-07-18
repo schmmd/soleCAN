@@ -63,9 +63,11 @@ Exit code 0 when every executed check passes, 1 otherwise.
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import socket
 import sys
+import tarfile
 import threading
 import time
 import urllib.error
@@ -157,14 +159,20 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 OPENER = urllib.request.build_opener(_NoRedirect)
 
 
-def http_get(host: str, path: str, timeout: float = 6.0):
+def http_request(host: str, path: str, method: str = "GET",
+                 timeout: float = 6.0):
     """Returns (status, headers, body) without following redirects."""
     url = f"http://{host}:{HTTP_PORT}{path}"
+    req = urllib.request.Request(url, method=method)
     try:
-        with OPENER.open(url, timeout=timeout) as resp:
+        with OPENER.open(req, timeout=timeout) as resp:
             return resp.status, dict(resp.headers), resp.read()
     except urllib.error.HTTPError as e:
         return e.code, dict(e.headers), e.read()
+
+
+def http_get(host: str, path: str, timeout: float = 6.0):
+    return http_request(host, path, timeout=timeout)
 
 
 def fetch_json(host: str, retries: int = 2):
@@ -327,7 +335,10 @@ def stage_http(args) -> dict | None:
     return j
 
 
-def stage_sd(args, j: dict) -> None:
+def stage_sd(args, j: dict) -> bool:
+    """SD logging health. Returns True when state == logging (gates the
+    file-API stage). Diagnostics that used to ride along in /json's sd
+    object (fail_op, recoveries) now come from /sd/status."""
     section("SD logging")
     sd = j.get("sd")
     if sd is None:
@@ -336,11 +347,19 @@ def stage_sd(args, j: dict) -> None:
                   "no 'sd' object in /json — is this an SD-capable build?")
         else:
             report("SKIP", "no 'sd' object in /json (board without microSD)")
-        return
+        return False
+
+    try:
+        status, _, body = http_get(args.host, "/sd/status")
+        st = json.loads(body) if status == 200 else {}
+    except Exception as e:  # noqa: BLE001 — any transport error fails the check
+        status, st = 0, {}
+    if not check(status == 200, "GET /sd/status", f"HTTP {status}"):
+        st = {}
 
     state = sd.get("state")
     if state == "error":
-        op = sd.get("fail_op")
+        op = st.get("fail_op")
         if op in ("ring_alloc", "start_session"):
             hint = ("failed during boot init, before any writes — "
                     "check the card's FAT formatting"
@@ -351,8 +370,8 @@ def stage_sd(args, j: dict) -> None:
                     "reseat or replace the card and reboot")
         check(False, "SD logging healthy",
               f"latched error: fail_op={op!r} after "
-              f"{sd.get('fail_kb', 0)} KB — {hint}")
-        return
+              f"{st.get('fail_kb', 0)} KB — {hint}")
+        return False
     if state == "no_card":
         if args.expect_sd:
             check(False, "card mounted", "state=no_card — insert a card and "
@@ -360,7 +379,7 @@ def stage_sd(args, j: dict) -> None:
         else:
             report("WARN", "no card at boot — session logging dormant "
                            "(pass --expect-sd to make this a failure)")
-        return
+        return False
 
     check(state == "logging", "SD session logging", f"state={state}")
     check(sd.get("session", 0) >= 1, "session directory open",
@@ -374,10 +393,139 @@ def stage_sd(args, j: dict) -> None:
     drops = sd.get("raw_dropped", 0) + sd.get("json_dropped", 0)
     check(drops == 0, "no ring-buffer drops",
           f"raw={sd.get('raw_dropped', 0)} json={sd.get('json_dropped', 0)}")
-    recoveries = sd.get("recoveries", 0)
+    recoveries = st.get("recoveries", 0)
     if recoveries:
         report("WARN", f"{recoveries} remount recoveries this boot — "
                        "logging survived, but the card link is glitching")
+    return state == "logging"
+
+
+def stage_sd_files(args, sd_ok: bool) -> None:
+    """Exercise the SD file API: list, tar download of the active session,
+    refusal cases, optional destructive delete, and logging-survives check."""
+    section("SD file API")
+    if not sd_ok:
+        report("SKIP", "SD logging not healthy — file API not exercised")
+        return
+
+    try:
+        kb0 = json.loads(http_get(args.host, "/sd/status")[2]).get("kb_written", 0)
+    except Exception as e:  # noqa: BLE001
+        kb0 = None   # sentinel: baseline unsampled, skip the final advance check
+        report("WARN", f"could not sample kb_written baseline: {e}")
+
+    try:
+        status, _, body = http_get(args.host, "/sd/sessions")
+    except Exception as e:  # noqa: BLE001
+        check(False, "GET /sd/sessions", f"transport error: {e}")
+        return
+    if not check(status == 200, "GET /sd/sessions", f"HTTP {status}"):
+        return
+    try:
+        sessions = json.loads(body).get("sessions", [])
+    except Exception as e:  # noqa: BLE001
+        check(False, "GET /sd/sessions", f"unparseable body: {e}")
+        return
+    active = [s for s in sessions if s.get("active")]
+    if not check(len(active) == 1, "exactly one active session",
+                 f"{len(active)} active of {len(sessions)} listed"):
+        return
+    check(all(f.get("name") and f.get("size") is not None
+              for s in sessions for f in s.get("files", [])),
+          "listing entries carry name+size")
+
+    # Tar download of the active session: exact Content-Length, parseable
+    # archive, expected members. Sizes may exceed the earlier listing (the
+    # session is live) — internal consistency is what's checked.
+    sid = active[0]["id"]
+    try:
+        status, hdrs, body = http_request(args.host, f"/sd/sessions/{sid}",
+                                          timeout=120)
+    except Exception as e:  # noqa: BLE001
+        status, hdrs, body = None, {}, b""
+        check(False, f"GET /sd/sessions/{sid}", f"transport error: {e}")
+    if status is not None and check(status == 200, f"GET /sd/sessions/{sid}",
+                                    f"HTTP {status}"):
+        ctype = hdrs.get("Content-Type", "")
+        check(ctype.startswith("application/x-tar"), "tar content-type", ctype)
+        try:
+            clen = int(hdrs.get("Content-Length", -1))
+        except (TypeError, ValueError):
+            clen = -1
+        check(len(body) == clen, "body matches Content-Length",
+              f"{len(body)} vs {clen}")
+        try:
+            tf = tarfile.open(fileobj=io.BytesIO(body))
+            names = tf.getnames()
+            check(f"s{sid:05d}/can_00.asc" in names, "raw part in tar",
+                  ", ".join(names[:4]))
+            jsonl = f"s{sid:05d}/data_00.jsonl"
+            if check(jsonl in names, "json part in tar"):
+                data = tf.extractfile(jsonl).read()
+                check(data.lstrip()[:1] == b"{", "jsonl member looks like JSON",
+                      repr(data[:20]))
+        except tarfile.TarError as e:
+            check(False, "tar parses", str(e))
+
+    # Refusals.
+    try:
+        status, _, _ = http_request(args.host, f"/sd/sessions/{sid}",
+                                    method="DELETE")
+        check(status == 409, "DELETE active session refused", f"HTTP {status}")
+    except Exception as e:  # noqa: BLE001
+        check(False, "DELETE active session refused", f"transport error: {e}")
+    try:
+        status, _, _ = http_request(args.host, "/sd/sessions/99999",
+                                    method="DELETE")
+        check(status == 404, "DELETE missing session -> 404", f"HTTP {status}")
+    except Exception as e:  # noqa: BLE001
+        check(False, "DELETE missing session -> 404", f"transport error: {e}")
+
+    # Destructive delete of the oldest non-active session — opt-in.
+    others = sorted(s["id"] for s in sessions if not s.get("active"))
+    if not args.sd_delete_test:
+        report("SKIP", "delete test (pass --sd-delete-test to enable — "
+                       "removes the oldest session on the card)")
+    elif not others:
+        report("SKIP", "delete test: no non-active session on the card")
+    else:
+        victim = others[0]
+        status, _, body = http_request(args.host, f"/sd/sessions/{victim}",
+                                       method="DELETE")
+        if check(status == 200, f"DELETE /sd/sessions/{victim}",
+                 f"HTTP {status}"):
+            try:
+                resp_json = json.loads(body)
+            except Exception as e:  # noqa: BLE001
+                check(False, "delete reports free_mb", f"unparseable body: {e}")
+            else:
+                check("free_mb" in resp_json, "delete reports free_mb")
+        try:
+            _, _, body = http_get(args.host, "/sd/sessions")
+            remaining = [s["id"] for s in json.loads(body).get("sessions", [])]
+            check(victim not in remaining, "deleted session gone from listing",
+                  f"remaining={remaining}")
+        except Exception as e:  # noqa: BLE001
+            check(False, "deleted session gone from listing", f"GET /sd/sessions failed: {e}")
+
+    # Logging must have kept running through all of the above. kb_written
+    # advances every flush (~1 s) because the 1 Hz jsonl snapshot always has
+    # data, so give it a beat and compare.
+    time.sleep(2.5)
+    try:
+        st2 = json.loads(http_get(args.host, "/sd/status")[2])
+    except Exception as e:  # noqa: BLE001
+        check(False, "still logging after file ops", f"GET /sd/status failed: {e}")
+        st2 = None
+
+    if st2 is not None:
+        check(st2.get("state") == "logging", "still logging after file ops",
+              f"state={st2.get('state')}")
+        if kb0 is None:
+            report("SKIP", "kb_written advanced — baseline was not sampled")
+        else:
+            check(st2.get("kb_written", 0) > kb0, "kb_written advanced",
+                  f"{kb0} -> {st2.get('kb_written')}")
 
 
 def stage_mdns(args) -> None:
@@ -1085,6 +1233,9 @@ def main() -> int:
                     help="stream frames flat-out for this long during the "
                          "injection stage and verify the bytes land on the "
                          "card (30+ recommended; needs --inject-channel)")
+    ap.add_argument("--sd-delete-test", action="store_true",
+                    help="exercise DELETE /sd/sessions/{id} by removing the "
+                         "oldest non-active session (destructive)")
     ap.add_argument("--vin-tol", type=float, default=0.8,
                     help="VIN sense tolerance in volts")
     ap.add_argument("--channels", type=int, default=1,
@@ -1114,7 +1265,8 @@ def main() -> int:
     # Operator prompts run first so the human can leave once they're done;
     # every stage below is unattended.
     stage_interactive(args)
-    stage_sd(args, j)
+    sd_ok = stage_sd(args, j)
+    stage_sd_files(args, sd_ok)
     stage_mdns(args)
     stage_socketcand(args)
     stage_slcan(args)

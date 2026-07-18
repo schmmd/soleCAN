@@ -17,10 +17,12 @@
  */
 
 #include <Arduino.h>
+#include <vector>
 #include <WiFi.h>
 #include <ESPmDNS.h>
 #include <DNSServer.h>
 #include <WebServer.h>
+#include <uri/UriBraces.h>
 #include <ArduinoJson.h>
 #include <BLEDevice.h>
 #include <BLEServer.h>
@@ -353,6 +355,7 @@ Dm1State    g_dm1;
 uint32_t    g_frames_rx      = 0;   // total frames received
 uint32_t    g_frames_decoded = 0;   // frames matching a known PGN/source
 uint32_t    g_last_frame_ms  = 0;   // millis() at last received frame
+uint32_t    g_last_http_ms   = 0;   // millis() at last served HTTP request (defers quiet sleep)
 uint32_t    g_can_recoveries = 0;   // bus-off recoveries initiated since boot
 uint32_t    g_socketcand_tx_dropped = 0;   // frames dropped on full client TCP buffers
 bool        g_can_initialized = false;
@@ -455,6 +458,33 @@ static SdState g_sd;
 // in the ring buffers.
 volatile bool g_sd_active = false;
 
+// Serializes every SD/SPI touch between the writer task (core 0) and the
+// /sd/* HTTP handlers (loop task, core 1). The writer holds it per
+// drain/flush/roll burst; HTTP holds it per operation — and per read chunk
+// while streaming a tar — so a download stalls logging only briefly and the
+// PSRAM rings absorb it. sdFail() must release it before self-deleting.
+static SemaphoreHandle_t g_sd_mutex = nullptr;
+
+// Session id currently being streamed as a tar by handleSdSessionGet (0 = none;
+// session numbering starts at 1). The free-space reaper (sdScanSessions)
+// excludes it so it can never SD.remove() a file of a session an HTTP client has
+// open mid-download — illegal under FatFs FS_LOCK=0 and a volume-corruption
+// risk. Set/cleared only on the loop task; volatile because the writer task
+// reads it under the mutex.
+static volatile uint32_t g_sd_http_stream_session = 0;
+
+struct SdLock {
+    SdLock()  { xSemaphoreTake(g_sd_mutex, portMAX_DELAY); }
+    ~SdLock() { xSemaphoreGive(g_sd_mutex); }
+};
+
+// RAII guard for g_sd_http_stream_session so every early return from the tar
+// handler clears the reaper exclusion.
+struct SdStreamGuard {
+    explicit SdStreamGuard(uint32_t id) { g_sd_http_stream_session = id; }
+    ~SdStreamGuard() { g_sd_http_stream_session = 0; }
+};
+
 // One logged stream: a PSRAM ring fed by loop() (core 1) and drained to the
 // current part file by the writer task (core 0). The raw .asc and the json
 // .jsonl are two instances; everything that touches a stream goes through the
@@ -553,7 +583,8 @@ static void sdScanSessions(uint32_t& lowest_other, uint32_t& highest) {
         uint32_t n;
         if (e.isDirectory() && sdParseSession(sdBasename(e.name()), n)) {
             if (n > highest) highest = n;
-            if (n < lowest_other && n != g_sd.session) lowest_other = n;
+            if (n < lowest_other && n != g_sd.session &&
+                n != g_sd_http_stream_session) lowest_other = n;
         }
         e.close();
     }
@@ -644,6 +675,7 @@ static void sdFail(const char* op) {
     g_sd.state   = "error";
     if (g_sd_raw.file)  g_sd_raw.file.close();
     if (g_sd_json.file) g_sd_json.file.close();
+    xSemaphoreGive(g_sd_mutex);   // held by the writer's burst — free it or HTTP deadlocks
     vTaskDelete(nullptr);
 }
 
@@ -715,6 +747,7 @@ static void sdWriterTask(void*) {
     for (;;) {
         bool flush_due = (millis() - last_flush >= SD_FLUSH_MS);
 
+        xSemaphoreTake(g_sd_mutex, portMAX_DELAY);
         bool did = sdDrainStream(g_sd_raw, flush_due, buf);
         did     |= sdDrainStream(g_sd_json, flush_due, buf);
         g_sd.kb_written = (uint32_t)(sd_total_bytes >> 10);
@@ -731,6 +764,7 @@ static void sdWriterTask(void*) {
             last_free = millis();
             sdUpdateFree();
         }
+        xSemaphoreGive(g_sd_mutex);
 
         if (!did) vTaskDelay(pdMS_TO_TICKS(20));   // both rings empty — yield
     }
@@ -749,7 +783,8 @@ static bool sdInitRing(SdStream& s) {
 // latch state="error" with a fail_op right here — sdFail() self-deletes the
 // calling task, so it must never run on the setup/loop task.
 static void sdInit() {
-    if (!sdInitRing(g_sd_raw) || !sdInitRing(g_sd_json)) {
+    g_sd_mutex = xSemaphoreCreateMutex();
+    if (!g_sd_mutex || !sdInitRing(g_sd_raw) || !sdInitRing(g_sd_json)) {
         g_sd.fail_op = "ring_alloc";
         g_sd.state   = "error";
         return;
@@ -957,7 +992,14 @@ static void canRecoveryTick() {
 #define CAN_QUIET_SLEEP_MS   (10UL * 60UL * 1000UL)   // 10 min of silence
 
 static void checkCanQuietSleep() {
-    if (millis() - g_last_frame_ms < CAN_QUIET_SLEEP_MS) return;
+    uint32_t now = millis();
+    if (now - g_last_frame_ms < CAN_QUIET_SLEEP_MS) return;
+    // A live web client defers sleep too: pulling files off the card over WiFi
+    // is exactly the parked-tractor case, and CAN is silent then, so without
+    // this the board would sleep out from under a download. handleNotFound is
+    // excluded (see noteHttpActivity), so idle captive-portal probes don't pin
+    // it awake.
+    if (now - g_last_http_ms < CAN_QUIET_SLEEP_MS) return;
 
     WiFi.mode(WIFI_OFF);
     BLEDevice::deinit(true);
@@ -1488,25 +1530,19 @@ String buildJson(bool pretty = true, bool minimal = false) {
     }
 
 #if defined(HAS_SD)
-    // SD session-logging status. Always emitted (small, and the phone app mirrors
-    // the dashboard) so both the web tile and BLE clients can show it.
+    // SD session-logging status the dashboard renders. Always emitted (small,
+    // and the phone app mirrors the dashboard). Full diagnostics (parts,
+    // recoveries, fail_op) live on /sd/status.
     {
         auto sd = doc["sd"].to<JsonObject>();
         sd["state"] = g_sd.state;
         if (g_sd_active) {
             sd["session"]    = g_sd.session;
-            sd["raw_part"]   = g_sd_raw.part;
-            sd["json_part"]  = g_sd_json.part;
             sd["kb_written"] = g_sd.kb_written;
             sd["free_mb"]    = g_sd.free_mb;
         }
         if (g_sd_raw.dropped)  sd["raw_dropped"]  = g_sd_raw.dropped;
         if (g_sd_json.dropped) sd["json_dropped"] = g_sd_json.dropped;
-        if (g_sd.recoveries)   sd["recoveries"]   = g_sd.recoveries;
-        if (g_sd.fail_op[0]) {
-            sd["fail_op"] = g_sd.fail_op;
-            sd["fail_kb"] = g_sd.fail_kb;
-        }
     }
 #endif
 
@@ -1518,7 +1554,15 @@ String buildJson(bool pretty = true, bool minimal = false) {
 
 // ── HTTP handlers ─────────────────────────────────────────────────────────────
 
+// Marks a served request so an active web client (dashboard poller, file
+// download) defers the CAN-quiet deep sleep — see checkCanQuietSleep(). Called
+// at the top of every real endpoint but deliberately NOT from handleNotFound:
+// an idle phone joined to the AP fires captive-portal probes at unknown paths,
+// and counting those would keep the board awake forever.
+static inline void noteHttpActivity() { g_last_http_ms = millis(); }
+
 void handleJson() {
+    noteHttpActivity();
     server.send(200, "application/json", buildJson());
 }
 
@@ -1557,6 +1601,7 @@ static String staDisconnectReasonName(uint8_t reason) {
 // 192.168.4.1 even when the STA join failed — one request distinguishes
 // "wrong password" from "wrong SSID" from "built with empty credentials".
 void handleConfig() {
+    noteHttpActivity();
     JsonDocument doc;
 
     doc["uptime"] = millis() / 1000.0;
@@ -1618,11 +1663,348 @@ void handleConfig() {
 }
 
 void handleRoot() {
+    noteHttpActivity();
     // HTML lives in src/dashboard.html; embedded via board_build.embed_txtfiles.
     // Length excludes the trailing null byte that embed_txtfiles appends.
     size_t len = dashboard_html_end - dashboard_html_start - 1;
     server.send_P(200, "text/html", (PGM_P)dashboard_html_start, len);
 }
+
+#if defined(HAS_SD)
+// ── SD file access API ────────────────────────────────────────────────────────
+// See docs/superpowers/specs/2026-07-18-sd-file-api-design.md. /sd/status is
+// in-RAM only (poll freely); /sd/sessions, /sd/sessions/{id} GET (tar) and DELETE
+// touch the card under g_sd_mutex and answer 503 unless a session is logging.
+
+// Minimal built-in browser UI at /sd: shows /sd/status and the /sd/sessions
+// inventory, each session with a download link (its tar). Self-contained — no embedded
+// asset, no external resources — so it costs only this string in flash. It
+// fetches the two JSON endpoints once on load (Refresh re-fetches); it does not
+// poll, so an open tab won't keep the board awake past the download.
+static const char SD_INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
+<meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>SD sessions</title>
+<style>
+ body{font:14px/1.5 system-ui,sans-serif;margin:1rem;max-width:760px}
+ h1{font-size:1.1rem}
+ #status{margin:.5rem 0;padding:.5rem .7rem;border:1px solid #ccc;border-radius:6px}
+ table{border-collapse:collapse;width:100%}
+ th,td{text-align:left;padding:.35rem .5rem;border-bottom:1px solid #ddd}
+ td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+ .muted{color:#777}
+ button{font:inherit;padding:.2rem .7rem}
+ @media (prefers-color-scheme:dark){
+  body{background:#111;color:#ddd}#status{border-color:#444}
+  th,td{border-color:#333}a{color:#6bf}}
+</style>
+<h1>SD sessions</h1>
+<div id=status class=muted>Loading&hellip;</div>
+<p><button onclick=load()>Refresh</button> <span id=err class=muted></span></p>
+<table><thead><tr><th>Session<th class=num>Files<th class=num>Size<th>Download</thead>
+<tbody id=rows></tbody></table>
+<script>
+function mb(kb){return((kb||0)/1024).toFixed(1)+' MB'}
+function human(b){if(b==null)return'';var u=['B','KB','MB','GB'],i=0;b=+b;
+ while(b>=1024&&i<u.length-1){b/=1024;i++}return b.toFixed(i?1:0)+' '+u[i]}
+function pad(n){return 's'+String(n).padStart(5,'0')}
+async function jget(u){var r=await fetch(u);if(!r.ok)throw Error(u+' → '+r.status);return r.json()}
+async function loadStatus(){var el=document.getElementById('status');
+ try{var s=await jget('/sd/status'),t=s.state;
+  if(s.state==='logging')t='logging '+pad(s.session)+' · '+mb(s.kb_written)+
+   ' written · '+human((s.free_mb||0)*1048576)+' free';
+  el.textContent=t;el.className='';
+ }catch(e){el.textContent='status: '+e.message;el.className='muted'}}
+async function loadList(){var tb=document.getElementById('rows'),err=document.getElementById('err');
+ try{var d=await jget('/sd/sessions');err.textContent='';
+  tb.innerHTML=(d.sessions||[]).sort(function(a,b){return b.id-a.id}).map(function(s){
+   return '<tr><td>'+pad(s.id)+(s.active?' <span class=muted>(active)</span>':'')+
+    '<td class=num>'+((s.files||[]).length)+'<td class=num>'+human(s.bytes)+
+    '<td><a href="/sd/sessions/'+s.id+'" download>'+pad(s.id)+'.tar</a>';
+  }).join('')||'<tr><td colspan=4 class=muted>No sessions</td></tr>';
+ }catch(e){err.textContent=e.message}}
+function load(){loadStatus();loadList()}
+load();
+</script>
+)HTML";
+
+static void handleSdIndex() {
+    noteHttpActivity();
+    server.send_P(200, "text/html", SD_INDEX_HTML);
+}
+
+static void sdSendError(int code, const char* msg) {
+    server.send(code, "application/json",
+                String("{\"error\":\"") + msg + "\"}");
+}
+
+// Cheap logging status + the diagnostics that used to ride along in /json
+// (raw_part, json_part, recoveries, fail_op, fail_kb). No mutex, no card I/O.
+static void handleSdStatus() {
+    noteHttpActivity();
+    JsonDocument doc;
+    doc["state"] = g_sd.state;
+    if (g_sd_active) {
+        doc["session"]    = g_sd.session;
+        doc["raw_part"]   = g_sd_raw.part;
+        doc["json_part"]  = g_sd_json.part;
+        doc["kb_written"] = g_sd.kb_written;
+        doc["free_mb"]    = g_sd.free_mb;
+    }
+    if (g_sd_raw.dropped)  doc["raw_dropped"]  = g_sd_raw.dropped;
+    if (g_sd_json.dropped) doc["json_dropped"] = g_sd_json.dropped;
+    if (g_sd.recoveries)   doc["recoveries"]   = g_sd.recoveries;
+    if (g_sd.fail_op[0]) {
+        doc["fail_op"] = g_sd.fail_op;
+        doc["fail_kb"] = g_sd.fail_kb;
+    }
+    String out;
+    serializeJsonPretty(doc, out);
+    server.send(200, "application/json", out);
+}
+
+// Session/file inventory: one mutex-guarded walk of the card. Only /sNNNNN
+// directories are listed (same sdParseSession() filter as the reaper).
+static void handleSdList() {
+    noteHttpActivity();
+    if (!g_sd_active) { sdSendError(503, "sd_unavailable"); return; }
+    JsonDocument doc;
+    auto sessions = doc["sessions"].to<JsonArray>();
+    bool open_ok = true;
+    {
+        SdLock lock;
+        File root = SD.open("/");
+        if (!root) { open_ok = false; }
+        else {
+        for (File e = root.openNextFile(); e; e = root.openNextFile()) {
+            uint32_t n;
+            if (e.isDirectory() && sdParseSession(sdBasename(e.name()), n)) {
+                auto s = sessions.add<JsonObject>();
+                s["id"]     = n;
+                s["active"] = (n == g_sd.session);
+                uint64_t total = 0;
+                char path[16];
+                snprintf(path, sizeof path, "/s%05lu", (unsigned long)n);
+                auto files = s["files"].to<JsonArray>();
+                File d = SD.open(path);
+                if (d) {
+                    for (File f = d.openNextFile(); f; f = d.openNextFile()) {
+                        if (!f.isDirectory()) {
+                            auto fo = files.add<JsonObject>();
+                            fo["name"] = sdBasename(f.name());   // ArduinoJson 7 copies
+                            fo["size"] = (uint32_t)f.size();
+                            total += f.size();
+                        }
+                        f.close();
+                    }
+                    d.close();
+                }
+                s["bytes"] = total;
+            }
+            e.close();
+        }
+        root.close();
+        }
+    }
+    if (!open_ok) { sdSendError(500, "open_root"); return; }
+    String out;
+    serializeJsonPretty(doc, out);
+    server.send(200, "application/json", out);
+}
+
+// Minimal USTAR header for one regular file. `name` ("s00042/can_00.asc") is
+// far below the 100-byte field. mtime is 0 — the ESP32 has no RTC, matching
+// the nominal date in the .asc header.
+static void tarFillHeader(uint8_t hdr[512], const char* name, uint32_t size) {
+    memset(hdr, 0, 512);
+    strncpy((char*)hdr, name, 99);                 // name
+    memcpy(hdr + 100, "0000644", 8);               // mode
+    memcpy(hdr + 108, "0000000", 8);               // uid
+    memcpy(hdr + 116, "0000000", 8);               // gid
+    char oct[13];
+    snprintf(oct, sizeof oct, "%011lo", (unsigned long)size);
+    memcpy(hdr + 124, oct, 12);                    // size
+    memcpy(hdr + 136, "00000000000", 12);          // mtime
+    hdr[156] = '0';                                // typeflag: regular file
+    memcpy(hdr + 257, "ustar", 6);                 // magic (NUL-terminated)
+    memcpy(hdr + 263, "00", 2);                    // version
+    memset(hdr + 148, ' ', 8);                     // checksum: spaces while summing
+    uint32_t sum = 0;
+    for (int i = 0; i < 512; i++) sum += hdr[i];
+    snprintf(oct, sizeof oct, "%06lo", (unsigned long)sum);
+    memcpy(hdr + 148, oct, 6);
+    hdr[154] = '\0';
+    hdr[155] = ' ';
+}
+
+// Push `n` bytes to the client, tolerating partial writes. Bounded retries so
+// a wedged socket can't hang the loop task forever.
+static bool sdClientWrite(WiFiClient& client, const uint8_t* p, size_t n) {
+    int stalls = 0;
+    while (n) {
+        if (!client.connected()) return false;
+        size_t w = client.write(p, n);
+        if (w == 0) {
+            if (++stalls > 50) return false;
+            delay(2);
+            continue;
+        }
+        stalls = 0;
+        p += w;
+        n -= w;
+    }
+    return true;
+}
+
+// Parse the {id} path segment as a plain decimal session number.
+// Returns false on empty/garbage (→ 404, matching a nonexistent session).
+static bool sdParseIdArg(uint32_t& id) {
+    String arg = server.pathArg(0);
+    if (arg.isEmpty()) return false;
+    char* end = nullptr;
+    id = strtoul(arg.c_str(), &end, 10);
+    return end && *end == '\0';
+}
+
+// Drain the CAN controllers and emit the periodic snapshot. Called from loop()
+// and, per chunk, from the tar streamer so a multi-MB download never starves
+// the sole CAN consumer.
+static void canServiceTick();
+
+// GET /sd/sessions/{id} — the whole session directory as one uncompressed
+// USTAR stream. Member sizes freeze at header time (the walk below), so the
+// active session yields a consistent snapshot ≤~1 s stale. If a member reads
+// short of its frozen size (read error / file gone), the stream is truncated
+// and the socket closed, so the client detects a short read against
+// Content-Length rather than receiving a byte-perfect zero-filled file. The
+// mutex is held per chunk, never across client I/O. g_sd_http_stream_session is
+// set for the whole handler so the reaper cannot delete the session mid-stream.
+static void handleSdSessionGet() {
+    noteHttpActivity();
+    if (!g_sd_active) { sdSendError(503, "sd_unavailable"); return; }
+    uint32_t id;
+    if (!sdParseIdArg(id)) { sdSendError(404, "not_found"); return; }
+
+    char dir[16];
+    snprintf(dir, sizeof dir, "/s%05lu", (unsigned long)id);
+
+    SdStreamGuard stream_guard(id);   // clears g_sd_http_stream_session on any return
+
+    struct Member { String name; uint32_t size; };
+    std::vector<Member> members;
+    {
+        SdLock lock;
+        File d = SD.open(dir);
+        if (!d || !d.isDirectory()) {
+            if (d) d.close();
+            sdSendError(404, "not_found");
+            return;
+        }
+        for (File f = d.openNextFile(); f; f = d.openNextFile()) {
+            if (!f.isDirectory())
+                members.push_back({ String(sdBasename(f.name())),
+                                    (uint32_t)f.size() });
+            f.close();
+        }
+        d.close();
+    }
+
+    uint64_t total = 1024;   // end-of-archive: two zero blocks
+    for (auto& m : members)
+        total += 512 + (((uint64_t)m.size + 511) / 512) * 512;
+    if (total > UINT32_MAX) { sdSendError(507, "too_large"); return; }
+
+    server.setContentLength((size_t)total);
+    server.sendHeader("Content-Disposition",
+                      String("attachment; filename=") + (dir + 1) + ".tar");
+    server.send(200, "application/x-tar", "");
+    WiFiClient client = server.client();
+
+    static uint8_t buf[4096];   // loop-task stack is tight; single-threaded handler
+    for (auto& m : members) {
+        char arcname[48], path[48];
+        snprintf(arcname, sizeof arcname, "%s/%s", dir + 1, m.name.c_str());
+        snprintf(path,    sizeof path,    "%s/%s", dir,     m.name.c_str());
+        uint8_t hdr[512];
+        tarFillHeader(hdr, arcname, m.size);
+        if (!sdClientWrite(client, hdr, 512)) return;
+
+        File f;
+        { SdLock lock; f = SD.open(path, FILE_READ); }
+        uint32_t sent = 0;
+        while (sent < m.size) {
+            size_t want = m.size - sent;
+            if (want > sizeof buf) want = sizeof buf;
+            int n;
+            { SdLock lock; n = f ? f.read(buf, want) : -1; }
+            if (n <= 0) {                          // read error / file gone mid-stream:
+                { SdLock lock; if (f) f.close(); } // truncate rather than zero-pad so
+                client.stop();                     // the client sees a short read vs
+                return;                            // Content-Length
+            }
+            if (!sdClientWrite(client, buf, n)) {
+                SdLock lock; if (f) f.close();
+                return;                                       // client went away
+            }
+            sent += n;
+            canServiceTick();    // keep draining CAN between chunks; not under SdLock
+            noteHttpActivity();  // a multi-minute download keeps deferring quiet sleep
+        }
+        { SdLock lock; if (f) f.close(); }
+
+        size_t pad = (512 - (m.size % 512)) % 512;
+        if (pad) {
+            memset(buf, 0, pad);
+            if (!sdClientWrite(client, buf, pad)) return;
+        }
+    }
+    memset(buf, 0, 1024);
+    sdClientWrite(client, buf, 1024);   // end-of-archive trailer
+}
+
+// DELETE /sd/sessions/{id} — recursively remove a session directory via the
+// reaper's helper. The active session is never deletable. free_mb is
+// recomputed here (usedBytes() is slow, but deletes are rare) so the response
+// reflects the space just reclaimed.
+static void handleSdSessionDelete() {
+    noteHttpActivity();
+    if (!g_sd_active) { sdSendError(503, "sd_unavailable"); return; }
+    uint32_t id;
+    if (!sdParseIdArg(id)) { sdSendError(404, "not_found"); return; }
+    if (id == g_sd.session) { sdSendError(409, "active_session"); return; }
+    // Cannot race on the single-threaded WebServer, but refuse deleting a
+    // session an HTTP client is streaming — one line, future-proof.
+    if (id == g_sd_http_stream_session) { sdSendError(409, "streaming"); return; }
+
+    char dir[16];
+    snprintf(dir, sizeof dir, "/s%05lu", (unsigned long)id);
+
+    enum Result { OK, NOT_FOUND, REMOVE_FAILED } result = OK;
+    uint32_t free_mb = 0;
+    {
+        SdLock lock;
+        File d = SD.open(dir);
+        if (!d || !d.isDirectory()) {
+            if (d) d.close();
+            result = NOT_FOUND;
+        } else {
+            d.close();
+            if (!sdRemoveSessionDir(dir)) {
+                result = REMOVE_FAILED;
+            } else {
+                uint64_t total = SD.totalBytes();
+                uint64_t used  = SD.usedBytes();
+                g_sd.free_mb = (uint32_t)((total > used ? total - used : 0) >> 20);
+                free_mb = g_sd.free_mb;
+            }
+        }
+    }
+    if (result == NOT_FOUND)     { sdSendError(404, "not_found");     return; }
+    if (result == REMOVE_FAILED) { sdSendError(500, "remove_failed"); return; }
+    server.send(200, "application/json",
+                String("{\"free_mb\":") + free_mb + "}");
+}
+#endif  // HAS_SD
 
 void handleNotFound() {
     // The soft-AP's wildcard DNS lands every hostname here, including phone
@@ -2203,6 +2585,13 @@ void setup() {
     server.on("/",       handleRoot);
     server.on("/json",   handleJson);
     server.on("/config", handleConfig);
+#if defined(HAS_SD)
+    server.on("/sd",        HTTP_GET, handleSdIndex);
+    server.on("/sd/status", HTTP_GET, handleSdStatus);
+    server.on("/sd/sessions",   HTTP_GET, handleSdList);
+    server.on(UriBraces("/sd/sessions/{}"), HTTP_GET, handleSdSessionGet);
+    server.on(UriBraces("/sd/sessions/{}"), HTTP_DELETE, handleSdSessionDelete);
+#endif
     server.onNotFound(handleNotFound);
     server.begin();
     MDNS.addService("http", "tcp", 80);
@@ -2251,7 +2640,13 @@ void setup() {
     bleInit();
 }
 
-void loop() {
+// Drain both CAN controllers and fan out to every consumer (J1939 decode,
+// SLCAN, socketcand, SD raw ring), then emit the 1 Hz decoded jsonl snapshot.
+// This is the *sole* CAN consumer, so it must run frequently even while a long
+// HTTP handler monopolizes the loop task; the tar streamer calls it once per
+// chunk for exactly that reason. Runs only on the loop task and never calls
+// server.handleClient(), so it is single-threaded and not reentrant.
+static void canServiceTick() {
     twai_message_t msg;
     while (twai_receive(&msg, 0) == ESP_OK) {
         // Classic CAN allows DLC 9–15 on the wire (still only 8 data bytes)
@@ -2306,6 +2701,10 @@ void loop() {
         }
     }
 #endif
+}
+
+void loop() {
+    canServiceTick();
     canRecoveryTick();
     slcanPoll();
     socketcandPoll();
