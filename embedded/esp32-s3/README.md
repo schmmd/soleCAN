@@ -316,6 +316,9 @@ via mDNS.
 | `http://tractor.local/json` | Decoded state as JSON |
 | `tractor.local:28600` | socketcand TCP stream of raw CAN frames |
 | `/dev/cu.usbmodem*` (USB CDC) | SLCAN stream of raw CAN frames |
+| `http://tractor.local/sd/status` | SD logging status + diagnostics (RejsaCAN only) |
+| `http://tractor.local/sd/list` | SD session/file inventory as JSON |
+| `http://tractor.local/sd/session/N` | `GET` whole session as a `.tar`; `DELETE` removes it |
 
 ### Consuming raw frames with `python-can`
 
@@ -372,7 +375,8 @@ containing two streams, split into 64 MB parts:
   in `/json`) rather than blocking the CAN receive path.
 
 Logging status shows in `/json` under `sd` (state, session, KB written, free MB,
-drops) and on the dashboard footer. Tunables are `#define`s at the top of the
+drops) and on the dashboard footer; full diagnostics (`raw_part`, `json_part`,
+`recoveries`, `fail_op`, `fail_kb`) live on `/sd/status`. Tunables are `#define`s at the top of the
 "SD-card session logging" section in `main.cpp` (`SD_JSON_HZ`, `SD_FLUSH_MS`,
 `SD_MAX_PART_BYTES`, `SD_MIN_FREE_BYTES`, ring sizes).
 
@@ -387,6 +391,26 @@ jq . /Volumes/SD/s00007/data_00.jsonl | less                       # decoded tim
 
 The `.jsonl` is a convenience timeline; the `.asc` is the full-fidelity record
 (you can always regenerate the decoded view from it with `solecan-analyze.py`).
+
+### Pulling files over WiFi
+
+The card never has to leave the tractor — the firmware serves the sessions
+over HTTP while logging continues (SD access is mutex-shared with the
+writer; the PSRAM rings absorb the brief stalls):
+
+```bash
+curl http://tractor.local/sd/status                    # logging state + diagnostics
+curl http://tractor.local/sd/list                      # sessions and their files
+curl -O -J http://tractor.local/sd/session/7           # download session 7 → s00007.tar
+curl -X DELETE http://tractor.local/sd/session/7       # delete session 7
+```
+
+Downloads are uncompressed USTAR archives with an exact `Content-Length`.
+The **active** session is downloadable too: member sizes freeze when the
+transfer starts, so you get a consistent snapshot that trails the live
+session by up to ~1 s (the writer's flush cadence). Deleting the active
+session is refused (`409`); all `/sd` endpoints answer `503` when no card
+was present at boot or logging has latched an error.
 
 ## Pre-ship bench test
 
