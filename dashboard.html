@@ -400,7 +400,7 @@ function update(d){
   if(sd){
     var drop=(sd.raw_dropped||0)+(sd.json_dropped||0);
     if(sd.state==='logging'){
-      var sess='s'+sd.session+(sd.raw_part?'.'+sd.raw_part:'');
+      var sess='s'+sd.session;
       sdTxt='<span class="ok">●</span> SD '+sess+' · '+((sd.kb_written||0)/1024).toFixed(1)+' MB'+
         (sd.free_mb!=null?' · '+(sd.free_mb/1024).toFixed(1)+' GB free':'')+
         (drop?' · <span class="bad">⚠ '+drop+' dropped</span>':'');
