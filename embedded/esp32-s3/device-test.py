@@ -416,7 +416,11 @@ def stage_sd_files(args, sd_ok: bool) -> None:
     status, _, body = http_get(args.host, "/sd/list")
     if not check(status == 200, "GET /sd/list", f"HTTP {status}"):
         return
-    sessions = json.loads(body).get("sessions", [])
+    try:
+        sessions = json.loads(body).get("sessions", [])
+    except Exception as e:  # noqa: BLE001
+        check(False, "GET /sd/list", f"unparseable body: {e}")
+        return
     active = [s for s in sessions if s.get("active")]
     if not check(len(active) == 1, "exactly one active session",
                  f"{len(active)} active of {len(sessions)} listed"):
@@ -471,7 +475,12 @@ def stage_sd_files(args, sd_ok: bool) -> None:
                                        method="DELETE")
         if check(status == 200, f"DELETE /sd/session/{victim}",
                  f"HTTP {status}"):
-            check("free_mb" in json.loads(body), "delete reports free_mb")
+            try:
+                resp_json = json.loads(body)
+            except Exception as e:  # noqa: BLE001
+                check(False, "delete reports free_mb", f"unparseable body: {e}")
+            else:
+                check("free_mb" in resp_json, "delete reports free_mb")
         try:
             _, _, body = http_get(args.host, "/sd/list")
             remaining = [s["id"] for s in json.loads(body).get("sessions", [])]
