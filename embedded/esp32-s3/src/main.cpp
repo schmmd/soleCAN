@@ -1522,9 +1522,9 @@ String buildJson(bool pretty = true, bool minimal = false) {
     }
 
 #if defined(HAS_SD)
-    // SD session-logging status — only what the dashboard renders. Full
-    // diagnostics (parts, recoveries, fail_op) moved to /sd/status. Always
-    // emitted (small, and the phone app mirrors the dashboard).
+    // SD session-logging status the dashboard renders. Always emitted (small,
+    // and the phone app mirrors the dashboard). Full diagnostics (parts,
+    // recoveries, fail_op) live on /sd/status.
     {
         auto sd = doc["sd"].to<JsonObject>();
         sd["state"] = g_sd.state;
