@@ -1504,25 +1504,19 @@ String buildJson(bool pretty = true, bool minimal = false) {
     }
 
 #if defined(HAS_SD)
-    // SD session-logging status. Always emitted (small, and the phone app mirrors
-    // the dashboard) so both the web tile and BLE clients can show it.
+    // SD session-logging status — only what the dashboard renders. Full
+    // diagnostics (parts, recoveries, fail_op) moved to /sd/status. Always
+    // emitted (small, and the phone app mirrors the dashboard).
     {
         auto sd = doc["sd"].to<JsonObject>();
         sd["state"] = g_sd.state;
         if (g_sd_active) {
             sd["session"]    = g_sd.session;
-            sd["raw_part"]   = g_sd_raw.part;
-            sd["json_part"]  = g_sd_json.part;
             sd["kb_written"] = g_sd.kb_written;
             sd["free_mb"]    = g_sd.free_mb;
         }
         if (g_sd_raw.dropped)  sd["raw_dropped"]  = g_sd_raw.dropped;
         if (g_sd_json.dropped) sd["json_dropped"] = g_sd_json.dropped;
-        if (g_sd.recoveries)   sd["recoveries"]   = g_sd.recoveries;
-        if (g_sd.fail_op[0]) {
-            sd["fail_op"] = g_sd.fail_op;
-            sd["fail_kb"] = g_sd.fail_kb;
-        }
     }
 #endif
 
