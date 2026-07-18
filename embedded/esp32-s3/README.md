@@ -416,6 +416,14 @@ session is refused (`409`); `/sd/list` and `/sd/session/N` answer `503` when
 no card was present at boot or logging has latched an error, while
 `/sd/status` always answers `200` and reports that state.
 
+On the default build the board deep-sleeps after 10 minutes of CAN silence
+(wake-on-CAN only — see "Energy-saving deep sleep" in `main.cpp`), so it is
+only reachable over WiFi while the bus is live or was recently. Serving any
+`/sd` (or other real HTTP) request defers that sleep, so an in-progress
+download or delete won't be cut off; but if the tractor has been off for more
+than 10 minutes the board is already asleep and won't answer until CAN traffic
+resumes. Build with `-DNO_AUTOSHUTDOWN` to keep it awake through bus silence.
+
 ## Pre-ship bench test
 
 `device-test.py` is an acceptance suite to run against each flashed device

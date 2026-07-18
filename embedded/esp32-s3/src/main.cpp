@@ -355,6 +355,7 @@ Dm1State    g_dm1;
 uint32_t    g_frames_rx      = 0;   // total frames received
 uint32_t    g_frames_decoded = 0;   // frames matching a known PGN/source
 uint32_t    g_last_frame_ms  = 0;   // millis() at last received frame
+uint32_t    g_last_http_ms   = 0;   // millis() at last served HTTP request (defers quiet sleep)
 uint32_t    g_can_recoveries = 0;   // bus-off recoveries initiated since boot
 uint32_t    g_socketcand_tx_dropped = 0;   // frames dropped on full client TCP buffers
 bool        g_can_initialized = false;
@@ -991,7 +992,14 @@ static void canRecoveryTick() {
 #define CAN_QUIET_SLEEP_MS   (10UL * 60UL * 1000UL)   // 10 min of silence
 
 static void checkCanQuietSleep() {
-    if (millis() - g_last_frame_ms < CAN_QUIET_SLEEP_MS) return;
+    uint32_t now = millis();
+    if (now - g_last_frame_ms < CAN_QUIET_SLEEP_MS) return;
+    // A live web client defers sleep too: pulling files off the card over WiFi
+    // is exactly the parked-tractor case, and CAN is silent then, so without
+    // this the board would sleep out from under a download. handleNotFound is
+    // excluded (see noteHttpActivity), so idle captive-portal probes don't pin
+    // it awake.
+    if (now - g_last_http_ms < CAN_QUIET_SLEEP_MS) return;
 
     WiFi.mode(WIFI_OFF);
     BLEDevice::deinit(true);
@@ -1546,7 +1554,15 @@ String buildJson(bool pretty = true, bool minimal = false) {
 
 // ── HTTP handlers ─────────────────────────────────────────────────────────────
 
+// Marks a served request so an active web client (dashboard poller, file
+// download) defers the CAN-quiet deep sleep — see checkCanQuietSleep(). Called
+// at the top of every real endpoint but deliberately NOT from handleNotFound:
+// an idle phone joined to the AP fires captive-portal probes at unknown paths,
+// and counting those would keep the board awake forever.
+static inline void noteHttpActivity() { g_last_http_ms = millis(); }
+
 void handleJson() {
+    noteHttpActivity();
     server.send(200, "application/json", buildJson());
 }
 
@@ -1585,6 +1601,7 @@ static String staDisconnectReasonName(uint8_t reason) {
 // 192.168.4.1 even when the STA join failed — one request distinguishes
 // "wrong password" from "wrong SSID" from "built with empty credentials".
 void handleConfig() {
+    noteHttpActivity();
     JsonDocument doc;
 
     doc["uptime"] = millis() / 1000.0;
@@ -1646,6 +1663,7 @@ void handleConfig() {
 }
 
 void handleRoot() {
+    noteHttpActivity();
     // HTML lives in src/dashboard.html; embedded via board_build.embed_txtfiles.
     // Length excludes the trailing null byte that embed_txtfiles appends.
     size_t len = dashboard_html_end - dashboard_html_start - 1;
@@ -1666,6 +1684,7 @@ static void sdSendError(int code, const char* msg) {
 // Cheap logging status + the diagnostics that used to ride along in /json
 // (raw_part, json_part, recoveries, fail_op, fail_kb). No mutex, no card I/O.
 static void handleSdStatus() {
+    noteHttpActivity();
     JsonDocument doc;
     doc["state"] = g_sd.state;
     if (g_sd_active) {
@@ -1690,6 +1709,7 @@ static void handleSdStatus() {
 // Session/file inventory: one mutex-guarded walk of the card. Only /sNNNNN
 // directories are listed (same sdParseSession() filter as the reaper).
 static void handleSdList() {
+    noteHttpActivity();
     if (!g_sd_active) { sdSendError(503, "sd_unavailable"); return; }
     JsonDocument doc;
     auto sessions = doc["sessions"].to<JsonArray>();
@@ -1803,6 +1823,7 @@ static void canServiceTick();
 // mutex is held per chunk, never across client I/O. g_sd_http_stream_session is
 // set for the whole handler so the reaper cannot delete the session mid-stream.
 static void handleSdSessionGet() {
+    noteHttpActivity();
     if (!g_sd_active) { sdSendError(503, "sd_unavailable"); return; }
     uint32_t id;
     if (!sdParseIdArg(id)) { sdSendError(404, "not_found"); return; }
@@ -1869,7 +1890,8 @@ static void handleSdSessionGet() {
                 return;                                       // client went away
             }
             sent += n;
-            canServiceTick();   // keep draining CAN between chunks; not under SdLock
+            canServiceTick();    // keep draining CAN between chunks; not under SdLock
+            noteHttpActivity();  // a multi-minute download keeps deferring quiet sleep
         }
         { SdLock lock; if (f) f.close(); }
 
@@ -1888,6 +1910,7 @@ static void handleSdSessionGet() {
 // recomputed here (usedBytes() is slow, but deletes are rare) so the response
 // reflects the space just reclaimed.
 static void handleSdSessionDelete() {
+    noteHttpActivity();
     if (!g_sd_active) { sdSendError(503, "sd_unavailable"); return; }
     uint32_t id;
     if (!sdParseIdArg(id)) { sdSendError(404, "not_found"); return; }
