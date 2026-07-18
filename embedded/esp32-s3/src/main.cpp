@@ -17,10 +17,12 @@
  */
 
 #include <Arduino.h>
+#include <vector>
 #include <WiFi.h>
 #include <ESPmDNS.h>
 #include <DNSServer.h>
 #include <WebServer.h>
+#include <uri/UriBraces.h>
 #include <ArduinoJson.h>
 #include <BLEDevice.h>
 #include <BLEServer.h>
@@ -1712,6 +1714,139 @@ static void handleSdList() {
     serializeJsonPretty(doc, out);
     server.send(200, "application/json", out);
 }
+
+// Minimal USTAR header for one regular file. `name` ("s00042/can_00.asc") is
+// far below the 100-byte field. mtime is 0 — the ESP32 has no RTC, matching
+// the nominal date in the .asc header.
+static void tarFillHeader(uint8_t hdr[512], const char* name, uint32_t size) {
+    memset(hdr, 0, 512);
+    strncpy((char*)hdr, name, 99);                 // name
+    memcpy(hdr + 100, "0000644", 8);               // mode
+    memcpy(hdr + 108, "0000000", 8);               // uid
+    memcpy(hdr + 116, "0000000", 8);               // gid
+    char oct[13];
+    snprintf(oct, sizeof oct, "%011lo", (unsigned long)size);
+    memcpy(hdr + 124, oct, 12);                    // size
+    memcpy(hdr + 136, "00000000000", 12);          // mtime
+    hdr[156] = '0';                                // typeflag: regular file
+    memcpy(hdr + 257, "ustar", 6);                 // magic (NUL-terminated)
+    memcpy(hdr + 263, "00", 2);                    // version
+    memset(hdr + 148, ' ', 8);                     // checksum: spaces while summing
+    uint32_t sum = 0;
+    for (int i = 0; i < 512; i++) sum += hdr[i];
+    snprintf(oct, sizeof oct, "%06lo", (unsigned long)sum);
+    memcpy(hdr + 148, oct, 6);
+    hdr[154] = '\0';
+    hdr[155] = ' ';
+}
+
+// Push `n` bytes to the client, tolerating partial writes. Bounded retries so
+// a wedged socket can't hang the loop task forever.
+static bool sdClientWrite(WiFiClient& client, const uint8_t* p, size_t n) {
+    int stalls = 0;
+    while (n) {
+        if (!client.connected()) return false;
+        size_t w = client.write(p, n);
+        if (w == 0) {
+            if (++stalls > 50) return false;
+            delay(2);
+            continue;
+        }
+        stalls = 0;
+        p += w;
+        n -= w;
+    }
+    return true;
+}
+
+// Parse the {id} path segment as a plain decimal session number.
+// Returns false on empty/garbage (→ 404, matching a nonexistent session).
+static bool sdParseIdArg(uint32_t& id) {
+    String arg = server.pathArg(0);
+    if (arg.isEmpty()) return false;
+    char* end = nullptr;
+    id = strtoul(arg.c_str(), &end, 10);
+    return end && *end == '\0';
+}
+
+// GET /sd/session/{id} — the whole session directory as one uncompressed
+// USTAR stream. Member sizes freeze at header time (the walk below), so the
+// active session yields a consistent snapshot ≤~1 s stale; if a member reads
+// short of its frozen size the remainder is zero-padded so the archive stays
+// well-formed. The mutex is held per chunk, never across client I/O.
+static void handleSdSessionGet() {
+    if (!g_sd_active) { sdSendError(503, "sd_unavailable"); return; }
+    uint32_t id;
+    if (!sdParseIdArg(id)) { sdSendError(404, "not_found"); return; }
+
+    char dir[16];
+    snprintf(dir, sizeof dir, "/s%05lu", (unsigned long)id);
+
+    struct Member { String name; uint32_t size; };
+    std::vector<Member> members;
+    {
+        SdLock lock;
+        File d = SD.open(dir);
+        if (!d || !d.isDirectory()) {
+            if (d) d.close();
+            sdSendError(404, "not_found");
+            return;
+        }
+        for (File f = d.openNextFile(); f; f = d.openNextFile()) {
+            if (!f.isDirectory())
+                members.push_back({ String(sdBasename(f.name())),
+                                    (uint32_t)f.size() });
+            f.close();
+        }
+        d.close();
+    }
+
+    uint64_t total = 1024;   // end-of-archive: two zero blocks
+    for (auto& m : members)
+        total += 512 + (((uint64_t)m.size + 511) / 512) * 512;
+    if (total > UINT32_MAX) { sdSendError(507, "too_large"); return; }
+
+    server.setContentLength((size_t)total);
+    server.sendHeader("Content-Disposition",
+                      String("attachment; filename=") + (dir + 1) + ".tar");
+    server.send(200, "application/x-tar", "");
+    WiFiClient client = server.client();
+
+    static uint8_t buf[4096];   // loop-task stack is tight; single-threaded handler
+    for (auto& m : members) {
+        char arcname[48], path[48];
+        snprintf(arcname, sizeof arcname, "%s/%s", dir + 1, m.name.c_str());
+        snprintf(path,    sizeof path,    "%s/%s", dir,     m.name.c_str());
+        uint8_t hdr[512];
+        tarFillHeader(hdr, arcname, m.size);
+        if (!sdClientWrite(client, hdr, 512)) return;
+
+        File f;
+        { SdLock lock; f = SD.open(path, FILE_READ); }
+        uint32_t sent = 0;
+        while (sent < m.size) {
+            size_t want = m.size - sent;
+            if (want > sizeof buf) want = sizeof buf;
+            int n;
+            { SdLock lock; n = f ? f.read(buf, want) : -1; }
+            if (n <= 0) { memset(buf, 0, want); n = want; }   // short/gone: pad
+            if (!sdClientWrite(client, buf, n)) {
+                SdLock lock; if (f) f.close();
+                return;                                       // client went away
+            }
+            sent += n;
+        }
+        { SdLock lock; if (f) f.close(); }
+
+        size_t pad = (512 - (m.size % 512)) % 512;
+        if (pad) {
+            memset(buf, 0, pad);
+            if (!sdClientWrite(client, buf, pad)) return;
+        }
+    }
+    memset(buf, 0, 1024);
+    sdClientWrite(client, buf, 1024);   // end-of-archive trailer
+}
 #endif  // HAS_SD
 
 void handleNotFound() {
@@ -2296,6 +2431,7 @@ void setup() {
 #if defined(HAS_SD)
     server.on("/sd/status", HTTP_GET, handleSdStatus);
     server.on("/sd/list",   HTTP_GET, handleSdList);
+    server.on(UriBraces("/sd/session/{}"), HTTP_GET, handleSdSessionGet);
 #endif
     server.onNotFound(handleNotFound);
     server.begin();
