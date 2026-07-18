@@ -408,7 +408,10 @@ def stage_sd_files(args, sd_ok: bool) -> None:
         report("SKIP", "SD logging not healthy — file API not exercised")
         return
 
-    kb0 = json.loads(http_get(args.host, "/sd/status")[2]).get("kb_written", 0)
+    try:
+        kb0 = json.loads(http_get(args.host, "/sd/status")[2]).get("kb_written", 0)
+    except Exception as e:  # noqa: BLE001
+        kb0 = 0
 
     status, _, body = http_get(args.host, "/sd/list")
     if not check(status == 200, "GET /sd/list", f"HTTP {status}"):
@@ -469,20 +472,29 @@ def stage_sd_files(args, sd_ok: bool) -> None:
         if check(status == 200, f"DELETE /sd/session/{victim}",
                  f"HTTP {status}"):
             check("free_mb" in json.loads(body), "delete reports free_mb")
-        _, _, body = http_get(args.host, "/sd/list")
-        remaining = [s["id"] for s in json.loads(body).get("sessions", [])]
-        check(victim not in remaining, "deleted session gone from listing",
-              f"remaining={remaining}")
+        try:
+            _, _, body = http_get(args.host, "/sd/list")
+            remaining = [s["id"] for s in json.loads(body).get("sessions", [])]
+            check(victim not in remaining, "deleted session gone from listing",
+                  f"remaining={remaining}")
+        except Exception as e:  # noqa: BLE001
+            check(False, "deleted session gone from listing", f"GET /sd/list failed: {e}")
 
     # Logging must have kept running through all of the above. kb_written
     # advances every flush (~1 s) because the 1 Hz jsonl snapshot always has
     # data, so give it a beat and compare.
     time.sleep(2.5)
-    st2 = json.loads(http_get(args.host, "/sd/status")[2])
-    check(st2.get("state") == "logging", "still logging after file ops",
-          f"state={st2.get('state')}")
-    check(st2.get("kb_written", 0) > kb0, "kb_written advanced",
-          f"{kb0} -> {st2.get('kb_written')}")
+    try:
+        st2 = json.loads(http_get(args.host, "/sd/status")[2])
+    except Exception as e:  # noqa: BLE001
+        check(False, "still logging after file ops", f"GET /sd/status failed: {e}")
+        st2 = None
+
+    if st2 is not None:
+        check(st2.get("state") == "logging", "still logging after file ops",
+              f"state={st2.get('state')}")
+        check(st2.get("kb_written", 0) > kb0, "kb_written advanced",
+              f"{kb0} -> {st2.get('kb_written')}")
 
 
 def stage_mdns(args) -> None:
