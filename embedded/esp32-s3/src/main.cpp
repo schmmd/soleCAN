@@ -1640,6 +1640,86 @@ void handleRoot() {
     server.send_P(200, "text/html", (PGM_P)dashboard_html_start, len);
 }
 
+#if defined(HAS_SD)
+// ── SD file access API ────────────────────────────────────────────────────────
+// See docs/superpowers/specs/2026-07-18-sd-file-api-design.md. /sd/status is
+// in-RAM only (poll freely); /sd/list, /sd/session/{id} GET (tar) and DELETE
+// touch the card under g_sd_mutex and answer 503 unless a session is logging.
+
+static void sdSendError(int code, const char* msg) {
+    server.send(code, "application/json",
+                String("{\"error\":\"") + msg + "\"}");
+}
+
+// Cheap logging status + the diagnostics that used to ride along in /json
+// (raw_part, json_part, recoveries, fail_op, fail_kb). No mutex, no card I/O.
+static void handleSdStatus() {
+    JsonDocument doc;
+    doc["state"] = g_sd.state;
+    if (g_sd_active) {
+        doc["session"]    = g_sd.session;
+        doc["raw_part"]   = g_sd_raw.part;
+        doc["json_part"]  = g_sd_json.part;
+        doc["kb_written"] = g_sd.kb_written;
+        doc["free_mb"]    = g_sd.free_mb;
+    }
+    if (g_sd_raw.dropped)  doc["raw_dropped"]  = g_sd_raw.dropped;
+    if (g_sd_json.dropped) doc["json_dropped"] = g_sd_json.dropped;
+    if (g_sd.recoveries)   doc["recoveries"]   = g_sd.recoveries;
+    if (g_sd.fail_op[0]) {
+        doc["fail_op"] = g_sd.fail_op;
+        doc["fail_kb"] = g_sd.fail_kb;
+    }
+    String out;
+    serializeJsonPretty(doc, out);
+    server.send(200, "application/json", out);
+}
+
+// Session/file inventory: one mutex-guarded walk of the card. Only /sNNNNN
+// directories are listed (same sdParseSession() filter as the reaper).
+static void handleSdList() {
+    if (!g_sd_active) { sdSendError(503, "sd_unavailable"); return; }
+    JsonDocument doc;
+    auto sessions = doc["sessions"].to<JsonArray>();
+    {
+        SdLock lock;
+        File root = SD.open("/");
+        if (!root) { sdSendError(500, "open_root"); return; }
+        for (File e = root.openNextFile(); e; e = root.openNextFile()) {
+            uint32_t n;
+            if (e.isDirectory() && sdParseSession(sdBasename(e.name()), n)) {
+                auto s = sessions.add<JsonObject>();
+                s["id"]     = n;
+                s["active"] = (n == g_sd.session);
+                uint64_t total = 0;
+                char path[16];
+                snprintf(path, sizeof path, "/s%05lu", (unsigned long)n);
+                auto files = s["files"].to<JsonArray>();
+                File d = SD.open(path);
+                if (d) {
+                    for (File f = d.openNextFile(); f; f = d.openNextFile()) {
+                        if (!f.isDirectory()) {
+                            auto fo = files.add<JsonObject>();
+                            fo["name"] = sdBasename(f.name());   // ArduinoJson 7 copies
+                            fo["size"] = (uint32_t)f.size();
+                            total += f.size();
+                        }
+                        f.close();
+                    }
+                    d.close();
+                }
+                s["bytes"] = total;
+            }
+            e.close();
+        }
+        root.close();
+    }
+    String out;
+    serializeJsonPretty(doc, out);
+    server.send(200, "application/json", out);
+}
+#endif  // HAS_SD
+
 void handleNotFound() {
     // The soft-AP's wildcard DNS lands every hostname here, including phone
     // connectivity probes (generate_204 / hotspot-detect.html). Answering
@@ -2219,6 +2299,10 @@ void setup() {
     server.on("/",       handleRoot);
     server.on("/json",   handleJson);
     server.on("/config", handleConfig);
+#if defined(HAS_SD)
+    server.on("/sd/status", HTTP_GET, handleSdStatus);
+    server.on("/sd/list",   HTTP_GET, handleSdList);
+#endif
     server.onNotFound(handleNotFound);
     server.begin();
     MDNS.addService("http", "tcp", 80);
