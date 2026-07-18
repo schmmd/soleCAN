@@ -22,8 +22,10 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Pin PlatformIO Core so builds are reproducible.
-RUN pip install --no-cache-dir "platformio==6.1.19"
+# Pin PlatformIO Core so builds are reproducible. --root-user-action=ignore:
+# root is the norm inside a single-purpose build image, so pip's root warning
+# is noise here.
+RUN pip install --no-cache-dir --root-user-action=ignore "platformio==6.1.19"
 
 WORKDIR /project
 
@@ -66,12 +68,12 @@ ENV GIT_SHA=${GIT_SHA}
 ARG CAN_ALLOW_TX=
 ENV PLATFORMIO_BUILD_FLAGS=${CAN_ALLOW_TX:+-DCAN_ALLOW_TX}
 
-# Build for the LilyGo T-2CAN. This downloads the pioarduino espressif32 platform and
-# Xtensa toolchain on first run and caches them in the image layer.
-RUN pio run -e lilygo_t2can
+# Build for the RejsaCAN-ESP32-S3. This downloads the pioarduino espressif32
+# platform and Xtensa toolchain on first run and caches them in the image layer.
+RUN pio run -e rejsacan
 
 # Default action: copy the four images needed to flash the board to a mounted
 # /out volume on the host. boot_app0.bin lives in the framework package (it
 # initializes the OTA-data partition); the others are build outputs. These are
 # the same images, at the same offsets, that `pio run -t upload` writes.
-CMD ["sh", "-c", "set -e; mkdir -p /out; cp -v .pio/build/lilygo_t2can/firmware.bin .pio/build/lilygo_t2can/bootloader.bin .pio/build/lilygo_t2can/partitions.bin /out/; cp -v \"$(find /root/.platformio -name boot_app0.bin | head -1)\" /out/; echo 'Artifacts copied to /out — flash with esptool (see README)'"]
+CMD ["sh", "-c", "set -e; mkdir -p /out; cp -v .pio/build/rejsacan/firmware.bin .pio/build/rejsacan/bootloader.bin .pio/build/rejsacan/partitions.bin /out/; cp -v \"$(find /root/.platformio -name boot_app0.bin | head -1)\" /out/; echo 'Artifacts copied to /out — flash with esptool (see README)'"]
