@@ -408,7 +408,10 @@ curl -X DELETE http://tractor.local/sd/session/7       # delete session 7
 Downloads are uncompressed USTAR archives with an exact `Content-Length`.
 The **active** session is downloadable too: member sizes freeze when the
 transfer starts, so you get a consistent snapshot that trails the live
-session by up to ~1 s (the writer's flush cadence). Deleting the active
+session by up to ~1 s (the writer's flush cadence). If the card errors
+mid-transfer the stream is truncated and the socket closed, so the client
+detects a short read against `Content-Length` rather than a silently
+zero-filled file. Deleting the active
 session is refused (`409`); `/sd/list` and `/sd/session/N` answer `503` when
 no card was present at boot or logging has latched an error, while
 `/sd/status` always answers `200` and reports that state.

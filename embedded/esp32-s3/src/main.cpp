@@ -464,9 +464,24 @@ volatile bool g_sd_active = false;
 // PSRAM rings absorb it. sdFail() must release it before self-deleting.
 static SemaphoreHandle_t g_sd_mutex = nullptr;
 
+// Session id currently being streamed as a tar by handleSdSessionGet (0 = none;
+// session numbering starts at 1). The free-space reaper (sdScanSessions)
+// excludes it so it can never SD.remove() a file of a session an HTTP client has
+// open mid-download — illegal under FatFs FS_LOCK=0 and a volume-corruption
+// risk. Set/cleared only on the loop task; volatile because the writer task
+// reads it under the mutex.
+static volatile uint32_t g_sd_http_stream_session = 0;
+
 struct SdLock {
     SdLock()  { xSemaphoreTake(g_sd_mutex, portMAX_DELAY); }
     ~SdLock() { xSemaphoreGive(g_sd_mutex); }
+};
+
+// RAII guard for g_sd_http_stream_session so every early return from the tar
+// handler clears the reaper exclusion.
+struct SdStreamGuard {
+    explicit SdStreamGuard(uint32_t id) { g_sd_http_stream_session = id; }
+    ~SdStreamGuard() { g_sd_http_stream_session = 0; }
 };
 
 // One logged stream: a PSRAM ring fed by loop() (core 1) and drained to the
@@ -567,7 +582,8 @@ static void sdScanSessions(uint32_t& lowest_other, uint32_t& highest) {
         uint32_t n;
         if (e.isDirectory() && sdParseSession(sdBasename(e.name()), n)) {
             if (n > highest) highest = n;
-            if (n < lowest_other && n != g_sd.session) lowest_other = n;
+            if (n < lowest_other && n != g_sd.session &&
+                n != g_sd_http_stream_session) lowest_other = n;
         }
         e.close();
     }
@@ -1677,10 +1693,12 @@ static void handleSdList() {
     if (!g_sd_active) { sdSendError(503, "sd_unavailable"); return; }
     JsonDocument doc;
     auto sessions = doc["sessions"].to<JsonArray>();
+    bool open_ok = true;
     {
         SdLock lock;
         File root = SD.open("/");
-        if (!root) { sdSendError(500, "open_root"); return; }
+        if (!root) { open_ok = false; }
+        else {
         for (File e = root.openNextFile(); e; e = root.openNextFile()) {
             uint32_t n;
             if (e.isDirectory() && sdParseSession(sdBasename(e.name()), n)) {
@@ -1709,7 +1727,9 @@ static void handleSdList() {
             e.close();
         }
         root.close();
+        }
     }
+    if (!open_ok) { sdSendError(500, "open_root"); return; }
     String out;
     serializeJsonPretty(doc, out);
     server.send(200, "application/json", out);
@@ -1769,11 +1789,19 @@ static bool sdParseIdArg(uint32_t& id) {
     return end && *end == '\0';
 }
 
+// Drain the CAN controllers and emit the periodic snapshot. Called from loop()
+// and, per chunk, from the tar streamer so a multi-MB download never starves
+// the sole CAN consumer.
+static void canServiceTick();
+
 // GET /sd/session/{id} — the whole session directory as one uncompressed
 // USTAR stream. Member sizes freeze at header time (the walk below), so the
-// active session yields a consistent snapshot ≤~1 s stale; if a member reads
-// short of its frozen size the remainder is zero-padded so the archive stays
-// well-formed. The mutex is held per chunk, never across client I/O.
+// active session yields a consistent snapshot ≤~1 s stale. If a member reads
+// short of its frozen size (read error / file gone), the stream is truncated
+// and the socket closed, so the client detects a short read against
+// Content-Length rather than receiving a byte-perfect zero-filled file. The
+// mutex is held per chunk, never across client I/O. g_sd_http_stream_session is
+// set for the whole handler so the reaper cannot delete the session mid-stream.
 static void handleSdSessionGet() {
     if (!g_sd_active) { sdSendError(503, "sd_unavailable"); return; }
     uint32_t id;
@@ -1781,6 +1809,8 @@ static void handleSdSessionGet() {
 
     char dir[16];
     snprintf(dir, sizeof dir, "/s%05lu", (unsigned long)id);
+
+    SdStreamGuard stream_guard(id);   // clears g_sd_http_stream_session on any return
 
     struct Member { String name; uint32_t size; };
     std::vector<Member> members;
@@ -1829,12 +1859,17 @@ static void handleSdSessionGet() {
             if (want > sizeof buf) want = sizeof buf;
             int n;
             { SdLock lock; n = f ? f.read(buf, want) : -1; }
-            if (n <= 0) { memset(buf, 0, want); n = want; }   // short/gone: pad
+            if (n <= 0) {                          // read error / file gone mid-stream:
+                { SdLock lock; if (f) f.close(); } // truncate rather than zero-pad so
+                client.stop();                     // the client sees a short read vs
+                return;                            // Content-Length
+            }
             if (!sdClientWrite(client, buf, n)) {
                 SdLock lock; if (f) f.close();
                 return;                                       // client went away
             }
             sent += n;
+            canServiceTick();   // keep draining CAN between chunks; not under SdLock
         }
         { SdLock lock; if (f) f.close(); }
 
@@ -1857,25 +1892,37 @@ static void handleSdSessionDelete() {
     uint32_t id;
     if (!sdParseIdArg(id)) { sdSendError(404, "not_found"); return; }
     if (id == g_sd.session) { sdSendError(409, "active_session"); return; }
+    // Cannot race on the single-threaded WebServer, but refuse deleting a
+    // session an HTTP client is streaming — one line, future-proof.
+    if (id == g_sd_http_stream_session) { sdSendError(409, "streaming"); return; }
 
     char dir[16];
     snprintf(dir, sizeof dir, "/s%05lu", (unsigned long)id);
 
-    SdLock lock;
-    File d = SD.open(dir);
-    if (!d || !d.isDirectory()) {
-        if (d) d.close();
-        sdSendError(404, "not_found");
-        return;
+    enum Result { OK, NOT_FOUND, REMOVE_FAILED } result = OK;
+    uint32_t free_mb = 0;
+    {
+        SdLock lock;
+        File d = SD.open(dir);
+        if (!d || !d.isDirectory()) {
+            if (d) d.close();
+            result = NOT_FOUND;
+        } else {
+            d.close();
+            if (!sdRemoveSessionDir(dir)) {
+                result = REMOVE_FAILED;
+            } else {
+                uint64_t total = SD.totalBytes();
+                uint64_t used  = SD.usedBytes();
+                g_sd.free_mb = (uint32_t)((total > used ? total - used : 0) >> 20);
+                free_mb = g_sd.free_mb;
+            }
+        }
     }
-    d.close();
-    if (!sdRemoveSessionDir(dir)) { sdSendError(500, "remove_failed"); return; }
-
-    uint64_t total = SD.totalBytes();
-    uint64_t used  = SD.usedBytes();
-    g_sd.free_mb = (uint32_t)((total > used ? total - used : 0) >> 20);
+    if (result == NOT_FOUND)     { sdSendError(404, "not_found");     return; }
+    if (result == REMOVE_FAILED) { sdSendError(500, "remove_failed"); return; }
     server.send(200, "application/json",
-                String("{\"free_mb\":") + g_sd.free_mb + "}");
+                String("{\"free_mb\":") + free_mb + "}");
 }
 #endif  // HAS_SD
 
@@ -2512,7 +2559,13 @@ void setup() {
     bleInit();
 }
 
-void loop() {
+// Drain both CAN controllers and fan out to every consumer (J1939 decode,
+// SLCAN, socketcand, SD raw ring), then emit the 1 Hz decoded jsonl snapshot.
+// This is the *sole* CAN consumer, so it must run frequently even while a long
+// HTTP handler monopolizes the loop task; the tar streamer calls it once per
+// chunk for exactly that reason. Runs only on the loop task and never calls
+// server.handleClient(), so it is single-threaded and not reentrant.
+static void canServiceTick() {
     twai_message_t msg;
     while (twai_receive(&msg, 0) == ESP_OK) {
         // Classic CAN allows DLC 9–15 on the wire (still only 8 data bytes)
@@ -2567,6 +2620,10 @@ void loop() {
         }
     }
 #endif
+}
+
+void loop() {
+    canServiceTick();
     canRecoveryTick();
     slcanPoll();
     socketcandPoll();
