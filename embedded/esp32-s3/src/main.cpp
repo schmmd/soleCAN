@@ -396,7 +396,7 @@ KellyState  g_kelly;   // updated by kellyPoll() in loop(), read when building J
 // serial path even when no valid frame decodes: how many polls fired, how many
 // bytes came back, and the raw hex of the last chunk received.
 uint32_t    g_kelly_polls    = 0;   // query cycles started
-uint32_t    g_kelly_rx_total = 0;   // total bytes ever read from Serial1
+uint32_t    g_kelly_rx_total = 0;   // total bytes ever read from the Kelly UART
 uint8_t     g_kelly_last_rx[32];    // last raw chunk received
 uint8_t     g_kelly_last_rx_len = 0;
 // Flicker/reliability counters: how cleanly frames land.
@@ -1326,6 +1326,10 @@ void decodeCAN(uint32_t can_id, const uint8_t* raw, uint8_t len) {
 // three 16-byte replies concatenate into a 48-byte block. Polling is a
 // cooperative state machine so loop() never blocks. See kelly/README.md.
 
+// UART1 is the Kelly port and nothing else, so name it for what is on the far
+// end rather than for the peripheral index.
+static HardwareSerial &kelly = Serial1;
+
 // The Kelly transmits at its documented 19200 baud — fixed, no sweep; CONFIRMED
 // by sustained ~99% frame success. An earlier ~19,900 figure (crystal-referenced
 // edge timing) was measured through a doubly-corrupted receive path — an
@@ -1366,7 +1370,7 @@ static bool kellyIsMonitorCmd(uint8_t cmd) {
 static void kellySendQuery(uint8_t cmd) {
     if (!kellyIsMonitorCmd(cmd)) return;          // refuse anything else
     const uint8_t frame[3] = {cmd, 0x00, cmd};    // [CMD, LEN=0, CHK=CMD]
-    Serial1.write(frame, sizeof(frame));
+    kelly.write(frame, sizeof(frame));
 }
 
 // Decode the 48-byte block into g_kelly. Offsets and raw (unscaled) semantics
@@ -1387,8 +1391,8 @@ static void kellyDecodeBlock(const uint8_t* b) {
 
 
 void kellyInit() {
-    // Serial1.begin(baud, config, rxPin, txPin). The Kelly runs at a fixed 19200.
-    Serial1.begin(KELLY_BAUD, SERIAL_8N1, KELLY_RXD_PIN, KELLY_TXD_PIN);
+    // kelly.begin(baud, config, rxPin, txPin). The Kelly runs at a fixed 19200.
+    kelly.begin(KELLY_BAUD, SERIAL_8N1, KELLY_RXD_PIN, KELLY_TXD_PIN);
 }
 
 // Fault-tolerant poller. Rotates through the monitor commands one at a time,
@@ -1415,7 +1419,7 @@ void kellyPoll() {
     if (state == KIDLE) {
         if (now < next_ms) return;
         rxlen = 0;
-        while (Serial1.available()) Serial1.read();   // drop stale bytes
+        while (kelly.available()) kelly.read();   // drop stale bytes
         g_kelly_polls++;
         kellySendQuery(KELLY_MON_CMDS[cur]);
         sent_ms = now;
@@ -1425,8 +1429,8 @@ void kellyPoll() {
     }
 
     // KWAIT: gather the reply for command `cur`, resync on [CMD, 0x10, <16>, CHK].
-    while (Serial1.available() && rxlen < sizeof(rxbuf)) {
-        rxbuf[rxlen++] = (uint8_t)Serial1.read();
+    while (kelly.available() && rxlen < sizeof(rxbuf)) {
+        rxbuf[rxlen++] = (uint8_t)kelly.read();
         g_kelly_rx_total++;
     }
     if (rxlen > 0) {   // snapshot for /json kelly_dbg
@@ -2996,8 +3000,11 @@ void loop() {
     // Python monitor (solectrac-kelly-monitor.py --port <this board>) talk to the
     // controller through the board to validate the Kelly UART wiring and 5 V-TTL
     // series resistor. Nothing else runs — no CAN, no decode, no SLCAN.
-    while (Serial.available())  Serial1.write(Serial.read());
-    while (Serial1.available()) Serial.write(Serial1.read());
+    // Stream&, not HardwareSerial&: on the S3 `Serial` is HWCDCSerial (the native
+    // USB CDC peripheral), a different class from UART1's HardwareSerial.
+    Stream &usb = Serial;
+    while (usb.available())   kelly.write(usb.read());
+    while (kelly.available()) usb.write(kelly.read());
     return;
 #endif
     canServiceTick();
