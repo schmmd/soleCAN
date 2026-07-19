@@ -145,6 +145,17 @@
   #define VIN_DIVIDER_NUM  153    // (R18 + R6) in kΩ
   #define VIN_DIVIDER_DEN  33     // R6 in kΩ
   #define HAS_VIN_SENSE    1
+  // Kelly e-hydraulic pump controller serial port (opt-in, -DENABLE_KELLY).
+  // On GPIO47/48 — NOT the board's rear "RXD"/"TXD" pads. Those pads are the
+  // ESP32-S3 UART0 console pins (GPIO44/43), and receiving the Kelly on GPIO44
+  // corrupted the waveform (framing errors, and a baud measurement skewed high).
+  // GPIO47/48 are plain GPIOs — free on the WROOM-1-N16R8, not strapping pins —
+  // and read cleanly. The Kelly is 5 V TTL: the green (Kelly Tx) wire needs a
+  // ~1–2.2 kΩ series resistor into KELLY_RXD_PIN (see kelly/README.md); blue
+  // (Kelly Rx) drives KELLY_TXD_PIN directly, black to GND, red (12 V) left
+  // unconnected.
+  #define KELLY_RXD_PIN    GPIO_NUM_47   // <- Kelly Tx (green), via resistor
+  #define KELLY_TXD_PIN    GPIO_NUM_48   // -> Kelly Rx (blue)
   // Onboard microSD reader on a dedicated SPI bus. Pins verified against the
   // vendor's s3-sdcard.ino example and "RejsaCAN v3.4 - Pinout.h". They avoid
   // GPIO33–37, which the N16R8 module's octal PSRAM occupies — using those
@@ -161,6 +172,17 @@
 
 #ifndef LED_IS_DUAL_GPIO
   #define LED_IS_DUAL_GPIO 0
+#endif
+
+// Kelly e-hydraulic pump monitor is RejsaCAN-only (it needs GPIO47/48 wired to
+// the controller's serial port). Fail loudly if enabled elsewhere.
+#if defined(ENABLE_KELLY) && !defined(BOARD_REJSACAN)
+  #error "ENABLE_KELLY requires BOARD_REJSACAN"
+#endif
+// Bench-only: turn the board into a transparent USB<->Kelly-UART bridge so the
+// Python monitor can validate the Kelly UART wiring through the real hardware.
+#if defined(KELLY_PASSTHROUGH) && !defined(ENABLE_KELLY)
+  #error "KELLY_PASSTHROUGH requires ENABLE_KELLY (it needs the UART pins/init)"
 #endif
 
 // WiFi runs in dual AP+STA mode: the board always broadcasts its own hotspot
@@ -334,6 +356,27 @@ struct Dm1State {
     bool     valid      = false;
 };
 
+#if defined(ENABLE_KELLY)
+// Decoded Kelly monitor block. Field offsets and raw semantics mirror
+// kelly/solectrac-kelly-monitor.py Monitor.decode (offsets 0..21 defined; the
+// rest of the 48-byte block is unknown). Values are kept raw, no scaling, to
+// match the Python decode — see kelly/README.md for what's CONFIRMED vs
+// TENTATIVE. `valid`/`last_seen_ms` drive JSON freshness like the CAN states.
+struct KellyState {
+    uint8_t  tps_pedal         = 0;
+    uint8_t  b_plus_v          = 0;   // battery volts (raw byte)
+    int16_t  motor_temp_c      = 0;
+    int16_t  controller_temp_c = 0;
+    uint8_t  forward_switch    = 0;
+    uint8_t  low_speed         = 0;   // 1 = low setpoint (~2400), 0 = high (~2800)
+    uint16_t error_status      = 0;   // 16-bit fault bitmask (bit -> KELLY_ERROR_NAMES)
+    uint16_t motor_speed_rpm   = 0;
+    uint16_t phase_current_a   = 0;
+    bool     valid             = false;
+    uint32_t last_seen_ms      = 0;
+};
+#endif
+
 // ── Global state ──────────────────────────────────────────────────────────────
 // All updated from the CAN decode path inside loop(), read when building JSON
 // from the same thread — no locking needed.
@@ -347,6 +390,23 @@ BmsFaults   g_bms_faults;
 MotorState  g_motor;
 ChargerState g_charger;
 ChgrCmdState g_chgr_cmd;
+#if defined(ENABLE_KELLY)
+KellyState  g_kelly;   // updated by kellyPoll() in loop(), read when building JSON
+// Debug counters, always exposed in /json under "kelly_dbg" so we can see the
+// serial path even when no valid frame decodes: how many polls fired, how many
+// bytes came back, and the raw hex of the last chunk received.
+uint32_t    g_kelly_polls    = 0;   // query cycles started
+uint32_t    g_kelly_rx_total = 0;   // total bytes ever read from the Kelly UART
+uint8_t     g_kelly_last_rx[32];    // last raw chunk received
+uint8_t     g_kelly_last_rx_len = 0;
+// Flicker/reliability counters: how cleanly frames land.
+uint32_t    g_kelly_frames_ok   = 0;      // replies that checksummed
+uint32_t    g_kelly_frames_bad  = 0;      // bytes arrived but no frame checksummed
+uint32_t    g_kelly_timeouts    = 0;      // no bytes at all (controller unpowered/absent)
+uint32_t    g_kelly_blocks_ok   = 0;      // full 48-byte blocks decoded (a card update)
+uint32_t    g_kelly_last_block_ms    = 0; // millis() of last full decode
+uint32_t    g_kelly_block_gap_max_ms = 0; // worst gap between full decodes (worst flicker)
+#endif
 uint8_t     g_vc_state   = 0xFF;   // 0xFF = never seen
 uint8_t     g_dash_alive = 0xFF;
 Dm1State    g_dm1;
@@ -866,8 +926,10 @@ void updateLed() {
     uint32_t warn_period_ms = 0;
     if (!g_can_initialized) {
         warn_period_ms = WARN_BLINK_FAST_MS;
+#if !defined(NO_WIFI)
     } else if (!g_ap_running && WiFi.status() != WL_CONNECTED) {
         warn_period_ms = WARN_BLINK_SLOW_MS;
+#endif
     }
     static uint32_t warn_last_toggle = 0;
     static bool     warn_on = false;
@@ -907,11 +969,13 @@ void updateLed() {
         ledWrite(g_led_on ? 32 : 0, 0, 0);
         return;
     }
+#if !defined(NO_WIFI)
     if (!g_ap_running && WiFi.status() != WL_CONNECTED) {
         if (toggle) { g_led_last_toggle = now; g_led_on = !g_led_on; }
         ledWrite(g_led_on ? 24 : 0, g_led_on ? 12 : 0, 0);
         return;
     }
+#endif
     bool active = (g_frames_rx > 0) && (now - g_last_frame_ms < LED_ACTIVE_MS);
     if (!active) {
         ledWrite(4, 4, 4);
@@ -1254,6 +1318,175 @@ void decodeCAN(uint32_t can_id, const uint8_t* raw, uint8_t len) {
     }
 }
 
+// ── Kelly e-hydraulic pump monitor (opt-in) ─────────────────────────────────────
+#if defined(ENABLE_KELLY)
+// Read-only serial monitor for the Kelly KLS pump controller on UART1. Ports the
+// ETS protocol from kelly/solectrac-kelly-monitor.py: 8N1, three zero-data
+// monitor queries 0x3A/0x3B/0x3C, each answered by [CMD,0x10,<16 data>,CHK]; the
+// three 16-byte replies concatenate into a 48-byte block. Polling is a
+// cooperative state machine so loop() never blocks. See kelly/README.md.
+
+// UART1 is the Kelly port and nothing else, so name it for what is on the far
+// end rather than for the peripheral index.
+static HardwareSerial &kelly = Serial1;
+
+// The Kelly transmits at its documented 19200 baud — fixed, no sweep; CONFIRMED
+// by sustained ~99% frame success. An earlier ~19,900 figure (crystal-referenced
+// edge timing) was measured through a doubly-corrupted receive path — an
+// Arduino core 2.0.x firmware bug (fixed by the pioarduino/core-3.x platform,
+// see platformio.ini) on top of the noisy RXD0 console pad (GPIO44, since
+// moved to GPIO47/48) — and is void. The full story is in kelly/README.md
+// §"Actual line rate".
+static const uint32_t KELLY_BAUD = 19200;
+static const uint8_t  KELLY_MON_CMDS[3]      = {0x3A, 0x3B, 0x3C};
+static const uint32_t KELLY_POLL_INTERVAL_MS = 40;     // gap between individual queries
+static const uint32_t KELLY_CMD_TIMEOUT_MS   = 600;    // per-command reply wait
+                                                       // (matches the Python
+                                                       // monitor's 0.6 s; the
+                                                       // Kelly's turnaround plus
+                                                       // loop latency exceeds a
+                                                       // short window)
+static const uint32_t KELLY_STALE_MS         = 5000;   // JSON freshness window (a
+                                                       // little headroom over the
+                                                       // observed worst-case gap)
+
+// Display-only fault names by error_status bit (0..15). Kept in the renderer per
+// project convention; the encoding (BE u16 @ block offset 16) is the protocol
+// fact. Mirrors ERROR_NAMES in solectrac-kelly-monitor.py.
+static const char* const KELLY_ERROR_NAMES[16] = {
+    "Identify Err", "Over Volt", "Low Volt", "Reserved",
+    "Locking", "V+ Err", "Overtemp", "High Pedel",
+    "Reserved", "Reset Error", "Pedel Error", "Hall Sensor Error",
+    "Reserved", "Emergency Rev Err", "Motor OverTemp Err", "Current Meter Err",
+};
+
+// Read-only transmit chokepoint: only the three zero-data monitor queries are
+// ever put on the wire (mirrors READ_ONLY_COMMANDS in the Python monitor). No
+// flash session is opened, so the firmware cannot write or reconfigure the
+// controller — read-only by construction.
+static bool kellyIsMonitorCmd(uint8_t cmd) {
+    return cmd == 0x3A || cmd == 0x3B || cmd == 0x3C;
+}
+static void kellySendQuery(uint8_t cmd) {
+    if (!kellyIsMonitorCmd(cmd)) return;          // refuse anything else
+    const uint8_t frame[3] = {cmd, 0x00, cmd};    // [CMD, LEN=0, CHK=CMD]
+    kelly.write(frame, sizeof(frame));
+}
+
+// Decode the 48-byte block into g_kelly. Offsets and raw (unscaled) semantics
+// mirror Monitor.decode; only offsets 0..21 are defined by the protocol.
+static void kellyDecodeBlock(const uint8_t* b) {
+    g_kelly.tps_pedal         = b[0];
+    g_kelly.forward_switch    = b[4];
+    g_kelly.b_plus_v          = b[9];
+    g_kelly.motor_temp_c      = b[10];   // raw byte, as the Python decode leaves it
+    g_kelly.controller_temp_c = b[11];
+    g_kelly.low_speed         = b[15];
+    g_kelly.error_status      = (uint16_t(b[16]) << 8) | b[17];   // big-endian
+    g_kelly.motor_speed_rpm   = (uint16_t(b[18]) << 8) | b[19];
+    g_kelly.phase_current_a   = (uint16_t(b[20]) << 8) | b[21];
+    g_kelly.valid             = true;
+    g_kelly.last_seen_ms      = millis();
+}
+
+
+void kellyInit() {
+    // kelly.begin(baud, config, rxPin, txPin). The Kelly runs at a fixed 19200.
+    kelly.begin(KELLY_BAUD, SERIAL_8N1, KELLY_RXD_PIN, KELLY_TXD_PIN);
+}
+
+// Fault-tolerant poller. Rotates through the monitor commands one at a time,
+// caching each good reply in its own 16-byte slot with a timestamp. The decoded
+// reading is rebuilt whenever every needed slot is recently fresh — so a single
+// corrupted reply (EMI, a marginally-off baud) only delays that one slot instead
+// of dropping the whole reading and flickering the card. Only 0x3A and 0x3B are
+// polled: their 32 bytes carry every field kellyDecodeBlock reads (offsets
+// 0..21); 0x3C's bytes are unused, so skipping it halves the frames per reading.
+static const uint8_t KELLY_N_POLL = 2;   // poll KELLY_MON_CMDS[0..1] = 0x3A, 0x3B
+void kellyPoll() {
+    static enum { KIDLE, KWAIT } state = KIDLE;
+    static uint8_t  block[KELLY_N_POLL * 16];
+    static uint32_t slot_ms[KELLY_N_POLL] = {0};   // when each slot last refreshed
+    static uint8_t  rxbuf[40];
+    static uint8_t  rxlen  = 0;
+    static uint8_t  cur    = 0;      // command index currently in flight
+    static uint32_t next_ms = 0;     // earliest time to send the next query
+    static uint32_t sent_ms = 0;     // when the current query went out
+    static uint32_t sent_rx_total = 0;   // g_kelly_rx_total when the query went out
+
+    uint32_t now = millis();
+
+    if (state == KIDLE) {
+        if (now < next_ms) return;
+        rxlen = 0;
+        while (kelly.available()) kelly.read();   // drop stale bytes
+        g_kelly_polls++;
+        kellySendQuery(KELLY_MON_CMDS[cur]);
+        sent_ms = now;
+        sent_rx_total = g_kelly_rx_total;
+        state   = KWAIT;
+        return;
+    }
+
+    // KWAIT: gather the reply for command `cur`, resync on [CMD, 0x10, <16>, CHK].
+    while (kelly.available() && rxlen < sizeof(rxbuf)) {
+        rxbuf[rxlen++] = (uint8_t)kelly.read();
+        g_kelly_rx_total++;
+    }
+    if (rxlen > 0) {   // snapshot for /json kelly_dbg
+        g_kelly_last_rx_len = rxlen < 32 ? rxlen : 32;
+        memcpy(g_kelly_last_rx, rxbuf, g_kelly_last_rx_len);
+    }
+    uint8_t cmd = KELLY_MON_CMDS[cur];
+    for (int i = 0; i + 19 <= rxlen; i++) {
+        if (rxbuf[i] != cmd || rxbuf[i + 1] != 0x10) continue;
+        uint16_t sum = cmd + 0x10;
+        for (int j = 0; j < 16; j++) sum += rxbuf[i + 2 + j];
+        if ((sum & 0xFF) != rxbuf[i + 18]) continue;   // bad frame: keep scanning
+        // Good reply — cache this slot.
+        g_kelly_frames_ok++;
+        memcpy(&block[cur * 16], &rxbuf[i + 2], 16);
+        slot_ms[cur] = now ? now : 1;
+        // Rebuild the reading if every slot is populated and recently fresh.
+        bool all_fresh = true;
+        for (uint8_t s = 0; s < KELLY_N_POLL; s++)
+            if (!slot_ms[s] || (now - slot_ms[s]) >= KELLY_STALE_MS) all_fresh = false;
+        if (all_fresh) {
+            kellyDecodeBlock(block);
+            g_kelly_blocks_ok++;
+            if (g_kelly_last_block_ms != 0) {
+                uint32_t gap = now - g_kelly_last_block_ms;
+                if (gap > g_kelly_block_gap_max_ms) g_kelly_block_gap_max_ms = gap;
+            }
+            g_kelly_last_block_ms = now;
+        }
+        cur     = (cur + 1) % KELLY_N_POLL;   // next command
+        next_ms = now + KELLY_POLL_INTERVAL_MS;
+        state   = KIDLE;
+        return;
+    }
+    // No match: slide the window instead of jamming. The Kelly's line can
+    // carry a second continuous transmission (~19.9k stream) plus noise, so a
+    // fixed snapshot fills with non-reply bytes before the reply arrives.
+    // Every start position the scan just exhausted is dead; keep only the
+    // tail that could still begin a frame, so the reply is found no matter
+    // how much chatter precedes it.
+    if (rxlen > 18) {
+        memmove(rxbuf, rxbuf + rxlen - 18, 18);
+        rxlen = 18;
+    }
+    if (now - sent_ms > KELLY_CMD_TIMEOUT_MS) {   // no valid reply this attempt
+        if (g_kelly_rx_total == sent_rx_total)
+            g_kelly_timeouts++;                   // silence: unpowered/absent, not corruption
+        else
+            g_kelly_frames_bad++;                 // one clean count per failed attempt
+        cur     = (cur + 1) % KELLY_N_POLL;       // advance so a dead slot can't stall
+        next_ms = now + KELLY_POLL_INTERVAL_MS;
+        state   = KIDLE;
+    }
+}
+#endif  // ENABLE_KELLY
+
 // ── JSON builder ──────────────────────────────────────────────────────────────
 
 static void addFloat(JsonObject& obj, const char* key, float v, int decimals = 2) {
@@ -1507,6 +1740,56 @@ String buildJson(bool pretty = true, bool minimal = false) {
         if (!minimal && g_chgr_cmd.v_raw) cmd["v_raw"] = g_chgr_cmd.v_raw;
         if (!minimal && g_chgr_cmd.i_raw) cmd["i_raw"] = g_chgr_cmd.i_raw;
     }
+
+#if defined(ENABLE_KELLY)
+    // Kelly e-hydraulic pump controller. Emitted only while fresh; when the pump
+    // system is unpowered the controller goes silent and the object drops out
+    // (the dashboard then hides its card). Key names match dashboard.html.
+    if (g_kelly.valid && (millis() - g_kelly.last_seen_ms) < KELLY_STALE_MS) {
+        auto k = doc["kelly"].to<JsonObject>();
+        k["b_plus_v"]          = g_kelly.b_plus_v;
+        k["motor_speed_rpm"]   = g_kelly.motor_speed_rpm;
+        k["phase_current_a"]   = g_kelly.phase_current_a;
+        k["motor_temp_c"]      = g_kelly.motor_temp_c;
+        k["controller_temp_c"] = g_kelly.controller_temp_c;
+        k["low_speed"]         = g_kelly.low_speed;
+        k["error_status"]      = g_kelly.error_status;
+        if (!minimal) {
+            k["tps_pedal"]      = g_kelly.tps_pedal;
+            k["forward_switch"] = g_kelly.forward_switch;
+        }
+        auto errs = k["errors"].to<JsonArray>();
+        for (int b = 0; b < 16; b++) {
+            if (g_kelly.error_status & (1 << b)) errs.add(KELLY_ERROR_NAMES[b]);
+        }
+    }
+#if defined(KELLY_DEBUG)
+    // Serial-path diagnostics (build with -DKELLY_DEBUG). polls should climb
+    // (board is querying); rx_total > 0 means the Kelly is answering; frames_ok
+    // vs frames_bad is the per-attempt success rate on a live link; timeouts
+    // counts attempts with zero bytes back (controller unpowered, e.g. key-off);
+    // block_gap_max_ms is the worst flicker; last_rx shows raw bytes for
+    // framing/baud checks.
+    if (!minimal) {
+        auto kd = doc["kelly_dbg"].to<JsonObject>();
+        kd["polls"]       = g_kelly_polls;
+        kd["rx_total"]    = g_kelly_rx_total;
+        kd["baud"]        = KELLY_BAUD;
+        kd["frames_ok"]   = g_kelly_frames_ok;
+        kd["frames_bad"]  = g_kelly_frames_bad;
+        kd["timeouts"]    = g_kelly_timeouts;
+        kd["blocks_ok"]   = g_kelly_blocks_ok;
+        kd["block_gap_max_ms"] = g_kelly_block_gap_max_ms;
+        kd["block_gap_ms"]     = g_kelly_last_block_ms ? (millis() - g_kelly_last_block_ms) : 0;
+        kd["last_rx_len"] = g_kelly_last_rx_len;
+        char hex[65];
+        uint8_t n = g_kelly_last_rx_len < 32 ? g_kelly_last_rx_len : 32;
+        for (uint8_t i = 0; i < n; i++) sprintf(hex + i * 2, "%02X", g_kelly_last_rx[i]);
+        hex[n * 2] = '\0';
+        kd["last_rx"] = hex;
+    }
+#endif  // KELLY_DEBUG
+#endif  // ENABLE_KELLY
 
     if (!minimal) {
         // Vehicle controller
@@ -2498,6 +2781,10 @@ void setup() {
     digitalWrite(FORCE_ON_PIN, HIGH);
 #endif
 
+#if defined(ENABLE_KELLY)
+    kellyInit();   // Kelly pump monitor on UART1 (GPIO47/48)
+#endif
+
     for (int i = 0; i < NUM_CELLS; i++) g_cell_v[i] = NAN;
     for (int i = 0; i < NUM_TEMPS; i++) g_temp_c[i] = NAN;
 
@@ -2530,6 +2817,7 @@ void setup() {
         if (err == ESP_OK) g_can_initialized = true;
     }
 
+#if !defined(NO_WIFI)
     // Bring up the soft-AP first so the board is always reachable in the field
     // at 192.168.4.1 even if there's no home network in range. STA connect
     // happens in the background; we don't block boot waiting on it.
@@ -2599,6 +2887,7 @@ void setup() {
     socketcand_server.begin();
     socketcand_server.setNoDelay(true);
     MDNS.addService("socketcand", "tcp", SOCKETCAND_PORT);
+#endif  // !NO_WIFI
 
 #if defined(HAS_MCP2515)
     // Release the MCP2515 from hardware reset before any SPI traffic. RESET is
@@ -2637,7 +2926,9 @@ void setup() {
     sdInit();
 #endif
 
+#if !defined(NO_BLE)
     bleInit();
+#endif
 }
 
 // Drain both CAN controllers and fan out to every consumer (J1939 decode,
@@ -2704,16 +2995,35 @@ static void canServiceTick() {
 }
 
 void loop() {
+#if defined(KELLY_PASSTHROUGH)
+    // Bench passthrough: transparent native-USB <-> Kelly-UART bridge. Lets the
+    // Python monitor (solectrac-kelly-monitor.py --port <this board>) talk to the
+    // controller through the board to validate the Kelly UART wiring and 5 V-TTL
+    // series resistor. Nothing else runs — no CAN, no decode, no SLCAN.
+    // Stream&, not HardwareSerial&: on the S3 `Serial` is HWCDCSerial (the native
+    // USB CDC peripheral), a different class from UART1's HardwareSerial.
+    Stream &usb = Serial;
+    while (usb.available())   kelly.write(usb.read());
+    while (kelly.available()) usb.write(kelly.read());
+    return;
+#endif
     canServiceTick();
     canRecoveryTick();
     slcanPoll();
+#if !defined(NO_WIFI)
     socketcandPoll();
     dns_server.processNextRequest();
     server.handleClient();
+#endif
+#if !defined(NO_BLE)
     bleTick();
+#endif
     updateLed();
 #if defined(HAS_VIN_SENSE)
     updateVinSense();
+#endif
+#if defined(ENABLE_KELLY)
+    kellyPoll();   // non-blocking: advances the Kelly monitor state machine
 #endif
 #if defined(AUTOSHUTDOWN)
     checkCanQuietSleep();

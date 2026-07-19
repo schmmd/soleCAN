@@ -1,0 +1,116 @@
+Kelly UART galvanic isolator — build plan
+=========================================
+
+Status: PLANNED (not yet built/validated). Expected result: OBD-powered
+RejsaCAN reads the Kelly with the same ~99% frame success as a floating
+USB-powered board.
+
+Why
+---
+The Kelly KLS7218M is powered from the traction pack, so its V- is not at
+chassis potential. The RejsaCAN, powered from the OBD port, is
+chassis-referenced (and must stay that way for CAN). Wiring the two grounds
+together injects the chassis-to-traction noise into the UART's signal
+reference and corrupts frames whenever the board runs on tractor power
+(see README.md "Grounding dominates reliability"). A galvanic isolator
+removes the ground connection entirely: the Kelly side floats with the
+traction pack, the board side stays on chassis, and signals cross an
+isolation barrier instead of sharing a reference.
+
+The isolator also replaces the two level-shift hacks: run its Kelly side at
+5 V and it natively reads the Kelly's 5 V-TTL Tx and drives the Kelly's Rx
+at a full 5 V, while the board side regenerates everything at 3.3 V. The
+~1-2.2 kOhm series resistor on the RX line is no longer needed.
+
+Part choice
+-----------
+ADuM1201 dual-channel digital isolator, one channel in each direction —
+exactly the UART topology. 2500 V RMS isolation, >=1 Mbps (50x headroom
+over the link's 19200 Bd). Sold on ~$3-8 breakout boards, often labeled
+"CJMCU-1201". Any speed grade (A/B/C suffix) works.
+
+Do NOT substitute:
+  - ISO1540 / ADuM1250 / ADuM1251 — those are I2C isolators (bidirectional
+    open-drain with arbitration); driving them with push-pull UART fights
+    their design.
+  - TI ISO7721 is a fine equivalent if a breakout of it is easier to get.
+
+Isolated-side power: 12 V -> 5 V
+--------------------------------
+The isolated (Kelly) side needs a supply referenced to the Kelly's V-.
+That is what SM-4P pin 1 (red, ~12 V out of the controller) is for — it is
+how Kelly's own Bluetooth dongle powers itself. Never wire the 12 V to the
+isolator directly; regulate it down:
+
+  - 78L05 (TO-92) + 0.33 uF ceramic on IN and 0.1 uF on OUT, both right at
+    the regulator. Load is a few mA, so dissipation is ~40 mW — no heat
+    sink. A pre-made AMS1117-5.0 breakout module is an equivalent
+    no-soldering option.
+  - Do not use a switching buck module: at 5 mA there is no efficiency
+    argument, and it puts converter hash next to the UART lines.
+  - Optional but useful: LED + 1 kOhm across the 5 V rail. It lights only
+    when the controller is powering pin 1, so it doubles as a
+    "Kelly is awake" indicator.
+
+Wiring
+------
+        KELLY SIDE (floating)      | barrier |      BOARD SIDE (chassis)
+                                   |         |
+ red ---> 78L05 ---> 5V ---> VDD1 -| ADuM    |- VDD2 <--- 3V3
+ black --------------------> GND1 -|  1201   |- GND2 <--- GND
+ green (Kelly Tx) ---------> VIB  -| breakout|- VOB  ---> GPIO47 (RX)
+ blue  (Kelly Rx) <--------- VOA  -|         |- VIA  <--- GPIO48 (TX)
+
+Pin map (datasheet pin numbers — side 1 carries VOA/VIB, side 2 VOB/VIA;
+channel A runs board->Kelly, channel B Kelly->board):
+
+  Kelly side (isolated, side 1)        Board side (chassis, side 2)
+  VDD1 (1) <- 5 V from regulator       VDD2 (8) <- RejsaCAN 3V3
+  GND1 (2) <- Kelly black (V-)         GND2 (5) <- board GND
+  VIB  (4) <- Kelly green (Tx), input  VOB  (6) -> GPIO47 (RX), output
+  VOA  (3) -> Kelly blue (Rx), output  VIA  (7) <- GPIO48 (TX), input
+
+There is no longer any wire between Kelly V- and board GND, and no series
+resistor anywhere on the link.
+
+Note the ADuM1201's input thresholds scale with each side's own VDD, so
+the Kelly side must actually be powered at 5 V; at 3.3 V it would
+under-drive the Kelly's Rx again.
+
+Packaging
+---------
+Build it as an inline dongle on the harness, isolation barrier down the
+middle of one small (~3 x 4 cm) perfboard:
+
+ 1. Regulator + caps + LED on the Kelly third, ADuM1201 breakout across
+    the middle, board-side connector on the other third. Iron rule: no
+    wire, trace, or component leg crosses the middle except the isolator
+    itself — that gap IS the isolation.
+ 2. A 4-pin connector (JST-XH or screw terminals) on each end makes the
+    dongle removable. Kelly side: red/green/blue/black in SM-4P harness
+    order. Board side: 3V3, GND, GPIO47, GPIO48.
+ 3. Twist the pairs in the Kelly-side cable (green+black, blue+red), keep
+    that run short, and route it away from the pump phase leads. The
+    board-side run is noise-immune by construction.
+ 4. Zip-tie both cables through holes in the perfboard corners for strain
+    relief, then sleeve the whole board in large-diameter heatshrink or a
+    small project box, LED visible.
+ 5. Label both ends (KELLY / REJSACAN) — the dongle looks symmetric.
+
+Bill of materials (~$10)
+------------------------
+  - ADuM1201 breakout board ("CJMCU-1201")
+  - 78L05 + 0.33 uF + 0.1 uF ceramics (or AMS1117-5.0 module)
+  - LED + 1 kOhm resistor
+  - perfboard ~3 x 4 cm, two 4-pin JST-XH pairs (or screw terminals),
+    heatshrink, twisted hookup wire
+
+Behavior notes
+--------------
+  - The ADuM1201 is fail-safe high: with the tractor off (Kelly side
+    unpowered) GPIO47 sees a clean idle-high line, not garbage, so the
+    firmware's existing stale-out handles key-off with no code changes.
+  - Verification: flash the dashboard firmware (-DENABLE_KELLY
+    -DKELLY_DEBUG), power the board from the OBD port, run the pump, and
+    watch /json kelly_dbg — frames_ok should climb at ~99% of polls, as it
+    does on floating USB power.

@@ -123,8 +123,8 @@ rounding). A separate **discrete hydraulic contactor** (Table 60) gates HV
 between the pack and the BLDC hydraulic pump motor; its coil is energized from
 the main E-Controller's key-switch wire. Neither contactor is on the CAN bus,
 which is part of why hydraulic activity produces no CAN signature (the other
-part being that the e-hydraulic controller has no CAN pins at all — see "What
-is NOT on this bus").
+part being that the e-hydraulic controller is not wired to CAN on this vehicle —
+see "What is NOT on this bus").
 
 
 ## CAN bus topology
@@ -187,12 +187,14 @@ potentiometer (10 kΩ), Hall/encoder, key-switch wire from the main E-Controller
 (`KS01A`), and three-phase U/V/W out to a BLDC pump motor. It is not a
 CAN-speaking ECU on this vehicle.
 
-The parts catalog identifies the e-hydraulic as a **Kelly KLS7212M / KLS7218**
-controller, which is a CAN-capable family. However, no CAN data has been found
-that is related to the hydraulic system. The Kelly does expose a separate 4-pin
-**serial diagnostic port** (not CAN); its connector pinout, wire protocol, and
-live findings are documented in [`kelly/README.md`](kelly/README.md), alongside
-a read-only monitor tool.
+The controller is a **Kelly KLS7218M** — CONFIRMED by reading the module name
+out of its flash with the official Kelly app (the parts catalog's
+"KLS7212M / KLS7218" naming is imprecise). The family is CAN-capable, but no
+CAN data related to the hydraulic system has been found. The Kelly does expose
+a separate 4-pin **serial diagnostic port** (not CAN); its connector pinout,
+wire protocol, and live findings are documented in
+[`kelly/README.md`](kelly/README.md), alongside read-only tools for live
+telemetry and a stored-configuration dump.
 
 The rear 3-point hitch, lift, power steering, and remote hydraulics are fully
 mechanical-hydraulic with no electrical interface (per the manual's Hydraulic

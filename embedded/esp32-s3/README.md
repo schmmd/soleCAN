@@ -132,6 +132,35 @@ two-node bench setup — one talker plus this board — nothing ACKs the talker,
 it retransmits and eventually goes bus-off. Build with `-DCAN_ALLOW_TX` for
 bench work where this board must provide the ACK.
 
+## Kelly e-hydraulic pump monitor (RejsaCAN, opt-in)
+
+The e-hydraulic **Kelly KLS pump controller** is not on the CAN bus — it has a
+separate serial diagnostic port. Build with **`-DENABLE_KELLY`** (RejsaCAN only)
+to poll it on UART1 and fold its telemetry into `/json` as a `kelly` object,
+which the dashboard renders as a **Hydraulic Pump** card. Off by default; a
+plain RejsaCAN build is unchanged.
+
+```bash
+PLATFORMIO_BUILD_FLAGS=-DENABLE_KELLY pio run -e rejsacan
+```
+
+Wiring uses **GPIO47 (RX)** and **GPIO48 (TX)** — plain GPIOs, deliberately NOT
+the board's rear RXD/TXD pads (GPIO44/43, the ESP32-S3 UART0 console pins), which
+corrupted the receive waveform. The Kelly port is **5 V TTL**, so the
+controller's Tx needs a **~1–2.2 kΩ series resistor** into the RX pin to protect
+the 3.3 V input:
+
+- Kelly **Tx** (green) →\[~1–2.2 kΩ]→ **GPIO47** (RX)
+- Kelly **Rx** (blue) → **GPIO48** (TX)
+- Kelly **V−** (black) → **GND**; Kelly **V+** (red, 12 V) → leave unconnected
+
+The monitor is **read-only by construction** — only the three zero-data monitor
+queries (`0x3A/0x3B/0x3C`) are ever transmitted, and no flash session is opened,
+so the firmware cannot reconfigure the controller. Polling is non-blocking and
+the `kelly` object appears only while the controller is powered and answering.
+Connector pinout, wire protocol, field map, and the series-resistor rationale
+are in [`../../kelly/README.md`](../../kelly/README.md).
+
 ## What the LED tells you
 
 The LilyGo T-2CAN has no user LED, so its LED calls are no-ops.

@@ -12,8 +12,8 @@ configuration. Every byte written to the port passes through a single
 ``READ_ONLY_COMMANDS`` (0x11, 0x3A, 0x3B, 0x3C). Flash reads are also avoided,
 so the controller is never even placed in a programming session.
 
-Protocol (Kelly "ETS", 19200 8N1)
----------------------------------
+Protocol (Kelly "ETS", 8N1, nominally 19200 baud)
+-------------------------------------------------
     frame     = [CMD][LEN][DATA 0..16][CHECKSUM]
     checksum  = (CMD + LEN + sum(DATA)) & 0xFF
     monitor   = three zero-data queries 0x3A / 0x3B / 0x3C, each replying with
@@ -26,7 +26,7 @@ Wiring (see DOCUMENTATION.md "E-hydraulic Kelly serial diagnostics")
     Kelly SM-4P pin 2 (Tx) -> USB-serial RX
     Kelly SM-4P pin 3 (Rx) -> USB-serial TX
     Kelly SM-4P pin 4 (V-) -> USB-serial GND
-    Kelly SM-4P pin 1 (V+, ~5 V) -> leave unconnected
+    Kelly SM-4P pin 1 (V+, ~12 V) -> leave unconnected
 Confirm the SM-4P signal level before wiring: true bipolar RS-232 needs a
 MAX3232-class adapter; a logic-level port needs a plain 3.3/5 V USB-UART.
 
@@ -49,6 +49,9 @@ except ImportError:
     sys.exit("This tool needs pyserial:  pip install pyserial")
 
 
+# The controller transmits at its documented 19200 baud — CONFIRMED. An earlier
+# ~19,900 reading was measured through a corrupted receive path (see README
+# "Actual line rate"); on a clean path the documented rate decodes reliably.
 BAUD = 19200
 
 CMD_CODE_VERSION = 0x11
@@ -66,6 +69,17 @@ READ_ONLY_COMMANDS = frozenset(
 
 MONITOR_COMMANDS = (CMD_USER_MONITOR1, CMD_USER_MONITOR2, CMD_USER_MONITOR3)
 
+# Short human labels for each frame, keyed by command byte. Used only by
+# --debug to annotate the raw line dump with what the frame carries.
+# The three monitor replies are the successive 16-byte slices of the 48-byte
+# block (0x3A -> bytes 0..15, 0x3B -> 16..31, 0x3C -> 32..47).
+FRAME_DESC = {
+    CMD_CODE_VERSION:  "code version",
+    CMD_USER_MONITOR1: "pedals, switches, halls, volts, temps, directions",
+    CMD_USER_MONITOR2: "error status, motor speed, phase current",
+    CMD_USER_MONITOR3: "extended monitor (undecoded)",
+}
+
 # Grid layout of the Kelly app's "AC Monitor" screen: six rows of three
 # (label, Monitor-attribute) pairs, in the same positions the app uses.
 GRID_ROWS = (
@@ -76,6 +90,37 @@ GRID_ROWS = (
     ("Forward Switch", "forward_switch", "Motor Temp", "motor_temp_c", "Motor Speed", "motor_speed_rpm"),
     ("Reversed", "reverse_switch", "Controller Temp", "controller_temp_c", "Phase Current", "phase_current_a"),
 )
+
+# Fault names by bit position in the 16-bit error_status word (monitor offset 16,
+# big-endian). Display-only. Verified two independent ways: the kelly-connect-oss
+# reimplementation's error-name array — whose unit tests fix this bit order
+# (bit 0 "Identify Err", bit 1 "Over Volt", bit 15 "Current Meter Err") — and the
+# KLS-M/N manual's Table 1 buzzer codes, whose row-major order 1,1..4,4 lines up
+# with these bit positions. No non-zero error_status has been observed on this
+# tractor, so the labels are cross-validated against those sources, not seen live.
+ERROR_NAMES = (
+    "Identify Err",        # bit 0  — manual 1,1 auto-identify (phase/hall wiring)
+    "Over Volt",           # bit 1  — 1,2
+    "Low Volt",            # bit 2  — 1,3
+    "Reserved",            # bit 3  — 1,4
+    "Locking",             # bit 4  — 2,1 motor did not start
+    "V+ Err",              # bit 5  — 2,2 internal volts fault
+    "Overtemp",            # bit 6  — 2,3 controller over-temperature
+    "High Pedel",          # bit 7  — 2,4 throttle high at power-up
+    "Reserved",            # bit 8  — 3,1
+    "Reset Error",         # bit 9  — 3,2 internal reset
+    "Pedel Error",         # bit 10 — 3,3 hall throttle open/short
+    "Hall Sensor Error",   # bit 11 — 3,4 angle/speed sensor
+    "Reserved",            # bit 12 — 4,1
+    "Emergency Rev Err",   # bit 13 — 4,2 (manual: reserved)
+    "Motor OverTemp Err",  # bit 14 — 4,3 motor over-temperature
+    "Current Meter Err",   # bit 15 — 4,4 hall galvanometer
+)
+
+
+def error_names(error_status: int) -> list[str]:
+    """Names of the faults flagged in the 16-bit error_status bitmask."""
+    return [ERROR_NAMES[b] for b in range(16) if error_status & (1 << b)]
 
 
 class KellyError(Exception):
@@ -118,7 +163,7 @@ class Monitor:
     actual_direction: int   # 0 = forward
     brake_switch2: int
     low_speed: int          # low-speed mode select
-    error_status: int       # 16-bit fault bitmask
+    error_status: int       # 16-bit fault bitmask (bit -> ERROR_NAMES)
     motor_speed_rpm: int
     phase_current_a: int
     raw: bytes
@@ -156,10 +201,12 @@ class Monitor:
 
 
 class KellyReader:
-    def __init__(self, port: str, baud: int = BAUD, read_timeout: float = 0.6):
+    def __init__(self, port: str, baud: int = BAUD, read_timeout: float = 0.6,
+                 debug: bool = False):
         self.port = port
         self.baud = baud
         self.read_timeout = read_timeout
+        self.debug = debug  # dump raw line traffic to stderr
         self.ser = self._open()
 
     def _open(self) -> "serial.Serial":
@@ -202,29 +249,58 @@ class KellyReader:
         # the tool read-only: a write/erase/burn command can never reach here.
         if cmd not in READ_ONLY_COMMANDS:
             raise NotReadOnly(f"refusing to transmit non-read-only command 0x{cmd:02X}")
+        frame = build_tx(cmd, data)
+        self._dbg_frame("tx", frame, b"")
         self.ser.reset_input_buffer()
-        self.ser.write(build_tx(cmd, data))
+        self.ser.write(frame)
         self.ser.flush()
+
+    def _dbg_frame(self, kind: str, frame: bytes, skipped: bytes,
+                   note: str = "") -> None:
+        # With --debug, echo the raw line traffic to stderr: any bytes
+        # skipped while resyncing, then the framed transmission (good or bad).
+        if not self.debug:
+            return
+        if skipped:
+            print(f"  skip {skipped.hex()}", file=sys.stderr, flush=True)
+        desc = FRAME_DESC.get(frame[0], "unknown command")
+        if note:
+            desc = f"{desc}; {note}"
+        print(f"  {kind:4} {frame.hex()}  ({desc})", file=sys.stderr, flush=True)
 
     def _read_response(self, expected_cmd: int) -> bytes:
         # Resync on the echoed command byte, then read LEN + DATA + CHECKSUM and
-        # validate. Bad/garbage frames are skipped until the deadline.
+        # validate. Bad/garbage frames are skipped until the deadline. Bytes
+        # dropped before locking onto a frame accumulate in `skipped` so
+        # --debug can show the corruption, not just the survivor.
         deadline = time.monotonic() + self.read_timeout
+        skipped = bytearray()
         while time.monotonic() < deadline:
             first = self.ser.read(1)
-            if not first or first[0] != expected_cmd:
+            if not first:
+                continue
+            if first[0] != expected_cmd:
+                skipped += first
                 continue
             length_byte = self.ser.read(1)
             if not length_byte:
+                skipped += first
                 continue
             length = length_byte[0]
             rest = self.ser.read(length + 1)
+            frame = bytes([expected_cmd, length]) + rest
             if len(rest) < length + 1:
+                self._dbg_frame("BAD", frame, skipped, "short read")
+                skipped.clear()
                 continue
             data, rx_checksum = rest[:length], rest[length]
-            frame = bytes([expected_cmd, length]) + data
-            if checksum(frame) == rx_checksum:
+            want = checksum(bytes([expected_cmd, length]) + data)
+            if want == rx_checksum:
+                self._dbg_frame("ok", frame, skipped)
                 return data
+            self._dbg_frame("BAD", frame, skipped,
+                            f"checksum {rx_checksum:02X}!={want:02X}")
+            skipped.clear()
         raise KellyError(f"no valid response to command 0x{expected_cmd:02X}")
 
     def _query(self, cmd: int, data: bytes = b"") -> bytes:
@@ -256,8 +332,9 @@ class KellyReader:
 
 def format_block(mon: Monitor, version: str, when: float) -> str:
     ts = time.strftime("%H:%M:%S", time.localtime(when))
-    faults = "no faults" if mon.error_status == 0 else (
-        "bits " + ",".join(str(i) for i in range(16) if mon.error_status & (1 << i))
+    faults = "no faults" if mon.error_status == 0 else ", ".join(
+        f"bit{b} {ERROR_NAMES[b]}"
+        for b in range(16) if mon.error_status & (1 << b)
     )
     direction = "FWD" if mon.actual_direction == 0 else "REV"
     lines = [
@@ -283,6 +360,7 @@ def format_block(mon: Monitor, version: str, when: float) -> str:
 def to_json(mon: Monitor, version: str, when: float) -> str:
     d = asdict(mon)
     d["raw"] = mon.raw.hex()
+    d["errors"] = error_names(mon.error_status)
     d["code_version"] = version
     d["timestamp"] = when
     return json.dumps(d)
@@ -313,8 +391,9 @@ def run_tui(reader: "KellyReader", interval: float, once: bool) -> int:
         if mon.error_status == 0:
             err = Text("Error Status:   (none)", style="green")
         else:
-            bits = ",".join(str(i) for i in range(16) if mon.error_status & (1 << i))
-            err = Text(f"Error Status:   0x{mon.error_status:04X}  bits {bits}",
+            faults = ", ".join(f"bit{b} {ERROR_NAMES[b]}"
+                               for b in range(16) if mon.error_status & (1 << b))
+            err = Text(f"Error Status:   0x{mon.error_status:04X}  {faults}",
                        style="bold red")
 
         grid = Table(box=box.SQUARE, show_header=False, pad_edge=False)
@@ -387,6 +466,11 @@ def main() -> int:
                         "AC Monitor screen (needs rich)")
     parser.add_argument("--raw", action="store_true",
                         help="also print the raw 48-byte monitor block as hex")
+    parser.add_argument("--debug", action="store_true",
+                        help="dump raw line traffic to stderr: each transmitted "
+                        "query, each good frame's hex, each bad frame's hex with "
+                        "its checksum mismatch, and any garbage bytes skipped "
+                        "while resyncing (useful for diagnosing EMI corruption)")
     args = parser.parse_args()
 
     if args.tui and args.json:
@@ -399,7 +483,7 @@ def main() -> int:
         return 2
 
     try:
-        reader = KellyReader(args.port, baud=args.baud)
+        reader = KellyReader(args.port, baud=args.baud, debug=args.debug)
     except serial.SerialException as e:
         print(f"Could not open {args.port}: {e}", file=sys.stderr)
         return 1
@@ -424,8 +508,7 @@ def main() -> int:
                 misses += 1
                 secs = misses * args.interval
                 if misses == 3:
-                    print("waiting for controller frames (a Bluetooth link "
-                          "takes a moment to come up)…", file=sys.stderr)
+                    print("waiting for controller frames…", file=sys.stderr)
                 elif not args.once and misses % 20 == 0:
                     print(f"still no frames after ~{secs:.0f}s — reopening the "
                           "port to re-establish the link…", file=sys.stderr)
