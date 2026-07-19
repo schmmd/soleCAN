@@ -585,7 +585,7 @@ static inline void sdEnqueueRaw(const twai_message_t& msg) {
     if (xStreamBufferSpacesAvailable(g_sd_raw.sb) >= (size_t)n)
         xStreamBufferSend(g_sd_raw.sb, line, n, 0);
     else
-        g_sd_raw.dropped++;
+        g_sd_raw.dropped = g_sd_raw.dropped + 1;
 }
 
 // Push one JSON snapshot (built by the caller) as a line to the json ring. Only a
@@ -597,7 +597,7 @@ static inline void sdEnqueueJson(const String& js) {
         xStreamBufferSend(g_sd_json.sb, js.c_str(), len, 0);
         xStreamBufferSend(g_sd_json.sb, "\n", 1, 0);
     } else {
-        g_sd_json.dropped++;
+        g_sd_json.dropped = g_sd_json.dropped + 1;
     }
 }
 
@@ -753,8 +753,8 @@ static void sdFail(const char* op) {
 // unsafe. A stream whose file was already closed (a part-roll open that failed)
 // retries the same, never-created part number instead of skipping one.
 static void sdRecoverOrFail(const char* op) {
-    if (g_sd_raw.file)  g_sd_raw.part++;
-    if (g_sd_json.file) g_sd_json.part++;
+    if (g_sd_raw.file)  g_sd_raw.part = g_sd_raw.part + 1;
+    if (g_sd_json.file) g_sd_json.part = g_sd_json.part + 1;
     for (int attempt = 1; attempt <= SD_RECOVER_ATTEMPTS; attempt++) {
         g_sd_raw.file.close();
         g_sd_json.file.close();
@@ -763,7 +763,7 @@ static void sdRecoverOrFail(const char* op) {
         if (!SD.begin(SD_CS_PIN)) continue;
         if (!sdOpenPart(g_sd_raw))  continue;
         if (!sdOpenPart(g_sd_json)) continue;
-        g_sd.recoveries++;
+        g_sd.recoveries = g_sd.recoveries + 1;
         return;
     }
     sdFail(op);   // never returns
@@ -795,7 +795,7 @@ static void sdRollIfDue(SdStream& s) {
     if (s.part_bytes < SD_MAX_PART_BYTES) return;
     s.file.flush();
     s.file.close();
-    s.part++;
+    s.part = s.part + 1;
     if (!sdOpenPart(s)) sdRecoverOrFail(s.open_op);
 }
 
