@@ -1,6 +1,6 @@
 """Copy the repo-root dashboard.html into src/ before the firmware build.
 
-The canonical dashboard HTML lives at the repo root (../../dashboard.html
+The canonical dashboard HTML lives at the repo root (../dashboard.html
 relative to this PlatformIO project). The Android build copies it into the
 APK's assets/ the same way. Keeping the firmware copy out of git avoids the
 symlink-vs-real-file drift that bit us repeatedly.
@@ -15,7 +15,7 @@ from pathlib import Path
 Import("env")  # noqa: F821 — provided by PlatformIO
 
 _proj = Path(env["PROJECT_DIR"])  # noqa: F821
-_shared = _proj.parent.parent / "dashboard.html"
+_shared = _proj.parent / "dashboard.html"
 _dest = _proj / "src" / "dashboard.html"
 
 if _shared.exists():
