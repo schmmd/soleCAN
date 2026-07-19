@@ -1,4 +1,4 @@
-# Shared by all three Dockerfiles (root Python, embedded/esp32-s3, android).
+# Shared by all three Dockerfiles (root Python, esp32-s3, android).
 # Universal excludes — VCS, build artifacts, secrets. Per-Dockerfile COPYs
 # determine what actually ends up in each image; any extras here just keep
 # the build-context tar smaller.
@@ -7,7 +7,7 @@
 **/__pycache__
 *.log
 out/
-embedded/esp32-s3/.env
+esp32-s3/.env
 
 # Android-local artifacts (mirrors android/.gitignore). Keep the Android
 # tree itself in context — android/Dockerfile copies it.

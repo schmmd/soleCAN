@@ -4,7 +4,7 @@
 # dashboard.html that lives at the repo root (shared with the Android app).
 # From the repo root:
 #
-#   docker build -f embedded/esp32-s3/Dockerfile -t solectrac-fw .
+#   docker build -f esp32-s3/Dockerfile -t solectrac-fw .
 #
 # Then extract the build artifacts onto the host so you can flash from macOS —
 # Docker Desktop on macOS cannot reach the board's USB serial port, so flashing
@@ -30,7 +30,7 @@ RUN pip install --no-cache-dir --root-user-action=ignore "platformio==6.1.19"
 WORKDIR /project
 
 # Copy the firmware project (board defs, platformio.ini, src/).
-COPY embedded/esp32-s3/ ./
+COPY esp32-s3/ ./
 
 # The canonical dashboard.html lives at the repo root and is gitignored
 # inside the firmware tree. Place it where board_build.embed_txtfiles
@@ -42,7 +42,7 @@ COPY dashboard.html ./src/dashboard.html
 # network the board also joins for bench use — empty means AP-only (the stable
 # field default; the board still broadcasts its own hotspot). AP_SSID / AP_PASS
 # / MDNS_NAME override that hotspot and the mDNS hostname. Override any of these
-# via --build-arg, e.g. `set -a; source embedded/esp32-s3/.env; set +a`
+# via --build-arg, e.g. `set -a; source esp32-s3/.env; set +a`
 # then --build-arg AP_PASS="$AP_PASS".
 ARG WIFI_SSID=
 ARG WIFI_PASS=
