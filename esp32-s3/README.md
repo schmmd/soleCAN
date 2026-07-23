@@ -120,7 +120,7 @@ pio run -e <env>                                          # listen-only passive 
 PLATFORMIO_BUILD_FLAGS=-DCAN_ALLOW_TX pio run -e <env>    # NORMAL: ACKs + transmit
 
 # Docker (reproducible build): add the build-arg; omit it for the passive tap
-docker build -f embedded/esp32-s3/Dockerfile --build-arg CAN_ALLOW_TX=1 -t solectrac-fw .
+docker build -f esp32-s3/Dockerfile --build-arg CAN_ALLOW_TX=1 -t solectrac-fw .
 ```
 
 Confirm which mode is running via `can.mode` (`normal` / `listen_only`) in
@@ -207,7 +207,7 @@ The LilyGo T-2CAN has no user LED, so its LED calls are no-ops.
 
    ```bash
    git clone <repo-url>
-   cd solectrac/embedded/esp32-s3
+   cd solectrac/esp32-s3
    ```
 
 3. *(Optional)* **Set a bench WiFi network** to also join. Leave these unset to
@@ -257,7 +257,7 @@ The build context is the **repo root** (the firmware embeds the canonical
 `dashboard.html` shared with the Android app). From the repo root:
 
 ```bash
-docker build -f embedded/esp32-s3/Dockerfile \
+docker build -f esp32-s3/Dockerfile \
     --build-arg GIT_SHA=$(git rev-parse --short HEAD) -t solectrac-fw .
 ```
 
@@ -292,8 +292,8 @@ standard Arduino-ESP32 offsets — the same four images, at the same offsets, th
 To override the credentials in a Docker build, pass them as build args:
 
 ```bash
-set -a; source embedded/esp32-s3/.env; set +a
-docker build -f embedded/esp32-s3/Dockerfile \
+set -a; source esp32-s3/.env; set +a
+docker build -f esp32-s3/Dockerfile \
     --build-arg AP_SSID="$AP_SSID" --build-arg AP_PASS="$AP_PASS" \
     --build-arg MDNS_NAME="$MDNS_NAME" \
     --build-arg WIFI_SSID="$WIFI_SSID" --build-arg WIFI_PASS="$WIFI_PASS" \
@@ -470,11 +470,11 @@ the raw-frame taps, and that `motor.alive` latches and goes stale correctly.
 ```bash
 # WiFi-only smoke test: join the device's AP (SSID `tractor`), then from the
 # repo root:
-uv run python embedded/esp32-s3/device-test.py
+uv run python esp32-s3/device-test.py
 
 # Full pre-ship run: USB serial + bench injector + ACK adapter + BLE +
 # operator LED checks
-uv run python embedded/esp32-s3/device-test.py \
+uv run python esp32-s3/device-test.py \
     --serial /dev/cu.usbmodem101 \
     --inject-interface slcan --inject-channel /dev/cu.usbserial-A50 \
     --ack-interface canalystii --ack-channel 0 \

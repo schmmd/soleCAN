@@ -1030,21 +1030,30 @@ def stage_inject(args) -> None:
                     bus.send(msg, timeout=1.0)
                     sent += 1
                 time.sleep(2.5)  # let the writer drain and hit a flush cycle
-                sd1 = jget(fetch_json(args.host), "sd", {})
-                report("INFO", f"soak sent {sent} frames in {args.sd_soak} s")
+                j1 = fetch_json(args.host)
+                sd1 = jget(j1, "sd", {})
+                # The SLCAN injector accepts frames over USB far faster than a
+                # 250 kbit/s bus can transmit them, so `sent` (USB-queued) hugely
+                # overcounts what reaches the wire — size the expectation from
+                # what the device actually received (frames_rx) instead.
+                rx = jget(j1, "can.frames_rx", 0) - jget(j, "can.frames_rx", 0)
+                report("INFO", f"soak queued {sent} frames over USB in "
+                               f"{args.sd_soak} s; device received {rx} "
+                               "(bus-rate limited)")
                 if not check(sd1.get("state") == "logging",
                              "SD still logging after write soak",
                              f"state={sd1.get('state')} "
                              f"fail_op={sd1.get('fail_op')!r}"):
                     return
                 # ~55 bytes per .asc line; require half the expectation to
-                # absorb line-length variation. kb_written's ±1 KB
-                # quantization is negligible at soak volumes.
-                expect_kb = sent * 55 / 1024
+                # absorb line-length variation and the 1 Hz jsonl snapshots.
+                # kb_written's ±1 KB quantization is negligible at soak volumes.
+                expect_kb = rx * 55 / 1024
                 got_kb = sd1.get("kb_written", 0) - sd0.get("kb_written", 0)
                 check(got_kb >= expect_kb / 2,
                       "soak bytes landed on the card",
-                      f"kb_written +{got_kb} (sent ≈ {expect_kb:.0f} KB)")
+                      f"kb_written +{got_kb} KB, device received {rx} frames "
+                      f"(≈ {expect_kb:.0f} KB)")
                 rec = sd1.get("recoveries", 0) - sd0.get("recoveries", 0)
                 if rec:
                     report("WARN", f"{rec} remount recoveries during soak — "
@@ -1089,8 +1098,11 @@ def stage_ble(args) -> None:
                 dev = d
                 break
         if dev is None:
-            raise RuntimeError(f"no BLE device named {args.mdns_name!r} "
-                               "advertising the NUS service")
+            raise RuntimeError(
+                f"no BLE device named {args.mdns_name!r} advertising the NUS "
+                "service — it stops advertising while connected, so another "
+                "central (phone, Android app) is likely holding it; "
+                "disconnect and retry")
         report("INFO", f"found {dev.name or '?'} [{dev.address}]")
 
         buf = bytearray()
