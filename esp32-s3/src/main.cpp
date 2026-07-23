@@ -1944,11 +1944,13 @@ static String staDisconnectReasonName(uint8_t reason) {
     }
 }
 
-// Build + WiFi diagnostics, deliberately separate from the /json telemetry:
-// this reports what was baked into the binary and how the home-network join
-// is going. The soft-AP is always up, so /config stays reachable at
-// 192.168.4.1 even when the STA join failed — one request distinguishes
-// "wrong password" from "wrong SSID" from "built with empty credentials".
+// Build + WiFi diagnostics, deliberately separate from the /json telemetry.
+// board/version/features and the AP identity are what was baked into the
+// binary; the station (sta) fields report the *active* credentials, which come
+// from NVS when set at runtime via /wifi and otherwise fall back to the
+// compiled WIFI_SSID/WIFI_PASS defaults. The soft-AP is always up, so /config
+// stays reachable at 192.168.4.1 even when the STA join failed — one request
+// distinguishes "wrong password" from "wrong SSID" from "no station configured".
 void handleConfig() {
     noteHttpActivity();
     JsonDocument doc;
