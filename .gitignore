@@ -5,8 +5,8 @@ uv.lock
 __pycache__
 *.swp
 
-# Firmware artifacts extracted from the Docker build (see embedded/esp32-s3)
+# Firmware artifacts extracted from the Docker build (see esp32-s3)
 out/
 
 # clangd index cache (created by IDE tooling in the firmware tree)
-embedded/esp32-s3/.cache/
+esp32-s3/.cache/
