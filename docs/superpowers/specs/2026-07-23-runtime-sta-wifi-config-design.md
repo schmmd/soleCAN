@@ -22,14 +22,12 @@ soft-AP (`tractor` @ 192.168.4.1, WPA2 via `AP_PASS`, wildcard-DNS captive
 portal) is always up alongside the STA join, so the AP is a reliable recovery
 path even when STA credentials are wrong.
 
-**Known constraint (from the existing comment at the WiFi bring-up):** when the
-STA is enabled but its SSID is not found, the station scans every channel
+**Critical constraint (from the existing comment at the WiFi bring-up):** when
+the STA is enabled but its SSID is not found, the station scans every channel
 forever, which makes the shared-radio soft-AP beacon hop channels and drop out.
-Applying an unreachable SSID (a typo) therefore degrades the soft-AP, and since
-the credentials persist in NVS the degradation survives a reboot until correct
-credentials are re-entered or NVS is erased. This is an accepted risk: the
-form is deliberately kept simple (no pre-apply scan), and the AP-password gate
-plus the operator typing a network they know keeps the exposure low.
+Because the AP is both the recovery path and what the operator is connected to
+when submitting the form, applying an unreachable SSID could strand the board.
+The design guards against this with a pre-apply scan.
 
 ## Storage
 
@@ -77,12 +75,15 @@ A minimal embedded (PROGMEM) HTML form:
 Form-encoded body: `ssid`, `pass`, `ap_pass`. Processing order:
 
 1. **AP-password gate.** Compare `ap_pass` to the compiled `AP_PASS` with a
-   length-independent (constant-time) compare. On mismatch → `401`, no save,
-   running config untouched.
+   length-independent (constant-time) compare. On mismatch → `401`, no scan, no
+   save, running config untouched.
 2. **Validation.** `ssid` length 0-32; `pass` length 0 or 8-63 (WPA2). An empty
-   `ssid` is the explicit "disable STA / AP-only" case. Invalid → `400`, running
-   config untouched.
-3. **Persist + apply.** Write `g_sta_ssid`/`g_sta_pass`, save to NVS, then live
+   `ssid` is the explicit "disable STA / AP-only" case (skips the scan in
+   step 3). Invalid → `400`, running config untouched.
+3. **Scan guard.** For a non-empty SSID, `WiFi.scanNetworks()` and require the
+   SSID to appear in the results. Not found → `422`, running config untouched
+   (this is the strand-the-AP guard).
+4. **Persist + apply.** Write `g_sta_ssid`/`g_sta_pass`, save to NVS, then live
    re-join: `WiFi.mode(WIFI_AP_STA)` (or `WIFI_AP` when cleared to AP-only),
    `WiFi.disconnect(false)`, and `WiFi.begin(g_sta_ssid, g_sta_pass)` for a
    configured SSID. Respond `200` with a short status. The existing
@@ -90,7 +91,9 @@ Form-encoded body: `ssid`, `pass`, `ap_pass`. Processing order:
    `g_sta_*` counters; mDNS re-announces on the new IP — no reboot.
 
 All of POST /wifi runs on the loop task (like every other handler), so the NVS
-write and `WiFi.begin` are single-threaded with the rest of `loop()`.
+write and `WiFi.begin` are single-threaded with the rest of `loop()`. The
+`WiFi.scanNetworks()` blocks the loop for ~2-3 s; acceptable for a rare manual
+action, and it does not transmit on the CAN bus.
 
 ## Security / threat model
 
@@ -109,8 +112,8 @@ device):
 - `GET /wifi` returns `200` and the form HTML.
 - `POST /wifi` with a wrong `ap_pass` → `401`; `GET /config` still shows the old
   SSID (no change).
-- `POST /wifi` with a malformed password (e.g. 3 chars) and correct `ap_pass`
-  → `400`; config unchanged.
+- `POST /wifi` with the correct `ap_pass` but a bogus SSID → `422` (scan guard);
+  config unchanged.
 - `POST /wifi` clearing the SSID (empty, correct `ap_pass`) → `200`, STA
   disabled — then restore the original via a second POST so the test is
   non-destructive to the bench network join.
