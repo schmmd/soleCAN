@@ -63,12 +63,12 @@ presentation in the consumer.
   cannot write controller config. Connector pinout, wire protocol, and field
   map are in `kelly/README.md`.
 
-### Embedded firmware (`embedded/esp32-s3/`)
+### Embedded firmware (`esp32-s3/`)
 ESP32-S3 firmware that re-implements the main-bus J1939 decode in C++ and
 exposes it four ways: WiFi HTML dashboard, JSON endpoint, BLE (Nordic UART
 Service), USB SLCAN, and socketcand. All logic is in `src/main.cpp`; the board
 pin maps are `#ifdef`-selected (`BOARD_ADAFRUIT_FEATHER_S3` /
-`BOARD_LILYGO_T2CAN`). See `embedded/esp32-s3/README.md` for the full build,
+`BOARD_LILYGO_T2CAN`). See `esp32-s3/README.md` for the full build,
 wiring, and flashing guide.
 
 ### Android app (`android/`)
@@ -83,14 +83,14 @@ consumers copy it into place at build time:
 - Android (`android/app/build.gradle.kts`) registers a `copyDashboardAsset`
   task that runs before `preBuild` and copies it into
   `android/app/src/main/assets/dashboard.html`.
-- ESP32 (`embedded/esp32-s3/copy_dashboard.py`, wired in via
+- ESP32 (`esp32-s3/copy_dashboard.py`, wired in via
   `extra_scripts = pre:copy_dashboard.py`) copies it to
-  `embedded/esp32-s3/src/dashboard.html` so `board_build.embed_txtfiles` can
+  `esp32-s3/src/dashboard.html` so `board_build.embed_txtfiles` can
   bake it into the firmware binary.
 
 Both destinations are gitignored, so the file cannot drift — there is only
 one tracked copy. The Docker build uses the repo root as its context and
-places `dashboard.html` directly at `embedded/esp32-s3/src/dashboard.html`;
+places `dashboard.html` directly at `esp32-s3/src/dashboard.html`;
 `copy_dashboard.py` treats a pre-placed file as authoritative when the shared
 source isn't present in the build context.
 
@@ -116,14 +116,14 @@ python3 solecan-stream.py --replay session.log
 python3 bms/solectrac-bms-diagnostics.py
 ```
 
-### Firmware (`embedded/esp32-s3/`)
-The reproducible path is Docker (see `embedded/esp32-s3/README.md`); native
+### Firmware (`esp32-s3/`)
+The reproducible path is Docker (see `esp32-s3/README.md`); native
 builds use PlatformIO. Flashing always happens on the host (Docker Desktop on
 macOS can't reach USB).
 
 ```bash
 # Docker build (context = repo root, because it embeds the canonical dashboard.html)
-docker build -f embedded/esp32-s3/Dockerfile \
+docker build -f esp32-s3/Dockerfile \
     --build-arg WIFI_SSID="..." --build-arg WIFI_PASS="..." \
     --build-arg GIT_SHA=$(git rev-parse --short HEAD) -t solectrac-fw .
 docker run --rm -v "$PWD/out:/out" solectrac-fw   # extracts bins to out/
@@ -152,12 +152,12 @@ gradle wrapper --gradle-version 8.7   # one-time; wrapper JAR is not checked in
 
 ## Testing
 There are no unit tests and nothing runs in CI — the tools are validated
-against real captures and live injection on the tractor. The one test suite is `embedded/esp32-s3/device-test.py`, a
+against real captures and live injection on the tractor. The one test suite is `esp32-s3/device-test.py`, a
 hardware-in-the-loop acceptance suite run against a flashed, powered device
 before it ships. It needs bench hardware: the device itself, and for the CAN
 decode stage a bench injector adapter plus an ACK node (the device under test
 is listen-only and never ACKs). See "Pre-ship bench test" in
-`embedded/esp32-s3/README.md` for setup and usage. Its J1939 fixtures are
+`esp32-s3/README.md` for setup and usage. Its J1939 fixtures are
 deliberately hand-encoded golden values, independent of `solecan_proto.py` —
 keep them that way so the suite checks the firmware decode rather than
 mirroring it.
