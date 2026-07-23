@@ -371,6 +371,7 @@ via mDNS.
 |---|---|
 | `http://tractor.local/` | Auto-refreshing dashboard |
 | `http://tractor.local/json` | Decoded state as JSON |
+| `http://tractor.local/config` | Build + WiFi diagnostics as JSON (board, firmware version, features, STA/AP status) |
 | `http://tractor.local/wifi` | Web form to set the station WiFi SSID/password at runtime (AP-password gated) |
 | `tractor.local:28600` | socketcand TCP stream of raw CAN frames |
 | `/dev/cu.usbmodem*` (USB CDC) | SLCAN stream of raw CAN frames |
