@@ -2018,7 +2018,7 @@ void handleWifiForm() {
     noteHttpActivity();
     String body = F("<!doctype html><meta name=viewport "
                     "content='width=device-width,initial-scale=1'>"
-                    "<title>WiFi setup</title><h2>Station WiFi</h2><p>Current SSID: <b>");
+                    "<title>WiFi setup</title><h2>SoleCAN WiFi</h2><p>Current SSID: <b>");
     body += staConfigured() ? htmlEscape(g_sta_ssid) : String("(none \xE2\x80\x94 AP only)");
     body += F("</b><br>Password set: ");
     body += g_sta_pass[0] ? F("yes") : F("no");
