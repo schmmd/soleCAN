@@ -71,6 +71,7 @@ import tarfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 # ── Device constants (mirror src/main.cpp — update together) ─────────────────
@@ -173,6 +174,19 @@ def http_request(host: str, path: str, method: str = "GET",
 
 def http_get(host: str, path: str, timeout: float = 6.0):
     return http_request(host, path, timeout=timeout)
+
+
+def http_post(host: str, path: str, fields: dict, timeout: float = 6.0):
+    """POST form-urlencoded fields; returns (status, headers, body)."""
+    url = f"http://{host}:{HTTP_PORT}{path}"
+    data = urllib.parse.urlencode(fields).encode()
+    req = urllib.request.Request(url, data=data, method="POST")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    try:
+        with OPENER.open(req, timeout=timeout) as resp:
+            return resp.status, dict(resp.headers), resp.read()
+    except urllib.error.HTTPError as e:
+        return e.code, dict(e.headers), e.read()
 
 
 def fetch_json(host: str, retries: int = 2):
@@ -557,6 +571,57 @@ def stage_mdns(args) -> None:
         check(True, f"{name} serves /json")
     except RuntimeError as e:
         check(False, f"{name} serves /json", str(e))
+
+
+def stage_wifi(args) -> None:
+    section("WiFi config (/wifi)")
+    # Baseline: current STA SSID from /config (not /json — sta lives on /config).
+    status, _, body = http_get(args.host, "/config")
+    if not check(status == 200, "GET /config", f"HTTP {status}"):
+        return
+    orig_ssid = json.loads(body).get("wifi", {}).get("sta", {}).get("ssid", "")
+    report("INFO", f"current STA SSID: {orig_ssid!r}")
+
+    status, _, body = http_get(args.host, "/wifi")
+    check(status == 200, "GET /wifi returns the form", f"HTTP {status}")
+    check(b"<form" in body and b"ap_pass" in body,
+          "form has an ap_pass field")
+
+    # Wrong AP password is rejected and changes nothing.
+    status, _, _ = http_post(args.host, "/wifi",
+                             {"ssid": "shouldnotstick", "pass": "",
+                              "ap_pass": "definitely-wrong"})
+    check(status == 401, "POST /wifi with wrong ap_pass -> 401", f"HTTP {status}")
+    now = json.loads(http_get(args.host, "/config")[2])["wifi"]["sta"]["ssid"]
+    check(now == orig_ssid, "SSID unchanged after rejected POST",
+          f"{now!r} != {orig_ssid!r}")
+
+    # Malformed password (too short for WPA2, non-empty) is rejected.
+    status, _, _ = http_post(args.host, "/wifi",
+                             {"ssid": "somenet", "pass": "abc",
+                              "ap_pass": args.ap_pass})
+    check(status == 400, "POST /wifi with 3-char pass -> 400", f"HTTP {status}")
+
+    # Clear to AP-only (empty SSID, correct ap_pass), then restore the original
+    # so the bench network join is not left disabled.
+    status, _, _ = http_post(args.host, "/wifi",
+                             {"ssid": "", "pass": "", "ap_pass": args.ap_pass})
+    check(status == 200, "POST /wifi clear SSID -> 200 (STA disabled)",
+          f"HTTP {status}")
+    time.sleep(1.0)
+    now = json.loads(http_get(args.host, "/config")[2])["wifi"]["sta"]["ssid"]
+    check(now == "", "STA SSID cleared", f"{now!r}")
+
+    # Restore.
+    status, _, _ = http_post(args.host, "/wifi",
+                             {"ssid": orig_ssid, "pass": args.wifi_restore_pass,
+                              "ap_pass": args.ap_pass}) if orig_ssid else (200, None, None)
+    if orig_ssid:
+        check(status == 200, "POST /wifi restore original SSID -> 200",
+              f"HTTP {status}")
+        report("INFO", f"restored STA SSID to {orig_ssid!r}")
+    else:
+        report("INFO", "no original SSID to restore (was AP-only)")
 
 
 def stage_socketcand(args) -> None:
@@ -1212,6 +1277,12 @@ def main() -> int:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     ap.add_argument("--host", default="192.168.4.1",
                     help="device IP or hostname (AP address by default)")
+    ap.add_argument("--ap-pass", default="electricity",
+                    help="AP password (AP_PASS) — required to POST /wifi; "
+                         "defaults to the compiled default")
+    ap.add_argument("--wifi-restore-pass", default="",
+                    help="STA password to restore after the /wifi clear test "
+                         "(the device never discloses the stored password)")
     ap.add_argument("--mdns-name", default="tractor",
                     help="mDNS hostname / BLE device name the build advertises")
     ap.add_argument("--skip-mdns", action="store_true",
@@ -1280,6 +1351,7 @@ def main() -> int:
     sd_ok = stage_sd(args, j)
     stage_sd_files(args, sd_ok)
     stage_mdns(args)
+    stage_wifi(args)
     stage_socketcand(args)
     stage_slcan(args)
     stage_inject(args)
