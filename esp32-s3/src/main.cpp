@@ -19,6 +19,7 @@
 #include <Arduino.h>
 #include <vector>
 #include <WiFi.h>
+#include <Preferences.h>
 #include <ESPmDNS.h>
 #include <DNSServer.h>
 #include <WebServer.h>
@@ -427,6 +428,30 @@ bool        g_ap_running      = false;
 // single-word values (torn reads aren't possible at word width or below).
 volatile uint32_t g_sta_disconnects = 0;
 volatile uint8_t  g_sta_last_disconnect_reason = 0;   // 0 = never disconnected
+
+// Runtime STA credentials — the single source of truth for the station join.
+// Seeded from NVS if provisioned, else from the compiled WIFI_SSID/WIFI_PASS
+// defaults. Written by the /wifi POST handler.
+char g_sta_ssid[33] = "";
+char g_sta_pass[64] = "";
+static Preferences g_prefs;
+
+static inline bool staConfigured() { return g_sta_ssid[0] != '\0'; }
+
+// NVS 'wifi' namespace overrides the compiled defaults; an absent 'ssid' key
+// means "never provisioned", so fall back to the baked-in defaults (keeps the
+// default build's behavior). Call once, before WiFi bring-up.
+static void loadStaCreds() {
+    g_prefs.begin("wifi", /*readOnly=*/true);
+    if (g_prefs.isKey("ssid")) {
+        g_prefs.getString("ssid", g_sta_ssid, sizeof(g_sta_ssid));
+        g_prefs.getString("pass", g_sta_pass, sizeof(g_sta_pass));
+    } else {
+        strlcpy(g_sta_ssid, WIFI_SSID, sizeof(g_sta_ssid));
+        strlcpy(g_sta_pass, WIFI_PASS, sizeof(g_sta_pass));
+    }
+    g_prefs.end();
+}
 
 #if defined(HAS_MCP2515)
 bool        g_mcp_initialized = false;
@@ -1919,9 +1944,9 @@ void handleConfig() {
     auto wifi = doc["wifi"].to<JsonObject>();
 
     auto sta = wifi["sta"].to<JsonObject>();
-    const bool join_sta = (sizeof(WIFI_SSID) > 1);
-    sta["ssid"]     = WIFI_SSID;                    // exactly what was compiled in
-    sta["pass_set"] = (sizeof(WIFI_PASS) > 1);      // presence only, never the password
+    const bool join_sta = staConfigured();
+    sta["ssid"]     = g_sta_ssid;                   // active STA SSID (NVS or default)
+    sta["pass_set"] = (g_sta_pass[0] != '\0');      // presence only, never the password
     sta["enabled"]  = join_sta;
     const bool sta_connected = join_sta && WiFi.status() == WL_CONNECTED;
     sta["status"] = !join_sta ? "disabled"
@@ -2862,17 +2887,18 @@ void setup() {
         }
     });
 
-    const bool join_sta = (sizeof(WIFI_SSID) > 1);
+    loadStaCreds();
+    const bool join_sta = staConfigured();
     WiFi.mode(join_sta ? WIFI_AP_STA : WIFI_AP);
     g_ap_running = WiFi.softAP(AP_SSID, AP_PASS);
-    if (join_sta) WiFi.begin(WIFI_SSID, WIFI_PASS);
+    if (join_sta) WiFi.begin(g_sta_ssid, g_sta_pass);
 
     if (join_sta)
         Serial.printf("WiFi: AP \"%s\" %s; STA joining \"%s\" (pass %u chars)\r\n",
                       AP_SSID, g_ap_running ? "up" : "FAILED",
-                      WIFI_SSID, (unsigned)(sizeof(WIFI_PASS) - 1));
+                      g_sta_ssid, (unsigned)strlen(g_sta_pass));
     else
-        Serial.printf("WiFi: AP \"%s\" %s; STA disabled (no WIFI_SSID baked in)\r\n",
+        Serial.printf("WiFi: AP \"%s\" %s; STA disabled (no SSID configured)\r\n",
                       AP_SSID, g_ap_running ? "up" : "FAILED");
 
     // Wildcard DNS on the soft-AP: any hostname (tractor.local, tractor,
