@@ -418,6 +418,7 @@ uint32_t    g_last_frame_ms  = 0;   // millis() at last received frame
 uint32_t    g_last_http_ms   = 0;   // millis() at last served HTTP request (defers quiet sleep)
 uint32_t    g_can_recoveries = 0;   // bus-off recoveries initiated since boot
 uint32_t    g_socketcand_tx_dropped = 0;   // frames dropped on full client TCP buffers
+uint32_t    g_slcan_tx_dropped = 0;   // frames dropped on a full USB-CDC TX buffer (stalled reader)
 bool        g_can_initialized = false;
 bool        g_ap_running      = false;
 
@@ -1537,6 +1538,8 @@ String buildJson(bool pretty = true, bool minimal = false) {
     if (!minimal) can["frames_decoded"] = g_frames_decoded;
     if (!minimal && g_socketcand_tx_dropped)
         can["socketcand_dropped"] = g_socketcand_tx_dropped;
+    if (!minimal && g_slcan_tx_dropped)
+        can["slcan_dropped"] = g_slcan_tx_dropped;
     if (g_frames_rx > 0)
         can["last_frame_age_s"] = (millis() - g_last_frame_ms) / 1000.0;
 #if defined(HAS_MCP2515)
@@ -2329,7 +2332,16 @@ void slcanSendFrame(const twai_message_t& msg) {
     for (int i = 0; i < msg.data_length_code && n < (int)sizeof(line) - 3; i++)
         n += snprintf(line + n, sizeof(line) - n, "%02X", msg.data[i]);
     line[n++] = '\r';
-    Serial.write((uint8_t*)line, n);
+    // Never block the CAN drain on a stalled USB host: if the CDC TX buffer
+    // can't take the whole line, drop it (like the SD ring and the socketcand
+    // tap) rather than stall loop() per frame. A reader that opened the SLCAN
+    // tap but stopped draining — e.g. the bench soak, which holds the port open
+    // while flooding the bus — would otherwise make every Serial.write() block,
+    // starving HTTP/BLE and overflowing the RX queue under load.
+    if (Serial.availableForWrite() >= n)
+        Serial.write((uint8_t*)line, n);
+    else
+        g_slcan_tx_dropped++;
 }
 
 // Single hex digit -> 0..15, or -1 if not a hex character.
@@ -2937,9 +2949,23 @@ void setup() {
 // HTTP handler monopolizes the loop task; the tar streamer calls it once per
 // chunk for exactly that reason. Runs only on the loop task and never calls
 // server.handleClient(), so it is single-threaded and not reentrant.
+//
+// The per-tick drain cap is a runaway-safety bound, not the fix for the
+// device-test --sd-soak starvation — that was slcanSendFrame() blocking on a
+// full USB-CDC buffer, now dropped non-blockingly like the other taps. The cap
+// only guarantees the loop always returns to server.handleClient()/bleTick()
+// even if a future per-frame consumer turns slow again. It equals the driver
+// RX queue depth (rx_queue_len, see setup) so it drains the whole queue in one
+// pass — capping *below* the queue would leave frames sitting that the loop
+// could have taken, adding needless occupancy and rx_missed pressure — while
+// still bounding the pathological "queue refills as fast as we drain" case at
+// one queue's worth per tick.
+#define CAN_RX_MAX_PER_TICK 512
 static void canServiceTick() {
     twai_message_t msg;
-    while (twai_receive(&msg, 0) == ESP_OK) {
+    for (uint16_t drained = 0;
+         drained < CAN_RX_MAX_PER_TICK && twai_receive(&msg, 0) == ESP_OK;
+         drained++) {
         // Classic CAN allows DLC 9–15 on the wire (still only 8 data bytes)
         // and the driver passes the raw value through (flagged
         // TWAI_MSG_FLAG_DLC_NON_COMP). Clamp before fan-out so the SLCAN /
