@@ -433,15 +433,32 @@ Expected: upload completes; device reboots. Confirm reachable: `curl -s http://1
 
 - [ ] **Step 2: Run the `/wifi` device-test stage**
 
-Run (supply the real STA password so the stage restores the join):
+By default the `/wifi` stage only runs its non-destructive checks (GET form,
+401 on wrong ap_pass, 400 on short pass, SSID unchanged) — safe to run against
+the STA/bench host:
 
 ```bash
 uv run python esp32-s3/device-test.py --host 192.168.1.180 \
-    --ap-pass electricity --wifi-restore-pass "$WIFI_PASSWORD" \
+    --ap-pass electricity \
     2>&1 | sed -n '/WiFi config/,/^==/p'
 ```
 
-Expected: every `/wifi` check is `PASS` (GET form, 401 on wrong ap_pass, SSID unchanged, 400 on short pass, clear→200, cleared, restore→200).
+Expected: every check is `PASS`, and the clear/restore sub-test reports
+`SKIP` (pass `--wifi-clear-test`, AP host only).
+
+The destructive clear+restore of the STA SSID (`ssid=""` then restore) drops
+the STA network, so it must only be run against the AP host with
+`--wifi-restore-pass` set to restore the join:
+
+```bash
+uv run python esp32-s3/device-test.py --host 192.168.4.1 \
+    --ap-pass electricity --wifi-clear-test --wifi-restore-pass "$WIFI_PASSWORD" \
+    2>&1 | sed -n '/WiFi config/,/^==/p'
+```
+
+Expected: every `/wifi` check is `PASS`, including clear→200, cleared, and
+restore→200 with the restored STA SSID verified to reconnect (`sta.status ==
+"connected"`).
 
 - [ ] **Step 3: Manual live round-trip (no reboot)**
 
@@ -449,7 +466,9 @@ Note the current `uptime` from `/config`. Join the `tractor` AP (or from the LAN
 
 - [ ] **Step 4: Full regression run**
 
-Run the full suite to confirm nothing else regressed:
+Run the full suite to confirm nothing else regressed. This targets the
+STA/bench host, so it deliberately omits `--wifi-clear-test` (the
+destructive clear+restore is only ever run against the AP host per Step 2):
 
 ```bash
 uv run python esp32-s3/device-test.py --host 192.168.1.180 \
@@ -460,7 +479,8 @@ uv run python esp32-s3/device-test.py --host 192.168.1.180 \
     --ap-pass electricity --wifi-restore-pass "$WIFI_PASSWORD"
 ```
 
-Expected: `Result: ship-ready`, including the new WiFi stage.
+Expected: `Result: ship-ready`, including the new WiFi stage (its
+clear/restore sub-test reporting `SKIP`, as expected on this host).
 
 - [ ] **Step 5: Commit any doc updates**
 

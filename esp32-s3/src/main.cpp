@@ -463,7 +463,7 @@ static void saveStaCreds(const char* ssid, const char* pass) {
 // Length-independent compare so a wrong AP password can't be timing-probed.
 static bool secretEquals(const String& got, const char* want) {
     size_t wl = strlen(want);
-    uint8_t diff = (uint8_t)(got.length() ^ wl);
+    uint8_t diff = (got.length() != wl) ? 1 : 0;
     for (size_t i = 0; i < got.length(); i++)
         diff |= (uint8_t)got[i] ^ (uint8_t)(i < wl ? want[i] : 0);
     return diff == 0;
@@ -2432,9 +2432,10 @@ void handleNotFound() {
 // concept, so it never reaches the MCP2515 (can1). A listen-only build answers
 // every t/T with BELL.
 
-// slcan_buf/slcan_len/slcan_open are declared with "── Global state ──" (above
-// the HTTP handlers) so handleWifiSave's boot-log line can reference
-// slcan_open before this section runs at file scope.
+// slcan_buf/slcan_len/slcan_open are declared near the top of the
+// "── HTTP handlers ──" section (main.cpp:1902-1904, ahead of this section)
+// so handleWifiSave's boot-log line can reference slcan_open before this
+// section runs at file scope.
 
 void slcanSendFrame(const twai_message_t& msg) {
     if (!slcan_open) return;

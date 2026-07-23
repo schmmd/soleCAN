@@ -603,7 +603,17 @@ def stage_wifi(args) -> None:
     check(status == 400, "POST /wifi with 3-char pass -> 400", f"HTTP {status}")
 
     # Clear to AP-only (empty SSID, correct ap_pass), then restore the original
-    # so the bench network join is not left disabled.
+    # so the bench network join is not left disabled. This is destructive over
+    # a STA/bench connection (it drops the very link the test is using), so
+    # it's opt-in and only meant to be run against the AP host.
+    if not args.wifi_clear_test:
+        report("SKIP", "clear/restore test (pass --wifi-clear-test, AP host only)")
+        return
+    if not args.wifi_restore_pass:
+        report("SKIP", "clear/restore test: --wifi-restore-pass not set — "
+                       "refusing to clear STA SSID with no way to restore it")
+        return
+
     status, _, _ = http_post(args.host, "/wifi",
                              {"ssid": "", "pass": "", "ap_pass": args.ap_pass})
     check(status == 200, "POST /wifi clear SSID -> 200 (STA disabled)",
@@ -613,15 +623,31 @@ def stage_wifi(args) -> None:
     check(now == "", "STA SSID cleared", f"{now!r}")
 
     # Restore.
+    if not orig_ssid:
+        report("INFO", "no original SSID to restore (was AP-only)")
+        return
     status, _, _ = http_post(args.host, "/wifi",
                              {"ssid": orig_ssid, "pass": args.wifi_restore_pass,
-                              "ap_pass": args.ap_pass}) if orig_ssid else (200, None, None)
-    if orig_ssid:
-        check(status == 200, "POST /wifi restore original SSID -> 200",
-              f"HTTP {status}")
+                              "ap_pass": args.ap_pass})
+    check(status == 200, "POST /wifi restore original SSID -> 200",
+          f"HTTP {status}")
+
+    # Verify the join actually came back up, not just that the POST parsed.
+    deadline = time.monotonic() + 10.0
+    restored = False
+    sta = {}
+    while time.monotonic() < deadline:
+        try:
+            sta = json.loads(http_get(args.host, "/config")[2]).get("wifi", {}).get("sta", {})
+        except Exception:  # noqa: BLE001
+            sta = {}
+        if sta.get("ssid") == orig_ssid and sta.get("status") == "connected":
+            restored = True
+            break
+        time.sleep(1.0)
+    if check(restored, "restored STA SSID reconnects",
+             f"sta={sta!r} (want ssid={orig_ssid!r}, status=connected)"):
         report("INFO", f"restored STA SSID to {orig_ssid!r}")
-    else:
-        report("INFO", "no original SSID to restore (was AP-only)")
 
 
 def stage_socketcand(args) -> None:
@@ -1283,6 +1309,13 @@ def main() -> int:
     ap.add_argument("--wifi-restore-pass", default="",
                     help="STA password to restore after the /wifi clear test "
                          "(the device never discloses the stored password)")
+    ap.add_argument("--wifi-clear-test", action="store_true",
+                    help="exercise the destructive /wifi clear+restore of the "
+                         "STA SSID (clears STA, dropping the STA network, then "
+                         "restores it). MUST be run against the AP host "
+                         "(--host 192.168.4.1) with --wifi-restore-pass set — "
+                         "running it over the STA/bench host tears down the "
+                         "very connection the test uses")
     ap.add_argument("--mdns-name", default="tractor",
                     help="mDNS hostname / BLE device name the build advertises")
     ap.add_argument("--skip-mdns", action="store_true",
