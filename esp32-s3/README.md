@@ -334,6 +334,34 @@ pio run -e lilygo_t2can          # native; or use the Docker --build-arg form ab
 `inject_build_overrides.py` (a no-op when the env vars are unset), so the
 default build is unchanged.
 
+## Changing the station WiFi at runtime (`/wifi`)
+
+The station (home/shop network) credentials can also be changed **without
+reflashing**, from a web form the board serves at `/wifi`. Reach the board —
+join its always-on `tractor` AP, or hit it on the current network — open
+`http://tractor.local/wifi` (or `http://<board-ip>/wifi`), enter the new SSID
+and password plus the **AP password** (`AP_PASS`, the gate that authorizes the
+change), and save. It applies **live**, no reboot; the always-up AP is the
+recovery path if you mistype. Only the station credentials are settable here —
+the AP SSID/password and mDNS name stay compile-time. An empty SSID disables the
+station (AP-only).
+
+**Persistence and precedence — read this before you get surprised.** The
+credentials are stored in **NVS**, a separate flash partition, so they **survive
+a normal reflash** (`pio run -t upload` rewrites only the app partition). At boot
+the firmware reads NVS **first** and falls back to the compiled
+`WIFI_SSID`/`WIFI_PASS` only when NVS is unprovisioned. So once you set
+credentials through the form, they **take precedence over any baked-in
+`WIFI_SSID`/`WIFI_PASS`** — reflashing with *different* compiled credentials will
+**not** change the network the board joins. To return to the compiled defaults,
+re-enter them through the form or fully erase flash (`esptool erase_flash`, or
+`pio run -t erase`), which clears NVS.
+
+> No pre-apply scan is done (deliberate simplicity): a mistyped SSID makes the
+> station scan endlessly and destabilizes the shared-radio AP, and because it
+> persists in NVS the degradation survives a reboot until you correct it via the
+> form. Type carefully.
+
 ## Endpoints
 
 Once the board is on the network it advertises itself as `tractor.local`
@@ -343,6 +371,8 @@ via mDNS.
 |---|---|
 | `http://tractor.local/` | Auto-refreshing dashboard |
 | `http://tractor.local/json` | Decoded state as JSON |
+| `http://tractor.local/config` | Build + WiFi diagnostics as JSON (board, firmware version, features, STA/AP status) |
+| `http://tractor.local/wifi` | Web form to set the station WiFi SSID/password at runtime (AP-password gated) |
 | `tractor.local:28600` | socketcand TCP stream of raw CAN frames |
 | `/dev/cu.usbmodem*` (USB CDC) | SLCAN stream of raw CAN frames |
 | `http://tractor.local/sd/status` | SD logging status + diagnostics (RejsaCAN only) |

@@ -19,6 +19,7 @@
 #include <Arduino.h>
 #include <vector>
 #include <WiFi.h>
+#include <Preferences.h>
 #include <ESPmDNS.h>
 #include <DNSServer.h>
 #include <WebServer.h>
@@ -427,6 +428,61 @@ bool        g_ap_running      = false;
 // single-word values (torn reads aren't possible at word width or below).
 volatile uint32_t g_sta_disconnects = 0;
 volatile uint8_t  g_sta_last_disconnect_reason = 0;   // 0 = never disconnected
+
+// Runtime STA credentials — the single source of truth for the station join.
+// Seeded from NVS if provisioned, else from the compiled WIFI_SSID/WIFI_PASS
+// defaults. Written by the /wifi POST handler.
+char g_sta_ssid[33] = "";
+char g_sta_pass[64] = "";
+static Preferences g_prefs;
+
+static inline bool staConfigured() { return g_sta_ssid[0] != '\0'; }
+
+// NVS 'wifi' namespace overrides the compiled defaults; an absent 'ssid' key
+// means "never provisioned", so fall back to the baked-in defaults (keeps the
+// default build's behavior). Call once, before WiFi bring-up.
+static void loadStaCreds() {
+    g_prefs.begin("wifi", /*readOnly=*/true);
+    if (g_prefs.isKey("ssid")) {
+        g_prefs.getString("ssid", g_sta_ssid, sizeof(g_sta_ssid));
+        g_prefs.getString("pass", g_sta_pass, sizeof(g_sta_pass));
+    } else {
+        strlcpy(g_sta_ssid, WIFI_SSID, sizeof(g_sta_ssid));
+        strlcpy(g_sta_pass, WIFI_PASS, sizeof(g_sta_pass));
+    }
+    g_prefs.end();
+}
+
+static void saveStaCreds(const char* ssid, const char* pass) {
+    g_prefs.begin("wifi", /*readOnly=*/false);
+    g_prefs.putString("ssid", ssid);
+    g_prefs.putString("pass", pass);
+    g_prefs.end();
+}
+
+// Length-independent compare so a wrong AP password can't be timing-probed.
+static bool secretEquals(const String& got, const char* want) {
+    size_t wl = strlen(want);
+    uint8_t diff = (got.length() != wl) ? 1 : 0;
+    for (size_t i = 0; i < got.length(); i++)
+        diff |= (uint8_t)got[i] ^ (uint8_t)(i < wl ? want[i] : 0);
+    return diff == 0;
+}
+
+// Minimal HTML-escape for reflecting the current SSID into the form.
+static String htmlEscape(const char* s) {
+    String out;
+    for (const char* p = s; *p; p++) {
+        switch (*p) {
+            case '&': out += "&amp;";  break;
+            case '<': out += "&lt;";   break;
+            case '>': out += "&gt;";   break;
+            case '"': out += "&quot;"; break;
+            default:  out += *p;       break;
+        }
+    }
+    return out;
+}
 
 #if defined(HAS_MCP2515)
 bool        g_mcp_initialized = false;
@@ -1840,6 +1896,13 @@ String buildJson(bool pretty = true, bool minimal = false) {
 
 // ── HTTP handlers ─────────────────────────────────────────────────────────────
 
+// Declared here (ahead of the "── SLCAN ──" section below, which owns and
+// documents them) purely so handleWifiSave's boot-log line can test
+// slcan_open before that section runs at file scope.
+static char   slcan_buf[32];
+static uint8_t slcan_len = 0;
+static bool   slcan_open = false;
+
 // Marks a served request so an active web client (dashboard poller, file
 // download) defers the CAN-quiet deep sleep — see checkCanQuietSleep(). Called
 // at the top of every real endpoint but deliberately NOT from handleNotFound:
@@ -1881,11 +1944,13 @@ static String staDisconnectReasonName(uint8_t reason) {
     }
 }
 
-// Build + WiFi diagnostics, deliberately separate from the /json telemetry:
-// this reports what was baked into the binary and how the home-network join
-// is going. The soft-AP is always up, so /config stays reachable at
-// 192.168.4.1 even when the STA join failed — one request distinguishes
-// "wrong password" from "wrong SSID" from "built with empty credentials".
+// Build + WiFi diagnostics, deliberately separate from the /json telemetry.
+// board/version/features and the AP identity are what was baked into the
+// binary; the station (sta) fields report the *active* credentials, which come
+// from NVS when set at runtime via /wifi and otherwise fall back to the
+// compiled WIFI_SSID/WIFI_PASS defaults. The soft-AP is always up, so /config
+// stays reachable at 192.168.4.1 even when the STA join failed — one request
+// distinguishes "wrong password" from "wrong SSID" from "no station configured".
 void handleConfig() {
     noteHttpActivity();
     JsonDocument doc;
@@ -1919,9 +1984,9 @@ void handleConfig() {
     auto wifi = doc["wifi"].to<JsonObject>();
 
     auto sta = wifi["sta"].to<JsonObject>();
-    const bool join_sta = (sizeof(WIFI_SSID) > 1);
-    sta["ssid"]     = WIFI_SSID;                    // exactly what was compiled in
-    sta["pass_set"] = (sizeof(WIFI_PASS) > 1);      // presence only, never the password
+    const bool join_sta = staConfigured();
+    sta["ssid"]     = g_sta_ssid;                   // active STA SSID (NVS or default)
+    sta["pass_set"] = (g_sta_pass[0] != '\0');      // presence only, never the password
     sta["enabled"]  = join_sta;
     const bool sta_connected = join_sta && WiFi.status() == WL_CONNECTED;
     sta["status"] = !join_sta ? "disabled"
@@ -1946,6 +2011,63 @@ void handleConfig() {
     String out;
     serializeJsonPretty(doc, out);
     server.send(200, "application/json", out);
+}
+
+// Human-facing STA WiFi form. Shows the current SSID and whether a password is
+// set (never the password itself). Served on the always-up AP as well as STA,
+// so it is reachable to fix a bad join.
+void handleWifiForm() {
+    noteHttpActivity();
+    String body = F("<!doctype html><meta name=viewport "
+                    "content='width=device-width,initial-scale=1'>"
+                    "<title>WiFi setup</title><h2>SoleCAN WiFi</h2><p>Current SSID: <b>");
+    body += staConfigured() ? htmlEscape(g_sta_ssid) : String("(none \xE2\x80\x94 AP only)");
+    body += F("</b><br>Password set: ");
+    body += g_sta_pass[0] ? F("yes") : F("no");
+    body += F("</p><form method=post action=/wifi>"
+              "<p>SSID (blank = AP only):<br><input name=ssid maxlength=32></p>"
+              "<p>Password:<br><input name=pass type=password maxlength=63></p>"
+              "<p>AP password (required):<br><input name=ap_pass type=password></p>"
+              "<button type=submit>Save &amp; re-join</button></form>");
+    server.send(200, "text/html", body);
+}
+
+// Apply new STA credentials: AP-password gated, validated, persisted to NVS,
+// then live re-join (no reboot). The soft-AP stays up throughout.
+void handleWifiSave() {
+    noteHttpActivity();
+    if (!secretEquals(server.arg("ap_pass"), AP_PASS)) {
+        server.send(401, "text/plain", "wrong AP password\n");
+        return;
+    }
+    String ssid = server.arg("ssid");
+    String pass = server.arg("pass");
+    if (ssid.length() > 32) {
+        server.send(400, "text/plain", "SSID too long (max 32)\n");
+        return;
+    }
+    if (pass.length() != 0 && (pass.length() < 8 || pass.length() > 63)) {
+        server.send(400, "text/plain",
+                    "password must be empty or 8-63 chars (WPA2)\n");
+        return;
+    }
+
+    strlcpy(g_sta_ssid, ssid.c_str(), sizeof(g_sta_ssid));
+    strlcpy(g_sta_pass, pass.c_str(), sizeof(g_sta_pass));
+    saveStaCreds(g_sta_ssid, g_sta_pass);
+
+    WiFi.mode(staConfigured() ? WIFI_AP_STA : WIFI_AP);
+    WiFi.disconnect(false);
+    if (staConfigured()) WiFi.begin(g_sta_ssid, g_sta_pass);
+
+    if (!slcan_open)
+        Serial.printf("WiFi: STA reconfigured to \"%s\" (pass %u chars)\r\n",
+                      g_sta_ssid, (unsigned)strlen(g_sta_pass));
+
+    String msg = staConfigured()
+        ? String("saved; re-joining \"") + g_sta_ssid + "\"\n"
+        : String("saved; STA disabled (AP only)\n");
+    server.send(200, "text/plain", msg);
 }
 
 void handleRoot() {
@@ -2312,9 +2434,10 @@ void handleNotFound() {
 // concept, so it never reaches the MCP2515 (can1). A listen-only build answers
 // every t/T with BELL.
 
-static char   slcan_buf[32];
-static uint8_t slcan_len = 0;
-static bool   slcan_open = false;
+// slcan_buf/slcan_len/slcan_open are declared near the top of the
+// "── HTTP handlers ──" section (main.cpp:1902-1904, ahead of this section)
+// so handleWifiSave's boot-log line can reference slcan_open before this
+// section runs at file scope.
 
 void slcanSendFrame(const twai_message_t& msg) {
     if (!slcan_open) return;
@@ -2862,17 +2985,18 @@ void setup() {
         }
     });
 
-    const bool join_sta = (sizeof(WIFI_SSID) > 1);
+    loadStaCreds();
+    const bool join_sta = staConfigured();
     WiFi.mode(join_sta ? WIFI_AP_STA : WIFI_AP);
     g_ap_running = WiFi.softAP(AP_SSID, AP_PASS);
-    if (join_sta) WiFi.begin(WIFI_SSID, WIFI_PASS);
+    if (join_sta) WiFi.begin(g_sta_ssid, g_sta_pass);
 
     if (join_sta)
         Serial.printf("WiFi: AP \"%s\" %s; STA joining \"%s\" (pass %u chars)\r\n",
                       AP_SSID, g_ap_running ? "up" : "FAILED",
-                      WIFI_SSID, (unsigned)(sizeof(WIFI_PASS) - 1));
+                      g_sta_ssid, (unsigned)strlen(g_sta_pass));
     else
-        Serial.printf("WiFi: AP \"%s\" %s; STA disabled (no WIFI_SSID baked in)\r\n",
+        Serial.printf("WiFi: AP \"%s\" %s; STA disabled (no SSID configured)\r\n",
                       AP_SSID, g_ap_running ? "up" : "FAILED");
 
     // Wildcard DNS on the soft-AP: any hostname (tractor.local, tractor,
@@ -2885,6 +3009,8 @@ void setup() {
     server.on("/",       handleRoot);
     server.on("/json",   handleJson);
     server.on("/config", handleConfig);
+    server.on("/wifi", HTTP_GET,  handleWifiForm);
+    server.on("/wifi", HTTP_POST, handleWifiSave);
 #if defined(HAS_SD)
     server.on("/sd",        HTTP_GET, handleSdIndex);
     server.on("/sd/status", HTTP_GET, handleSdStatus);
