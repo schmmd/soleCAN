@@ -414,6 +414,7 @@ uint32_t    g_kelly_frames_bad  = 0;      // bytes arrived but no frame checksum
 uint32_t    g_kelly_timeouts    = 0;      // no bytes at all (controller unpowered/absent)
 uint32_t    g_kelly_blocks_ok   = 0;      // full 48-byte blocks decoded (a card update)
 uint32_t    g_kelly_last_block_ms    = 0; // millis() of last full decode
+uint32_t    g_kelly_last_frame_ms    = 0; // millis() of last good 16-byte reply (yellow LED heartbeat)
 uint32_t    g_kelly_block_gap_max_ms = 0; // worst gap between full decodes (worst flicker)
 #endif
 uint8_t     g_vc_state   = 0xFF;   // 0xFF = never seen
@@ -885,9 +886,9 @@ static void sdInit() {
 //   Green blink   — CAN frames arriving (toggles on bus activity)
 //
 // Dual-LED boards (RejsaCAN-ESP32-S3) split the state across two pins:
-//   Yellow fast blink — CAN driver failed to initialize
-//   Yellow slow blink — No Wi-Fi
-//   Yellow off        — Network OK
+//   Yellow slow blink — No Wi-Fi (takes priority over the Kelly heartbeat)
+//   Yellow flicker    — Kelly serial traffic arriving (ENABLE_KELLY builds only)
+//   Yellow off        — Network OK, no Kelly traffic (or non-Kelly build)
 //   Blue blink        — CAN frames arriving
 //   Blue off          — No frames recently (green power LED still shows alive)
 //
@@ -931,16 +932,17 @@ void updateLed() {
 #if LED_IS_DUAL_GPIO
     uint32_t now = millis();
 
-    // Yellow warning channel. Off when healthy; periods chosen so the two
-    // failure modes are distinguishable at a glance.
+    // Yellow channel. Slow-blinks the one warning worth keeping (No-WiFi);
+    // otherwise, on Kelly builds, mirrors the blue channel as a Kelly serial
+    // heartbeat. No-WiFi wins when both apply. CAN-init failure is no longer
+    // shown here — it surfaces as "blue never blinks" plus can.initialized
+    // in /json and on the serial console.
     uint32_t warn_period_ms = 0;
-    if (!g_can_initialized) {
-        warn_period_ms = WARN_BLINK_FAST_MS;
 #if !defined(NO_WIFI)
-    } else if (!g_ap_running && WiFi.status() != WL_CONNECTED) {
+    if (!g_ap_running && WiFi.status() != WL_CONNECTED) {
         warn_period_ms = WARN_BLINK_SLOW_MS;
-#endif
     }
+#endif
     static uint32_t warn_last_toggle = 0;
     static bool     warn_on = false;
     if (warn_period_ms > 0) {
@@ -950,8 +952,27 @@ void updateLed() {
         }
         digitalWrite(WARN_LED_PIN, warn_on ? HIGH : LOW);
     } else {
-        digitalWrite(WARN_LED_PIN, LOW);
         warn_on = false;
+#if defined(ENABLE_KELLY)
+        // Kelly heartbeat: same active/toggle pattern as the blue CAN channel,
+        // driven by the last good 16-byte reply instead of a CAN frame.
+        bool kelly_active = (g_kelly_frames_ok > 0) &&
+                            (now - g_kelly_last_frame_ms < LED_ACTIVE_MS);
+        static uint32_t kelly_led_toggle = 0;
+        static bool     kelly_led_on = false;
+        if (kelly_active) {
+            if (now - kelly_led_toggle >= LED_BLINK_MS) {
+                kelly_led_toggle = now;
+                kelly_led_on = !kelly_led_on;
+            }
+            digitalWrite(WARN_LED_PIN, kelly_led_on ? HIGH : LOW);
+        } else {
+            digitalWrite(WARN_LED_PIN, LOW);
+            kelly_led_on = false;
+        }
+#else
+        digitalWrite(WARN_LED_PIN, LOW);
+#endif
     }
 
     // Blue activity channel. The board's green power LED already signals
@@ -1456,6 +1477,7 @@ void kellyPoll() {
         if ((sum & 0xFF) != rxbuf[i + 18]) continue;   // bad frame: keep scanning
         // Good reply — cache this slot.
         g_kelly_frames_ok++;
+        g_kelly_last_frame_ms = now;   // drives the yellow LED heartbeat
         memcpy(&block[cur * 16], &rxbuf[i + 2], 16);
         slot_ms[cur] = now ? now : 1;
         // Rebuild the reading if every slot is populated and recently fresh.
