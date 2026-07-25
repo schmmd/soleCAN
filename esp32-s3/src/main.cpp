@@ -896,7 +896,6 @@ static void sdInit() {
 
 #define LED_BLINK_MS         50
 #define LED_ACTIVE_MS        200
-#define WARN_BLINK_FAST_MS   100   // CAN init failed
 #define WARN_BLINK_SLOW_MS   500   // no WiFi
 
 static uint32_t g_led_last_toggle = 0;
