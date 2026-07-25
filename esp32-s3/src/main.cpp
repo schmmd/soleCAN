@@ -11,9 +11,18 @@
  *   your wiring.
  *
  * Endpoints:
- *   GET /       — mobile-friendly dashboard (auto-refreshing)
- *   GET /json   — raw JSON
+ *   GET    /                    — mobile-friendly dashboard (auto-refreshing)
+ *   GET    /json                — raw JSON snapshot of decoded signals
+ *   GET    /config              — build/board/WiFi/feature info as JSON
+ *   GET    /sd                  — SD-card session browser (BOARD_REJSACAN only)
+ *   GET    /sd/status           — SD logging status JSON (BOARD_REJSACAN only)
+ *   GET    /sd/sessions         — list recorded sessions JSON (BOARD_REJSACAN only)
+ *   GET    /sd/sessions/{id}    — download one session as a USTAR tar stream (BOARD_REJSACAN only)
+ *   DELETE /sd/sessions/{id}    — delete one (non-active) recorded session (BOARD_REJSACAN only)
  *   anything else 302-redirects to / (captive-portal auto-open on the AP)
+ *
+ * Non-HTTP: also exposes decoded frames over BLE (Nordic UART Service) and,
+ * on BOARD_REJSACAN, raw CAN over USB SLCAN and socketcand.
  */
 
 #include <Arduino.h>
@@ -1015,11 +1024,12 @@ static void updateVinSense() {
 // and walk it back: BUS_OFF → initiate recovery (the controller waits out
 // 128×11 recessive bits), which completes into STOPPED → start again.
 //
-// The MCP2515 (can1) deliberately has no equivalent: bus-off is driven by the
-// *transmit* error counter, so a listen-only controller can never reach it,
-// and in a -DCAN_ALLOW_TX build the MCP2515 — unlike the TWAI peripheral —
-// recovers from bus-off automatically in hardware. Its error state is
-// observable via tec/rec/eflg in the /json mcp2515 block.
+// The MCP2515 (can1) deliberately has no equivalent. Both controllers are
+// listen-only by default (§ above) and can't reach bus-off at all in that
+// mode. The gap only matters under -DCAN_ALLOW_TX, where both can transmit:
+// there, the MCP2515 recovers from bus-off automatically in hardware, while
+// the TWAI peripheral needs this software-initiated recovery step. Its error
+// state is observable via tec/rec/eflg in the /json mcp2515 block.
 
 static void canRecoveryTick() {
     static uint32_t last_ms = 0;
