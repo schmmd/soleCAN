@@ -184,8 +184,8 @@ The LilyGo T-2CAN has no user LED, so its LED calls are no-ops.
 | Blue blink | CAN frames arriving on the bus |
 | Blue off | No frames recently (green power LED still confirms the board is alive) |
 
-A CAN-init failure no longer blinks yellow: it shows as blue never blinking,
-plus `can.initialized` in `/json` and on the serial console.
+A CAN-init failure shows as blue never blinking, plus `can.initialized` in
+`/json` and on the serial console.
 
 ## Setting up on a new computer
 
