@@ -934,9 +934,7 @@ void updateLed() {
 
     // Yellow channel. Slow-blinks the one warning worth keeping (No-WiFi);
     // otherwise, on Kelly builds, mirrors the blue channel as a Kelly serial
-    // heartbeat. No-WiFi wins when both apply. A CAN-init failure surfaces as
-    // "blue never blinks" plus can.initialized in /json and on the serial
-    // console — the yellow channel does not signal it.
+    // heartbeat. No-WiFi wins when both apply.
     uint32_t warn_period_ms = 0;
 #if !defined(NO_WIFI)
     if (!g_ap_running && WiFi.status() != WL_CONNECTED) {
