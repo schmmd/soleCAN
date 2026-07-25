@@ -139,11 +139,12 @@
   // Driving it high here means the firmware decides when to shut down, not the
   // hardware — convenient for continuous tractor capture.
   #define FORCE_ON_PIN     GPIO_NUM_17
-  // Two user LEDs. Yellow carries warnings (no WiFi / CAN didn't init); blue
-  // carries CAN-bus activity. Each is independently controlled — the board's
-  // third LED is a hard-wired green power indicator we can't drive.
-  #define WARN_LED_PIN     GPIO_NUM_11   // yellow
-  #define ACTIVITY_LED_PIN GPIO_NUM_10   // blue
+  // Two user LEDs, named for their physical colour because their roles differ.
+  // Yellow: No-WiFi warning, plus the Kelly serial heartbeat on ENABLE_KELLY
+  // builds. Blue: CAN-bus activity. Each is independently controlled — the
+  // board's third LED is a hard-wired green power indicator we can't drive.
+  #define YELLOW_LED_PIN   GPIO_NUM_11
+  #define BLUE_LED_PIN     GPIO_NUM_10
   #define LED_IS_DUAL_GPIO 1
   #define LED_IS_NEOPIXEL  0
   // 12 V input sense: an R18(120K)/R6(33K) divider off the protected VCC rail
@@ -906,10 +907,10 @@ static inline void ledInit() {
     pinMode(LED_POWER_PIN, OUTPUT);
     digitalWrite(LED_POWER_PIN, HIGH);   // enable NeoPixel power rail
 #elif LED_IS_DUAL_GPIO
-    pinMode(WARN_LED_PIN, OUTPUT);
-    pinMode(ACTIVITY_LED_PIN, OUTPUT);
-    digitalWrite(WARN_LED_PIN, LOW);
-    digitalWrite(ACTIVITY_LED_PIN, LOW);
+    pinMode(YELLOW_LED_PIN, OUTPUT);
+    pinMode(BLUE_LED_PIN, OUTPUT);
+    digitalWrite(YELLOW_LED_PIN, LOW);
+    digitalWrite(BLUE_LED_PIN, LOW);
 #endif
 }
 
@@ -949,7 +950,7 @@ void updateLed() {
             warn_last_toggle = now;
             warn_on = !warn_on;
         }
-        digitalWrite(WARN_LED_PIN, warn_on ? HIGH : LOW);
+        digitalWrite(YELLOW_LED_PIN, warn_on ? HIGH : LOW);
     } else {
         warn_on = false;
 #if defined(ENABLE_KELLY)
@@ -964,13 +965,13 @@ void updateLed() {
                 kelly_led_toggle = now;
                 kelly_led_on = !kelly_led_on;
             }
-            digitalWrite(WARN_LED_PIN, kelly_led_on ? HIGH : LOW);
+            digitalWrite(YELLOW_LED_PIN, kelly_led_on ? HIGH : LOW);
         } else {
-            digitalWrite(WARN_LED_PIN, LOW);
+            digitalWrite(YELLOW_LED_PIN, LOW);
             kelly_led_on = false;
         }
 #else
-        digitalWrite(WARN_LED_PIN, LOW);
+        digitalWrite(YELLOW_LED_PIN, LOW);
 #endif
     }
 
@@ -984,9 +985,9 @@ void updateLed() {
             act_last_toggle = now;
             act_on = !act_on;
         }
-        digitalWrite(ACTIVITY_LED_PIN, act_on ? HIGH : LOW);
+        digitalWrite(BLUE_LED_PIN, act_on ? HIGH : LOW);
     } else {
-        digitalWrite(ACTIVITY_LED_PIN, LOW);
+        digitalWrite(BLUE_LED_PIN, LOW);
         act_on = false;
     }
     return;
@@ -1109,12 +1110,12 @@ static void checkCanQuietSleep() {
     // a spurious auto-shutdown edge. The other boards don't define these pins
     // (transceiver mode is fixed in hardware, no auto-shutdown circuit), so
     // there's nothing to hold there.
-    digitalWrite(WARN_LED_PIN, LOW);
-    digitalWrite(ACTIVITY_LED_PIN, LOW);
+    digitalWrite(YELLOW_LED_PIN, LOW);
+    digitalWrite(BLUE_LED_PIN, LOW);
     gpio_hold_en(CAN_RS_PIN);
     gpio_hold_en(FORCE_ON_PIN);
-    gpio_hold_en(WARN_LED_PIN);
-    gpio_hold_en(ACTIVITY_LED_PIN);
+    gpio_hold_en(YELLOW_LED_PIN);
+    gpio_hold_en(BLUE_LED_PIN);
     gpio_deep_sleep_hold_en();
 #endif
 
@@ -2807,8 +2808,8 @@ void setup() {
     // (no-op on a cold boot / power-on reset) before reconfiguring them below.
     gpio_hold_dis(CAN_RS_PIN);
     gpio_hold_dis(FORCE_ON_PIN);
-    gpio_hold_dis(WARN_LED_PIN);
-    gpio_hold_dis(ACTIVITY_LED_PIN);
+    gpio_hold_dis(YELLOW_LED_PIN);
+    gpio_hold_dis(BLUE_LED_PIN);
     gpio_deep_sleep_hold_dis();
 #endif
 #endif
