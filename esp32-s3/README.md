@@ -18,7 +18,7 @@ speak the same J1939 bus at 250 kbit/s (29-bit extended frames).
 |---|---|---|---|---|
 | Adafruit ESP32-S3 Reverse TFT Feather + CAN Pal | `adafruit_feather_s3` | GPIO 8 (A5) | GPIO 14 (A4) | NeoPixel on GPIO 33 (power-gated by GPIO 21) |
 | LilyGo T-2CAN (CAN B / native TWAI) | `lilygo_t2can` | GPIO 7 | GPIO 6 | none |
-| RejsaCAN-ESP32-S3 v3.x | `rejsacan` | GPIO 14 | GPIO 13 | Yellow on GPIO 11 (warnings), Blue on GPIO 10 (CAN activity) |
+| RejsaCAN-ESP32-S3 v3.x | `rejsacan` | GPIO 14 | GPIO 13 | Yellow on GPIO 11 (No-WiFi / Kelly heartbeat), Blue on GPIO 10 (CAN activity) |
 
 Notes:
 
@@ -178,11 +178,14 @@ The LilyGo T-2CAN has no user LED, so its LED calls are no-ops.
 
 | Pattern | Meaning |
 |---|---|
-| Yellow fast blink (10 Hz) | CAN driver failed to initialize |
-| Yellow slow blink (2 Hz) | Booted, waiting for WiFi |
-| Yellow off | Network OK |
+| Yellow slow blink (2 Hz) | Booted, waiting for WiFi (takes priority over the Kelly heartbeat) |
+| Yellow flicker | Kelly serial traffic arriving — `ENABLE_KELLY` builds only |
+| Yellow off | Network OK, no Kelly traffic (or a non-Kelly build) |
 | Blue blink | CAN frames arriving on the bus |
 | Blue off | No frames recently (green power LED still confirms the board is alive) |
+
+A CAN-init failure no longer blinks yellow: it shows as blue never blinking,
+plus `can.initialized` in `/json` and on the serial console.
 
 ## Setting up on a new computer
 
