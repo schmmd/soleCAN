@@ -3143,7 +3143,13 @@ static void canServiceTick() {
 #if defined(HAS_MCP2515)
     if (g_mcp_initialized) {
         CANMessage frame;
-        while (g_mcp.receive(frame)) {
+        // Same per-tick drain bound as the TWAI loop above: never let a
+        // saturated CAN B (with, say, a back-pressuring socketcand client)
+        // spin here forever and starve handleClient()/bleTick()/updateLed().
+        // The ACAN2515 driver's own RX FIFO absorbs bursts between passes.
+        for (uint16_t drained = 0;
+             drained < CAN_RX_MAX_PER_TICK && g_mcp.receive(frame);
+             drained++) {
             g_mcp_frames_rx++;
             // Counts as bus activity for the quiet-sleep timer too: the board
             // must not deep-sleep while CAN A still carries traffic (ext0 wake
