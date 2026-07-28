@@ -23,9 +23,14 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # esptool is pinned separately from the copy PlatformIO vendors, because the
-# merge step below calls it directly. The pin is load-bearing: esptool 5.x
-# renamed the `merge_bin` subcommand to `merge-bin`, so an unpinned install
-# would break this build on their next major release.
+# merge step below calls it directly. The pin exists so that CLI surface and
+# merged-image output can't shift out from under this build unnoticed —
+# esptool 5.x renamed the `merge_bin` subcommand to `merge-bin` and several
+# flags to hyphenated forms, and while 5.3.1's Group.get_command currently
+# accepts the old underscore names as deprecated aliases (so that rename
+# alone would not break this build today), relying on an undocumented
+# compatibility shim staying in place across major releases is exactly the
+# kind of drift a pin is meant to prevent.
 RUN pip install --no-cache-dir --root-user-action=ignore \
         "platformio==6.1.19" \
         "esptool==4.8.1"

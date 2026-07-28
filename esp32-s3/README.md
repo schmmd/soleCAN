@@ -290,6 +290,18 @@ standard Arduino-ESP32 offsets — the same four images, at the same offsets, th
 > If `write_flash` can't connect, hold **BOOT-0**, tap **RST**, release
 > **BOOT-0** to force the board into download mode, then retry.
 
+To override the credentials in a Docker build, pass them as build args:
+
+```bash
+set -a; source esp32-s3/.env; set +a
+docker build -f esp32-s3/Dockerfile \
+    --build-arg AP_SSID="$AP_SSID" --build-arg AP_PASS="$AP_PASS" \
+    --build-arg MDNS_NAME="$MDNS_NAME" \
+    --build-arg WIFI_SSID="$WIFI_SSID" --build-arg WIFI_PASS="$WIFI_PASS" \
+    --build-arg GIT_SHA=$(git rev-parse --short HEAD) \
+    -t solectrac-fw .
+```
+
 ### Flash from a browser
 
 `firmware-merged.bin` is the same four images combined into one, so it can be
@@ -301,7 +313,10 @@ flasher wants — no toolchain install, just a USB cable:
    in **desktop Chrome or Edge** (WebSerial is not available in Safari,
    Firefox, or any mobile browser).
 2. Click **Connect** and pick the board's USB serial port.
-3. Load `firmware-merged.bin` at address `0x0` and flash.
+3. Load `firmware-merged.bin` at address `0x0` and flash. If you got the image
+   from a GitHub Release rather than a local build, it's the same file under a
+   versioned name, `solecan-firmware-rejsacan-<version>-merged.bin` — load that
+   one at `0x0` instead.
 
 If the browser can't connect, hold **BOOT-0**, tap **RST**, release **BOOT-0**
 to force download mode, then retry.
@@ -315,19 +330,13 @@ four-image invocation above:
 ```
 
 Pre-built merged images are attached to every
-[GitHub Release](../../releases), so flashing a board needs no build at all.
-
-To override the credentials in a Docker build, pass them as build args:
-
-```bash
-set -a; source esp32-s3/.env; set +a
-docker build -f esp32-s3/Dockerfile \
-    --build-arg AP_SSID="$AP_SSID" --build-arg AP_PASS="$AP_PASS" \
-    --build-arg MDNS_NAME="$MDNS_NAME" \
-    --build-arg WIFI_SSID="$WIFI_SSID" --build-arg WIFI_PASS="$WIFI_PASS" \
-    --build-arg GIT_SHA=$(git rev-parse --short HEAD) \
-    -t solectrac-fw .
-```
+[GitHub Release](https://github.com/schmmd/soleCAN/releases) (as
+`solecan-firmware-rejsacan-<version>-merged.bin`), so flashing a board needs no
+build at all. That build carries the firmware's stock AP-only defaults — see
+"Customizing the WiFi AP and mDNS hostname" below — and no station
+credentials, so the board joins no network on its own after flashing; join its
+`tractor` AP and set a station network at runtime through the `/wifi` form (see
+"Changing the station WiFi at runtime" below) if you want it on your network.
 
 ## Customizing the WiFi AP and mDNS hostname (optional)
 

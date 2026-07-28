@@ -16,9 +16,9 @@ on:
       - 'v*'
   workflow_dispatch:
 
-# gh release create needs write access to the repo's releases.
-permissions:
-  contents: write
+# No blanket permissions here: only the release job's `gh release create`
+# needs write access, so it's scoped there instead of to the whole workflow.
+permissions: {}
 
 concurrency:
   group: release-${{ github.ref }}
@@ -113,6 +113,11 @@ jobs:
     name: Publish release
     needs: [firmware, android]
     runs-on: ubuntu-latest
+    # gh release create needs write access to the repo's releases; scoped
+    # here rather than workflow-wide since firmware/android only build and
+    # upload build artifacts.
+    permissions:
+      contents: write
     steps:
       # Both artifacts land in the same directory; their filenames don't collide.
       - uses: actions/download-artifact@v4
@@ -139,14 +144,19 @@ jobs:
             echo "extra=--draft --target ${{ github.sha }}" >> "$GITHUB_OUTPUT"
           fi
 
+      # Version goes through env rather than being interpolated straight into
+      # the shell script text (`V='${{ ... }}'`) so a ref containing a single
+      # quote can't break the quoting or inject shell — the value only ever
+      # reaches the shell as an already-scoped variable.
       - name: Name the assets
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
         run: |
           set -euo pipefail
-          V='${{ steps.v.outputs.version }}'
           test -s dist/firmware-merged.bin
           test -s dist/app-debug.apk
-          mv dist/firmware-merged.bin "dist/solecan-firmware-rejsacan-$V-merged.bin"
-          mv dist/app-debug.apk       "dist/solecan-android-$V-debug.apk"
+          mv dist/firmware-merged.bin "dist/solecan-firmware-rejsacan-$VERSION-merged.bin"
+          mv dist/app-debug.apk       "dist/solecan-android-$VERSION-debug.apk"
           ls -l dist/
 
       # One gh call with both assets: the release either appears complete or
@@ -154,12 +164,17 @@ jobs:
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.v.outputs.version }}
+          # Deliberately expanded unquoted below: on the dispatch/rehearsal
+          # path this is `--draft --target <sha>` and must word-split into
+          # two separate gh arguments; on the tag-push path it's empty and
+          # must vanish rather than pass through as an empty string arg.
+          EXTRA: ${{ steps.v.outputs.extra }}
         run: |
           set -euo pipefail
-          V='${{ steps.v.outputs.version }}'
-          gh release create "$V" ${{ steps.v.outputs.extra }} \
+          gh release create "$VERSION" $EXTRA \
             --repo "$GITHUB_REPOSITORY" \
-            --title "$V" \
+            --title "$VERSION" \
             --generate-notes \
-            "dist/solecan-firmware-rejsacan-$V-merged.bin" \
-            "dist/solecan-android-$V-debug.apk"
+            "dist/solecan-firmware-rejsacan-$VERSION-merged.bin" \
+            "dist/solecan-android-$VERSION-debug.apk"
