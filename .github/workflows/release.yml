@@ -1,0 +1,165 @@
+name: Release
+
+# Cut a release by pushing a tag:  git tag v1.0.0 && git push origin v1.0.0
+#
+# workflow_dispatch runs the identical pipeline but publishes a *draft*, so the
+# whole thing can be rehearsed without announcing anything. Delete the draft
+# afterwards.
+#
+# Deliberately passes no WiFi build-args: released firmware ships the stock
+# AP-only defaults (the board still broadcasts its own hotspot). Do not add
+# secrets here.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+# gh release create needs write access to the repo's releases.
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  firmware:
+    name: ESP32 firmware
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Resolve short SHA
+        id: sha
+        run: echo "short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      # load: true is required — unlike docker-builds.yml, which only proves
+      # the image builds, this job has to `docker run` it afterwards, so the
+      # image must land in the local daemon rather than only in the cache.
+      - name: Build firmware image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: esp32-s3/Dockerfile
+          push: false
+          load: true
+          tags: solectrac-fw:release
+          build-args: |
+            GIT_SHA=${{ steps.sha.outputs.short }}
+          cache-from: type=gha,scope=firmware
+          cache-to: type=gha,scope=firmware,mode=max
+
+      - name: Extract flash images
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          docker run --rm -v "$PWD/out:/out" solectrac-fw:release
+          # Guard the whole contract, not just the file we upload: a missing
+          # individual image means the documented four-image flashing path
+          # regressed, and that should fail the release too.
+          for f in bootloader.bin partitions.bin boot_app0.bin firmware.bin firmware-merged.bin; do
+            test -s "out/$f" || { echo "missing or empty: out/$f" >&2; exit 1; }
+          done
+          ls -l out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: out/firmware-merged.bin
+          if-no-files-found: error
+
+  android:
+    name: Android app
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Resolve short SHA
+        id: sha
+        run: echo "short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Build Android image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: android/Dockerfile
+          push: false
+          load: true
+          tags: solectrac-android:release
+          build-args: |
+            GIT_SHA=${{ steps.sha.outputs.short }}
+          cache-from: type=gha,scope=android
+          cache-to: type=gha,scope=android,mode=max
+
+      - name: Extract APK
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          docker run --rm -v "$PWD/out:/out" solectrac-android:release
+          test -s out/app-debug.apk || { echo "missing or empty: out/app-debug.apk" >&2; exit 1; }
+          ls -l out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: out/app-debug.apk
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: [firmware, android]
+    runs-on: ubuntu-latest
+    steps:
+      # Both artifacts land in the same directory; their filenames don't collide.
+      - uses: actions/download-artifact@v4
+        with:
+          name: firmware
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: android
+          path: dist
+
+      - name: Resolve version
+        id: v
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "push" ]; then
+            # Tag push: the tag is the version, and it already exists.
+            echo "version=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+            echo "extra=" >> "$GITHUB_OUTPUT"
+          else
+            # Rehearsal: no tag exists, so --target tells gh which commit to
+            # tag if the draft is ever published.
+            echo "version=dev-$(echo '${{ github.sha }}' | cut -c1-7)" >> "$GITHUB_OUTPUT"
+            echo "extra=--draft --target ${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Name the assets
+        run: |
+          set -euo pipefail
+          V='${{ steps.v.outputs.version }}'
+          test -s dist/firmware-merged.bin
+          test -s dist/app-debug.apk
+          mv dist/firmware-merged.bin "dist/solecan-firmware-rejsacan-$V-merged.bin"
+          mv dist/app-debug.apk       "dist/solecan-android-$V-debug.apk"
+          ls -l dist/
+
+      # One gh call with both assets: the release either appears complete or
+      # does not appear.
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          V='${{ steps.v.outputs.version }}'
+          gh release create "$V" ${{ steps.v.outputs.extra }} \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$V" \
+            --generate-notes \
+            "dist/solecan-firmware-rejsacan-$V-merged.bin" \
+            "dist/solecan-android-$V-debug.apk"
