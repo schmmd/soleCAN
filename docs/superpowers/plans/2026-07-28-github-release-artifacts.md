@@ -147,14 +147,21 @@ This is the real correctness check — it proves the merge placed every image at
 
 ```bash
 cd out
-cmp -n $(wc -c < bootloader.bin)  firmware-merged.bin bootloader.bin  0     0 && echo "bootloader  @0x0     OK"
-cmp -n $(wc -c < partitions.bin)  firmware-merged.bin partitions.bin  32768 0 && echo "partitions  @0x8000  OK"
-cmp -n $(wc -c < boot_app0.bin)   firmware-merged.bin boot_app0.bin   57344 0 && echo "boot_app0   @0xe000  OK"
-cmp -n $(wc -c < firmware.bin)    firmware-merged.bin firmware.bin    65536 0 && echo "firmware    @0x10000 OK"
+bash -c '
+for spec in "bootloader.bin:0" "partitions.bin:32768" "boot_app0.bin:57344" "firmware.bin:65536"; do
+  f="${spec%%:*}"; off="${spec##*:}"; n=$(( $(wc -c < "$f") ))
+  if dd if=firmware-merged.bin bs=1 skip="$off" count="$n" 2>/dev/null | cmp -s - "$f"; then
+    echo "OK    $f @ $off ($n bytes)"
+  else
+    echo "FAIL  $f @ $off ($n bytes)"
+  fi
+done'
 cd ..
 ```
 
-Expected: all four `OK` lines print, no `differ:` output.
+Expected: four `OK` lines, no `FAIL`.
+
+> **Why `dd` and not `cmp -n … SKIP1 SKIP2`:** that form is GNU-specific. macOS ships BSD `cmp`, which has no `-n` and rejects it — so the obvious-looking one-liner fails on the platform this repo is developed on. The `dd`-extract-then-compare above is portable. Note also the `$(( … ))` around `wc -c`: BSD `wc` pads its output with leading spaces, which word-split an unquoted `count=$n` into a broken `dd` invocation that silently compares zero bytes and reports a false FAIL.
 
 > **Note on the spec:** the spec's testing section says to confirm this with `esptool image_info`. That is not quite right — `image_info` only decodes the *first* image in a file, so on the merged binary it reports the bootloader and nothing else. The `cmp` checks above are what actually verify all four offsets. `image_info` is still the right tool for the flash-parameter check in the next step.
 
@@ -456,19 +463,30 @@ draft so it can be rehearsed. No WiFi build-args: released firmware ships
 the stock AP-only defaults."
 ```
 
-- [ ] **Step 5: Push the branch and rehearse the pipeline**
-
-Push the branch, then trigger the workflow manually against it:
+- [ ] **Step 5: Push the branch, merge, then rehearse the pipeline**
 
 ```bash
 git push -u origin HEAD
-gh workflow run release.yml --ref "$(git rev-parse --abbrev-ref HEAD)"
+```
+
+**The rehearsal cannot run before merge.** GitHub only exposes
+`workflow_dispatch` for workflows that exist on the repository's **default
+branch** — dispatching against a feature branch fails with
+`HTTP 404: workflow release.yml not found on the default branch`, even though
+the file is plainly there. So merge to `main` first, then:
+
+```bash
+gh workflow run release.yml --ref main
 gh run watch
 ```
 
 Expected: all three jobs succeed.
 
-> `workflow_dispatch` on a branch only works once `release.yml` exists on that branch — which it now does. If `gh workflow run` reports the workflow doesn't exist, confirm the push landed.
+> Merging an unrehearsed workflow is the lesser risk here: a workflow file is
+> inert until something triggers it, and this one triggers only on a `v*` tag
+> or a manual dispatch. Merging it does not publish anything. The alternative —
+> letting the first real tag be the first execution — risks a half-published
+> release behind a tag that already exists.
 
 - [ ] **Step 6: Inspect the draft release**
 
