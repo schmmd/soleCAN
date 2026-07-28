@@ -270,6 +270,7 @@ Extract the build artifacts onto the host:
 ```bash
 docker run --rm -v "$PWD/out:/out" solectrac-fw
 # -> out/{bootloader,partitions,boot_app0,firmware}.bin
+# -> out/firmware-merged.bin   (all four combined, write at 0x0)
 ```
 
 Then flash from the host with `esptool` (from a Python 3.13 venv). These are the
@@ -300,6 +301,42 @@ docker build -f esp32-s3/Dockerfile \
     --build-arg GIT_SHA=$(git rev-parse --short HEAD) \
     -t solectrac-fw .
 ```
+
+### Flash from a browser
+
+`firmware-merged.bin` is the same four images combined into one, so it can be
+written in a single shot at offset `0x0`. That is the form a browser-based
+flasher wants — no toolchain install, just a USB cable:
+
+1. Open [esp.huhn.me](https://esp.huhn.me) or the
+   [Adafruit ESPTool](https://adafruit.github.io/Adafruit_WebSerial_ESPTool/)
+   in **desktop Chrome or Edge** (WebSerial is not available in Safari,
+   Firefox, or any mobile browser).
+2. Click **Connect** and pick the board's USB serial port.
+3. Load `firmware-merged.bin` at address `0x0` and flash. If you got the image
+   from a GitHub Release rather than a local build, it's the same file under a
+   versioned name, `solecan-firmware-rejsacan-<version>-merged.bin` — load that
+   one at `0x0` instead.
+
+If the browser can't connect, hold **BOOT-0**, tap **RST**, release **BOOT-0**
+to force download mode, then retry.
+
+The merged image also works from the command line, and is simpler than the
+four-image invocation above:
+
+```bash
+~/.venvs/pio/bin/esptool --chip esp32s3 --port /dev/cu.usbmodemXXXX \
+    --baud 921600 write_flash 0x0 out/firmware-merged.bin
+```
+
+Pre-built merged images are attached to every
+[GitHub Release](https://github.com/schmmd/soleCAN/releases) (as
+`solecan-firmware-rejsacan-<version>-merged.bin`), so flashing a board needs no
+build at all. That build carries the firmware's stock AP-only defaults — see
+"Customizing the WiFi AP and mDNS hostname" below — and no station
+credentials, so the board joins no network on its own after flashing; join its
+`tractor` AP and set a station network at runtime through the `/wifi` form (see
+"Changing the station WiFi at runtime" below) if you want it on your network.
 
 ## Customizing the WiFi AP and mDNS hostname (optional)
 

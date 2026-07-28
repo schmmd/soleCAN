@@ -42,7 +42,9 @@ adb install out/app-debug.apk
 ```
 
 The Docker build only produces the debug APK — release would need a
-signing config that isn't checked in.
+signing config that isn't checked in. The APKs attached to
+[GitHub Releases](https://github.com/schmmd/soleCAN/releases) are this same debug-signed build, so
+sideloading one needs no build and no keystore.
 
 The git SHA is appended to `versionName` (e.g. `1.0+a1b2c3d`) and exposed
 as `BuildConfig.GIT_SHA`. Native `./gradlew` builds resolve it from the
