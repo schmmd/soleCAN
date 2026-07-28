@@ -22,10 +22,13 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Pin PlatformIO Core so builds are reproducible. --root-user-action=ignore:
-# root is the norm inside a single-purpose build image, so pip's root warning
-# is noise here.
-RUN pip install --no-cache-dir --root-user-action=ignore "platformio==6.1.19"
+# esptool is pinned separately from the copy PlatformIO vendors, because the
+# merge step below calls it directly. The pin is load-bearing: esptool 5.x
+# renamed the `merge_bin` subcommand to `merge-bin`, so an unpinned install
+# would break this build on their next major release.
+RUN pip install --no-cache-dir --root-user-action=ignore \
+        "platformio==6.1.19" \
+        "esptool==4.8.1"
 
 WORKDIR /project
 
@@ -72,8 +75,31 @@ ENV PLATFORMIO_BUILD_FLAGS=${CAN_ALLOW_TX:+-DCAN_ALLOW_TX}
 # platform and Xtensa toolchain on first run and caches them in the image layer.
 RUN pio run -e rejsacan
 
-# Default action: copy the four images needed to flash the board to a mounted
-# /out volume on the host. boot_app0.bin lives in the framework package (it
+# Combine the four flash images into one that can be written at offset 0.
+# This is what a browser flasher (ESP Web Tools, esp.huhn.me, Adafruit
+# ESPTool) needs — they take a single file and an offset, not four. It also
+# works from the esptool CLI: `write_flash 0x0 firmware-merged.bin`.
+#
+# --flash_mode/freq/size keep: inherit whatever the build baked into the
+# bootloader header. The rejsacan env uses qio_opi memory type; hardcoding
+# dio/80m here would silently produce an image that does not boot if the
+# board definition ever changes. `keep` cannot drift.
+#
+# The offsets are the standard Arduino-ESP32 ones, the same four this image's
+# CMD emits and that esp32-s3/README.md documents for manual flashing.
+RUN BOOT_APP0="$(find /root/.platformio -name boot_app0.bin | head -1)" \
+    && python -m esptool --chip esp32s3 merge_bin \
+        -o .pio/build/rejsacan/firmware-merged.bin \
+        --flash_mode keep --flash_freq keep --flash_size keep \
+        0x0     .pio/build/rejsacan/bootloader.bin \
+        0x8000  .pio/build/rejsacan/partitions.bin \
+        0xe000  "$BOOT_APP0" \
+        0x10000 .pio/build/rejsacan/firmware.bin
+
+# Default action: copy the flash images to a mounted /out volume on the host —
+# the four images at their individual offsets, plus firmware-merged.bin, which
+# is all four combined into a single image written at offset 0.
+# boot_app0.bin lives in the framework package (it
 # initializes the OTA-data partition); the others are build outputs. These are
 # the same images, at the same offsets, that `pio run -t upload` writes.
-CMD ["sh", "-c", "set -e; mkdir -p /out; cp -v .pio/build/rejsacan/firmware.bin .pio/build/rejsacan/bootloader.bin .pio/build/rejsacan/partitions.bin /out/; cp -v \"$(find /root/.platformio -name boot_app0.bin | head -1)\" /out/; echo 'Artifacts copied to /out — flash with esptool (see README)'"]
+CMD ["sh", "-c", "set -e; mkdir -p /out; cp -v .pio/build/rejsacan/firmware.bin .pio/build/rejsacan/bootloader.bin .pio/build/rejsacan/partitions.bin .pio/build/rejsacan/firmware-merged.bin /out/; cp -v \"$(find /root/.platformio -name boot_app0.bin | head -1)\" /out/; echo 'Artifacts copied to /out — flash firmware-merged.bin at 0x0, or the four images at their offsets (see README)'"]
