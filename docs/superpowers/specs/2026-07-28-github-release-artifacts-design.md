@@ -171,8 +171,17 @@ on Safari, Firefox, or Chrome for Android.
   half-populated release is worse than no release.
 - `gh release create` runs once with both assets, so the release either
   appears complete or does not appear.
-- Re-tagging an existing version is not special-cased: `gh release create`
-  fails on a duplicate tag, which is the correct outcome.
+- An already-existing release is not an error. The publish step attaches to
+  it (`gh release upload --clobber`) and only creates when nothing is there.
+
+  This was originally specified the other way round — "re-tagging an existing
+  version is not special-cased; `gh release create` fails on a duplicate tag,
+  which is the correct outcome" — and that was wrong. It assumed the only path
+  to a release is pushing a bare tag. Writing the release notes in GitHub's
+  Releases UI publishes the tag as a side effect, and *that* push is what
+  triggers this workflow; the release therefore already exists by the time the
+  publish step runs. `v2.0.0` shipped with zero assets that way. Both orderings
+  are legitimate and both must work.
 
 ## Testing
 

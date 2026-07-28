@@ -161,7 +161,23 @@ jobs:
 
       # One gh call with both assets: the release either appears complete or
       # does not appear.
-      - name: Create the release
+      # Create the release, or attach to one that already exists.
+      #
+      # Both orderings happen in practice and both must work:
+      #
+      #   - Push a bare tag (`git push origin v1.0.0`) — nothing exists yet,
+      #     so this creates the release and attaches the assets.
+      #   - Write the release notes in GitHub's Releases UI first — that
+      #     publishes the tag as a side effect, which is what triggers this
+      #     workflow. By the time this step runs the release already exists,
+      #     and `gh release create` fails with "a release with the same tag
+      #     name already exists". That is how v2.0.0 shipped with no
+      #     binaries attached.
+      #
+      # So: attach if it exists, create if it doesn't. --clobber makes a
+      # re-run replace same-named assets instead of erroring, which keeps
+      # re-running a failed job safe.
+      - name: Create or update the release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.v.outputs.version }}
@@ -172,9 +188,18 @@ jobs:
           EXTRA: ${{ steps.v.outputs.extra }}
         run: |
           set -euo pipefail
-          gh release create "$VERSION" $EXTRA \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "$VERSION" \
-            --generate-notes \
-            "dist/solecan-firmware-rejsacan-$VERSION-merged.bin" \
-            "dist/solecan-android-$VERSION-debug.apk"
+          FIRMWARE="dist/solecan-firmware-rejsacan-$VERSION-merged.bin"
+          APK="dist/solecan-android-$VERSION-debug.apk"
+
+          if gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $VERSION already exists — uploading assets to it."
+            gh release upload "$VERSION" --repo "$GITHUB_REPOSITORY" --clobber \
+              "$FIRMWARE" "$APK"
+          else
+            echo "Creating release $VERSION."
+            gh release create "$VERSION" $EXTRA \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$VERSION" \
+              --generate-notes \
+              "$FIRMWARE" "$APK"
+          fi
