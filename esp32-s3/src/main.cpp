@@ -140,11 +140,12 @@
   // Driving it high here means the firmware decides when to shut down, not the
   // hardware — convenient for continuous tractor capture.
   #define FORCE_ON_PIN     GPIO_NUM_17
-  // Two user LEDs. Yellow carries warnings (no WiFi / CAN didn't init); blue
-  // carries CAN-bus activity. Each is independently controlled — the board's
-  // third LED is a hard-wired green power indicator we can't drive.
-  #define WARN_LED_PIN     GPIO_NUM_11   // yellow
-  #define ACTIVITY_LED_PIN GPIO_NUM_10   // blue
+  // Two user LEDs, named for their physical colour because their roles differ.
+  // Yellow: No-WiFi warning, plus the Kelly serial heartbeat on ENABLE_KELLY
+  // builds. Blue: CAN-bus activity. Each is independently controlled — the
+  // board's third LED is a hard-wired green power indicator we can't drive.
+  #define YELLOW_LED_PIN   GPIO_NUM_11
+  #define BLUE_LED_PIN     GPIO_NUM_10
   #define LED_IS_DUAL_GPIO 1
   #define LED_IS_NEOPIXEL  0
   // 12 V input sense: an R18(120K)/R6(33K) divider off the protected VCC rail
@@ -415,6 +416,7 @@ uint32_t    g_kelly_frames_bad  = 0;      // bytes arrived but no frame checksum
 uint32_t    g_kelly_timeouts    = 0;      // no bytes at all (controller unpowered/absent)
 uint32_t    g_kelly_blocks_ok   = 0;      // full 48-byte blocks decoded (a card update)
 uint32_t    g_kelly_last_block_ms    = 0; // millis() of last full decode
+uint32_t    g_kelly_last_frame_ms    = 0; // millis() of last good 16-byte reply (yellow LED heartbeat)
 uint32_t    g_kelly_block_gap_max_ms = 0; // worst gap between full decodes (worst flicker)
 #endif
 uint8_t     g_vc_state   = 0xFF;   // 0xFF = never seen
@@ -941,9 +943,9 @@ static void sdInit() {
 //   Green blink   — CAN frames arriving (toggles on bus activity)
 //
 // Dual-LED boards (RejsaCAN-ESP32-S3) split the state across two pins:
-//   Yellow fast blink — CAN driver failed to initialize
-//   Yellow slow blink — No Wi-Fi
-//   Yellow off        — Network OK
+//   Yellow slow blink — No Wi-Fi (takes priority over the Kelly heartbeat)
+//   Yellow flicker    — Kelly serial traffic arriving (ENABLE_KELLY builds only)
+//   Yellow off        — Network OK, no Kelly traffic (or non-Kelly build)
 //   Blue blink        — CAN frames arriving
 //   Blue off          — No frames recently (green power LED still shows alive)
 //
@@ -951,7 +953,6 @@ static void sdInit() {
 
 #define LED_BLINK_MS         50
 #define LED_ACTIVE_MS        200
-#define WARN_BLINK_FAST_MS   100   // CAN init failed
 #define WARN_BLINK_SLOW_MS   500   // no WiFi
 
 static uint32_t g_led_last_toggle = 0;
@@ -962,10 +963,10 @@ static inline void ledInit() {
     pinMode(LED_POWER_PIN, OUTPUT);
     digitalWrite(LED_POWER_PIN, HIGH);   // enable NeoPixel power rail
 #elif LED_IS_DUAL_GPIO
-    pinMode(WARN_LED_PIN, OUTPUT);
-    pinMode(ACTIVITY_LED_PIN, OUTPUT);
-    digitalWrite(WARN_LED_PIN, LOW);
-    digitalWrite(ACTIVITY_LED_PIN, LOW);
+    pinMode(YELLOW_LED_PIN, OUTPUT);
+    pinMode(BLUE_LED_PIN, OUTPUT);
+    digitalWrite(YELLOW_LED_PIN, LOW);
+    digitalWrite(BLUE_LED_PIN, LOW);
 #endif
 }
 
@@ -987,16 +988,15 @@ void updateLed() {
 #if LED_IS_DUAL_GPIO
     uint32_t now = millis();
 
-    // Yellow warning channel. Off when healthy; periods chosen so the two
-    // failure modes are distinguishable at a glance.
+    // Yellow channel. Slow-blinks the one warning worth keeping (No-WiFi);
+    // otherwise, on Kelly builds, mirrors the blue channel as a Kelly serial
+    // heartbeat. No-WiFi wins when both apply.
     uint32_t warn_period_ms = 0;
-    if (!g_can_initialized) {
-        warn_period_ms = WARN_BLINK_FAST_MS;
 #if !defined(NO_WIFI)
-    } else if (!g_ap_running && WiFi.status() != WL_CONNECTED) {
+    if (!g_ap_running && WiFi.status() != WL_CONNECTED) {
         warn_period_ms = WARN_BLINK_SLOW_MS;
-#endif
     }
+#endif
     static uint32_t warn_last_toggle = 0;
     static bool     warn_on = false;
     if (warn_period_ms > 0) {
@@ -1004,10 +1004,29 @@ void updateLed() {
             warn_last_toggle = now;
             warn_on = !warn_on;
         }
-        digitalWrite(WARN_LED_PIN, warn_on ? HIGH : LOW);
+        digitalWrite(YELLOW_LED_PIN, warn_on ? HIGH : LOW);
     } else {
-        digitalWrite(WARN_LED_PIN, LOW);
         warn_on = false;
+#if defined(ENABLE_KELLY)
+        // Kelly heartbeat: same active/toggle pattern as the blue CAN channel,
+        // driven by the last good 16-byte reply instead of a CAN frame.
+        bool kelly_active = (g_kelly_frames_ok > 0) &&
+                            (now - g_kelly_last_frame_ms < LED_ACTIVE_MS);
+        static uint32_t kelly_led_toggle = 0;
+        static bool     kelly_led_on = false;
+        if (kelly_active) {
+            if (now - kelly_led_toggle >= LED_BLINK_MS) {
+                kelly_led_toggle = now;
+                kelly_led_on = !kelly_led_on;
+            }
+            digitalWrite(YELLOW_LED_PIN, kelly_led_on ? HIGH : LOW);
+        } else {
+            digitalWrite(YELLOW_LED_PIN, LOW);
+            kelly_led_on = false;
+        }
+#else
+        digitalWrite(YELLOW_LED_PIN, LOW);
+#endif
     }
 
     // Blue activity channel. The board's green power LED already signals
@@ -1020,9 +1039,9 @@ void updateLed() {
             act_last_toggle = now;
             act_on = !act_on;
         }
-        digitalWrite(ACTIVITY_LED_PIN, act_on ? HIGH : LOW);
+        digitalWrite(BLUE_LED_PIN, act_on ? HIGH : LOW);
     } else {
-        digitalWrite(ACTIVITY_LED_PIN, LOW);
+        digitalWrite(BLUE_LED_PIN, LOW);
         act_on = false;
     }
     return;
@@ -1145,12 +1164,12 @@ static void checkCanQuietSleep() {
     // a spurious auto-shutdown edge. The other boards don't define these pins
     // (transceiver mode is fixed in hardware, no auto-shutdown circuit), so
     // there's nothing to hold there.
-    digitalWrite(WARN_LED_PIN, LOW);
-    digitalWrite(ACTIVITY_LED_PIN, LOW);
+    digitalWrite(YELLOW_LED_PIN, LOW);
+    digitalWrite(BLUE_LED_PIN, LOW);
     gpio_hold_en(CAN_RS_PIN);
     gpio_hold_en(FORCE_ON_PIN);
-    gpio_hold_en(WARN_LED_PIN);
-    gpio_hold_en(ACTIVITY_LED_PIN);
+    gpio_hold_en(YELLOW_LED_PIN);
+    gpio_hold_en(BLUE_LED_PIN);
     gpio_deep_sleep_hold_en();
 #endif
 
@@ -1512,6 +1531,7 @@ void kellyPoll() {
         if ((sum & 0xFF) != rxbuf[i + 18]) continue;   // bad frame: keep scanning
         // Good reply — cache this slot.
         g_kelly_frames_ok++;
+        g_kelly_last_frame_ms = now;   // drives the yellow LED heartbeat
         memcpy(&block[cur * 16], &rxbuf[i + 2], 16);
         slot_ms[cur] = now ? now : 1;
         // Rebuild the reading if every slot is populated and recently fresh.
@@ -2909,8 +2929,8 @@ void setup() {
     // (no-op on a cold boot / power-on reset) before reconfiguring them below.
     gpio_hold_dis(CAN_RS_PIN);
     gpio_hold_dis(FORCE_ON_PIN);
-    gpio_hold_dis(WARN_LED_PIN);
-    gpio_hold_dis(ACTIVITY_LED_PIN);
+    gpio_hold_dis(YELLOW_LED_PIN);
+    gpio_hold_dis(BLUE_LED_PIN);
     gpio_deep_sleep_hold_dis();
 #endif
 #endif
