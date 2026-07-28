@@ -9,7 +9,7 @@
 Publish a GitHub Release, on tag push, carrying two installable binaries:
 
 - an **ESP32-S3 firmware image that can be flashed from a browser** — a single
-  merged `.bin` written at offset 0, plus an ESP Web Tools `manifest.json`;
+  merged `.bin` written at offset 0;
 - the **Android dashboard APK**.
 
 Today both Dockerfiles produce artifacts locally, but nothing packages them for
@@ -54,7 +54,8 @@ These were settled during brainstorming and constrain everything below:
   the only build-arg passed.
 - **Debug-signed APK.** Ship `app-debug.apk` as the existing Dockerfile builds
   it. No keystore, no signing secrets.
-- **Merged bin + manifest, no hosted installer page.** No GitHub Pages job.
+- **Merged bin only, no manifest and no hosted installer page.** No GitHub Pages
+  job. See "Release assets" for why the manifest was cut.
 
 ## Architecture
 
@@ -108,8 +109,8 @@ Triggers:
 - `workflow_dispatch` — builds everything and publishes a **draft** release, so
   the pipeline can be rehearsed without announcing anything.
 
-Version string, computed once in the `release` job and used for every asset
-name and for `manifest.json`:
+Version string, computed once in the `release` job and used for both asset
+names:
 
 - tag push → the tag name, e.g. `v1.2.0`;
 - dispatch → `dev-<short-sha>`.
@@ -120,7 +121,7 @@ Three jobs:
 |---|---|
 | `firmware` | checkout → buildx → build `esp32-s3/Dockerfile` (context `.`, `--build-arg GIT_SHA=<short sha>`, cache scope `firmware`) → `docker run` to extract `/out` → upload workflow artifact |
 | `android` | checkout → buildx → build `android/Dockerfile` (context `.`, `--build-arg GIT_SHA=<short sha>`, cache scope `android`) → `docker run` to extract `/out` → upload workflow artifact |
-| `release` | `needs: [firmware, android]` → download both artifacts → rename to final asset names → zip the raw esptool set → write `manifest.json` → `gh release create` |
+| `release` | `needs: [firmware, android]` → download both artifacts → rename to final asset names → `gh release create` |
 
 `firmware` and `android` run in parallel: one image pulls the Xtensa toolchain
 and the other the whole Android SDK, and the two have no relationship. Both
@@ -135,38 +136,31 @@ With `$VERSION` as defined above:
 
 | Asset | Purpose |
 |---|---|
-| `solecan-firmware-rejsacan-$VERSION-merged.bin` | browser flasher, write at offset 0 |
-| `manifest.json` | ESP Web Tools |
-| `solecan-firmware-rejsacan-$VERSION-esptool.zip` | the four raw images, for the documented `esptool write_flash` path |
+| `solecan-firmware-rejsacan-$VERSION-merged.bin` | flash at offset 0 — browser flasher or `esptool` CLI |
 | `solecan-android-$VERSION-debug.apk` | sideload |
 
-`manifest.json`:
+A zip of the four raw images was considered and cut. The merged binary already
+serves the command-line path — `esptool --chip esp32s3 write_flash 0x0
+firmware-merged.bin` writes the same bytes to the same offsets — so the zip
+would be a second copy of the same firmware whose only distinct capability is
+partial reflashing, which is a developer activity, and developers already have
+all four images in `out/` from `docker run`.
 
-```json
-{
-  "name": "Solectrac CAN Monitor (RejsaCAN-ESP32-S3)",
-  "version": "$VERSION",
-  "new_install_prompt_erase": true,
-  "builds": [
-    {
-      "chipFamily": "ESP32-S3",
-      "parts": [
-        { "path": "solecan-firmware-rejsacan-$VERSION-merged.bin", "offset": 0 }
-      ]
-    }
-  ]
-}
-```
+An ESP Web Tools `manifest.json` was also considered and cut. Generic browser
+flashers — esp.huhn.me, Adafruit ESPTool — do not read manifests; they take a
+file and an offset, which the merged binary already satisfies. A manifest is
+consumed only by an HTML page carrying the `<esp-web-install-button>`
+component, and this spec deliberately hosts no such page, so nothing in the
+design could use it. Shipping one would add a generation step and a
+version-sync invariant for a hypothetical consumer.
 
-The `path` is a bare filename. Both files land in the same
-`releases/download/<tag>/` directory, so ESP Web Tools resolves it relative to
-the manifest URL. The manifest is generated in the `release` job from the same
-`$VERSION` variable that names the binary, so the two cannot disagree.
-
-`new_install_prompt_erase: true` offers a full-chip erase on first install.
-That matters because the firmware persists runtime STA WiFi credentials in
-NVS; a user reflashing a board handed to them by someone else should be able to
-clear them.
+If a hosted installer is wanted later, it is its own spec: a GitHub Pages site
+holding `index.html`, `manifest.json`, and the merged image under a stable
+`firmware.bin` name, deployed by an added job via `actions/deploy-pages`.
+Hosting the binary and manifest on the same origin also sidesteps the
+cross-origin fetch that a Release-hosted manifest would require. Note that
+WebSerial restricts such an installer to desktop Chrome/Edge — it does not work
+on Safari, Firefox, or Chrome for Android.
 
 ## Error handling
 
@@ -175,7 +169,7 @@ clear them.
 - The `release` job asserts every expected input file exists before calling
   `gh release create`, and fails loudly if one is missing — a silently
   half-populated release is worse than no release.
-- `gh release create` runs once with all four assets, so the release either
+- `gh release create` runs once with both assets, so the release either
   appears complete or does not appear.
 - Re-tagging an existing version is not special-cased: `gh release create`
   fails on a duplicate tag, which is the correct outcome.
@@ -197,8 +191,7 @@ inspection of real artifacts.
 3. **Confirm no regression:** the original four images are still copied to
    `/out` and are byte-identical to a pre-change build.
 4. **Pipeline rehearsal:** run the workflow via `workflow_dispatch`, confirm a
-   draft release appears with all four assets and that `manifest.json`'s `path`
-   matches the uploaded binary's name.
+   draft release appears with both assets under the expected `$VERSION` names.
 5. **Hardware confirmation:** flash the merged binary to a RejsaCAN board from a
    browser flasher at offset 0 and confirm the board boots, serves the
    dashboard, and reports the expected `GIT_SHA`.
@@ -219,7 +212,8 @@ hardware and is the acceptance gate before the first real tag.
 ## Out of scope
 
 - Any board other than `rejsacan`.
-- A GitHub Pages installer page with a one-click `<esp-web-install-button>`.
+- An ESP Web Tools `manifest.json`, and the GitHub Pages installer page with a
+  one-click `<esp-web-install-button>` that would consume it.
 - Release-signed APKs and the keystore secrets they require.
 - OTA update support in the firmware.
 - Publishing the Python tooling.
