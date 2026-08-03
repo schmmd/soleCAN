@@ -5,13 +5,15 @@ Emits isolator.kicad_pcb (KiCad s-expression, v7 format — KiCad 8/9/10 open
 and upgrade it transparently). Fab outputs are produced from it with
 kicad-cli; see README.md in this directory.
 
-Topology (from isolator.txt, all CONFIRMED-by-datasheet, board PLANNED):
+Topology (from isolator.txt, board PLANNED). Rows are in physical pin order,
+per ADuM1201 datasheet Rev. L Figure 5 -- note GND1 is pin 4, at the BOTTOM
+of side 1, not pin 2. Side 1 is NOT the mirror of side 2:
 
   KELLY SIDE (floating, 5 V)     | barrier |   BOARD SIDE (chassis, 3.3 V)
-  RED  12V -> 78L05 -> 5V -> VDD1| ADuM1201|VDD2 <- 3V3
-  BLK  V-  ------------------GND1|  SOIC-8 |GND2 <- GND
-  GRN  Kelly Tx ------------- VIB|         |VOB  -> GPIO47 (RX)
-  BLU  Kelly Rx <------------ VOA|         |VIA  <- GPIO48 (TX)
+  RED  12V -> 78L05 -> 5V -> VDD1|1       8|VDD2 <- 3V3
+  BLU  Kelly Rx <------------ VOA|2       7|VIA  <- GPIO48 (TX)
+  GRN  Kelly Tx ------------- VIB|3       6|VOB  -> GPIO47 (RX)
+  BLK  V-  ------------------GND1|4       5|GND2 <- GND
 
 No copper crosses the vertical isolation gap except the ADuM1201 itself.
 Wire connections are 3.6 mm round pads with 1.3 mm drills (hookup wire),
@@ -55,21 +57,36 @@ P_VIA = (44.5, 13.0)
 P_VOB = (44.5, 18.0)
 P_GND = (44.5, 23.0)
 
+# ADuM1201 SOIC-8 pinout, datasheet Rev. L Figure 5. This dict is the
+# authority; U1 below is checked against it so a mis-assigned pin can't reach
+# fab again. Side 1 runs VDD1/VOA/VIB/GND1 top-to-bottom -- it is NOT the
+# mirror image of side 2, which is the trap that shipped rev A.
+ADUM1201 = {1: "VDD1", 2: "VOA", 3: "VIB", 4: "GND1",
+            5: "GND2", 6: "VOB", 7: "VIA", 8: "VDD2"}
+# which ADuM1201 pin function each board net is supposed to land on
+NET_FUNC = {3: "VDD1", 5: "VOA", 4: "VIB", 2: "GND1",
+            7: "GND2", 8: "VOB", 9: "VIA", 6: "VDD2"}
+
 # ADuM1201 SOIC-8 at board center; pin columns at x = 25 +/- 2.7
 UX, UY = 25.0, 13.0
 PIN_DY = [-1.905, -0.635, 0.635, 1.905]
 U1_L = 22.3   # pins 1-4 (Kelly/side-1) column
 U1_R = 27.7   # pins 5-8 (board/side-2) column
 U1 = {  # pin -> (x, y, net)
-    1: (U1_L, UY + PIN_DY[0], 3),   # VDD1
-    2: (U1_L, UY + PIN_DY[1], 2),   # GND1
-    3: (U1_L, UY + PIN_DY[2], 5),   # VOA -> Kelly Rx (BLU)
-    4: (U1_L, UY + PIN_DY[3], 4),   # VIB <- Kelly Tx (GRN)
+    1: (U1_L, UY + PIN_DY[0], 3),   # VDD1 <- 5V
+    2: (U1_L, UY + PIN_DY[1], 5),   # VOA  -> Kelly Rx (BLU)
+    3: (U1_L, UY + PIN_DY[2], 4),   # VIB  <- Kelly Tx (GRN)
+    4: (U1_L, UY + PIN_DY[3], 2),   # GND1
     5: (U1_R, UY + PIN_DY[3], 7),   # GND2
-    6: (U1_R, UY + PIN_DY[2], 8),   # VOB -> GPIO47
-    7: (U1_R, UY + PIN_DY[1], 9),   # VIA <- GPIO48
-    8: (U1_R, UY + PIN_DY[0], 6),   # VDD2
+    6: (U1_R, UY + PIN_DY[2], 8),   # VOB  -> GPIO47
+    7: (U1_R, UY + PIN_DY[1], 9),   # VIA  <- GPIO48
+    8: (U1_R, UY + PIN_DY[0], 6),   # VDD2 <- 3V3
 }
+
+for _pin, (_x, _y, _net) in U1.items():
+    assert NET_FUNC[_net] == ADUM1201[_pin], (
+        f"U1 pin {_pin} routes net {NETS[_net]} ({NET_FUNC[_net]}) but the "
+        f"ADuM1201 has {ADUM1201[_pin]} on pin {_pin} (datasheet Fig. 5)")
 
 # 78L05 TO-92, inline 2.54 mm, pins left->right: 1 OUT, 2 GND, 3 IN
 U2_OUT = (9.5, 5.5)
@@ -85,8 +102,10 @@ R1_A, R1_B = (21.0, 26.5), (13.38, 26.5)       # A=+5V    B=LED_K
 D1_A, D1_K = (11.5, 26.5), (8.96, 26.5)        # anode=LED_K cathode=GND1
 
 # vias where the bottom-layer signal runs surface to reach the SOIC pads
-VIA_VOA = (20.3, 13.635)
-VIA_VIB = (20.3, 14.905)
+# (pins 2 and 3). x is 20.6 so the GND1 run down to pin 4 can pass at x=19.5
+# with ~0.45 mm to the via annulus.
+VIA_VOA = (20.6, 12.365)
+VIA_VIB = (20.6, 13.635)
 
 # Corner holes: zip-tie strain relief / M3 or #4 screw mounting, 3.2 NPTH
 MOUNT_HOLES = [(3.5, 3.5), (3.5, 28.5), (46.5, 3.5), (46.5, 28.5)]
@@ -284,20 +303,25 @@ route([C2_A, (22.6, 9.0), (22.6, 26.5), R1_A], 3, "B.Cu", TRACE_SIG)
 route([R1_B, D1_A], 10, "F.Cu", TRACE_SIG)
 # D1 cathode -> BLK (GND1)
 route([D1_K, (6.5, 25.5), P_BLK], 2, "F.Cu", TRACE_SIG)
-# GND1 spine (top): BLK -> C1B -> U2 GND, spur to C2B -> U1 GND1
+# GND1 spine (top): BLK -> C1B -> U2 GND, spur east to C2B
 route([P_BLK, (12.04, 23.0), C1_B, U2_GND], 2, "F.Cu", TRACE_PWR)
-route([(12.04, 11.5), (19.5, 11.5), C2_B, (21.5, 12.365), U1[2][:2]],
+route([(12.04, 11.5), (19.5, 11.5), C2_B], 2, "F.Cu", TRACE_SIG)
+# GND1 to pin 4: tee off the C2B spur at (19.5, 11.5) and drop down the west
+# side of the via column, then in from below. Runs left of the pin-2/3 stubs
+# so nothing crosses. C2's return to pin 4 is ~10 mm via this tee -- longer
+# than ideal for a bypass cap, but the link is 19200 Bd with ~10 ns edges.
+route([(19.5, 11.5), (19.5, 16.8), (21.4, 16.8), U1[4][:2]],
       2, "F.Cu", TRACE_SIG)
 # C1A -> U2 IN (12V)
 route([C1_A, U2_IN], 1, "F.Cu", TRACE_PWR)
-# VOA (chip out -> Kelly Rx, blue): bottom to via, top stub into pin 3
-route([P_VOA, (18.3, 13.635), VIA_VOA], 5, "B.Cu", TRACE_SIG)
+# VOA (chip out -> Kelly Rx, blue): bottom to via, top stub into pin 2
+route([P_VOA, (18.3, 12.365), VIA_VOA], 5, "B.Cu", TRACE_SIG)
 via(VIA_VOA, 5)
-route([VIA_VOA, U1[3][:2]], 5, "F.Cu", TRACE_SIG)
-# VIB (Kelly Tx -> chip in, green): bottom to via, top stub into pin 4
-route([P_VIB, (18.3, 14.905), VIA_VIB], 4, "B.Cu", TRACE_SIG)
+route([VIA_VOA, U1[2][:2]], 5, "F.Cu", TRACE_SIG)
+# VIB (Kelly Tx -> chip in, green): bottom to via, top stub into pin 3
+route([P_VIB, (18.3, 13.635), VIA_VIB], 4, "B.Cu", TRACE_SIG)
 via(VIA_VIB, 4)
-route([VIA_VIB, U1[4][:2]], 4, "F.Cu", TRACE_SIG)
+route([VIA_VIB, U1[3][:2]], 4, "F.Cu", TRACE_SIG)
 # +3V3: pad -> C3A -> VDD2 (pin 8)
 route([P_3V3, C3_A, (27.7, 9.5), U1[8][:2]], 6, "F.Cu", TRACE_PWR)
 # VIA (GPIO48 -> chip in): pad -> pin 7

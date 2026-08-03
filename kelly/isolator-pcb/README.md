@@ -1,7 +1,8 @@
 # Kelly UART isolator PCB
 
-Status: **PLANNED** (board generated and DRC-clean, not yet fabbed or
-validated on the tractor). PCB realization of `../isolator.txt` — a galvanic
+Status: **PLANNED — rev B, not yet fabbed.** Rev A was fabbed and is
+**scrapped**; see [Rev A erratum](#rev-a-erratum) before soldering anything to
+a board you already have. PCB realization of `../isolator.txt` — a galvanic
 isolator dongle between the Kelly KLS7218M SM-4P port (floating, traction-pack
 referenced) and the OBD-powered RejsaCAN. Electrical design rationale, part
 choices, and behavior notes live in `../isolator.txt`; this directory only
@@ -25,8 +26,41 @@ python3 generate_board.py
 KICLI=/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli
 $KICLI pcb drc --severity-error isolator.kicad_pcb
 $KICLI pcb export gerbers --layers F.Cu,B.Cu,F.Mask,B.Mask,F.SilkS,B.SilkS,Edge.Cuts -o gerbers/ isolator.kicad_pcb
-$KICLI pcb export drill --format excellon --excellon-units mm -o gerbers/ isolator.kicad_pcb
+$KICLI pcb export drill --format excellon --excellon-units mm --generate-map --map-format gerberx2 -o gerbers/ isolator.kicad_pcb
+(cd gerbers && zip -q ../isolator-gerbers.zip isolator-*.gb* isolator-*.gt* isolator.drl)
+$KICLI pcb render --side top    --zoom 1.0 --width 1400 --height 950 --quality high -o render_top.png    isolator.kicad_pcb
+$KICLI pcb render --side bottom --zoom 1.0 --width 1400 --height 950 --quality high -o render_bottom.png isolator.kicad_pcb
 ```
+
+## Rev A erratum
+
+**Rev A has U1 side 1 mis-pinned. Do not populate it.** The pin table in
+`generate_board.py` assumed side 1 mirrored side 2 (`VDD1, GND1, sig, sig`),
+but the ADuM1201 puts GND1 on **pin 4**, at the bottom:
+
+| pin | datasheet (Rev. L Fig. 5) | rev A routed | |
+|-----|---------------------------|--------------|---|
+| 1   | V<sub>DD1</sub>           | +5V_K        | ok |
+| 2   | V<sub>OA</sub>            | GND1         | **wrong** |
+| 3   | V<sub>IB</sub>            | VOA          | **wrong** |
+| 4   | GND<sub>1</sub>           | VIB          | **wrong** |
+| 5–8 | GND2, V<sub>OB</sub>, V<sub>IA</sub>, V<sub>DD2</sub> | same | ok |
+
+Side 2 is correct; only the Kelly side is rotated. No chip orientation fixes
+it — every placement lands a rail on a signal pad. Populating rev A shorts
+V<sub>OA</sub> (an output) to GND1 as soon as the Kelly side powers up.
+
+DRC passed rev A because the same wrong table generated both the pads and the
+netlist, so there was nothing to compare against. Rev B adds an assert in
+`generate_board.py` checking every pad's net against a literal transcription
+of the datasheet pinout (`ADUM1201`), which is the check that was missing.
+
+Rev A rework (3 cuts + 3 jumpers), if a fabbed board is worth saving: cut the
+F.Cu stubs feeding pads 2/3/4 at x ≈ 20.9, y = 12.37 / 13.64 / 14.91; then
+jumper pin 2 → via at (20.3, 13.635), pin 3 → via at (20.3, 14.905), pin 4 →
+C2's lower pad at (19.5, 10.54). All on the Kelly side of the barrier, so
+creepage is unaffected. Verify pin 4 → BLK continuity and pin 2 → BLK **open**
+before powering.
 
 ## Board layout
 
