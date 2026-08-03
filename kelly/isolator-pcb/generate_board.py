@@ -419,6 +419,67 @@ assert UUID_MARK not in out, "unfilled tstamp placeholder"
 _ids = re.findall(r"\(tstamp ([0-9a-f-]+)\)", out)
 assert len(_ids) == len(set(_ids)), "duplicate tstamp UUIDs -- stamp() collided"
 
+
+# ------------------------------------------------------------- validation
+# These parse the emitted board rather than the builder variables, so a bug
+# in the emit path can't slip past them either.
+
+# 1. Package-shape cross-check on ADUM1201. 8-pin digital isolators put the
+#    two supplies at the top corners and the two grounds at the bottom
+#    corners, signals in between. That is a different statement than "Figure
+#    5 says X", so it catches a mistyped transcription: rev A believed GND1
+#    was pin 2 and fails here.
+assert {p for p, f in ADUM1201.items() if f.startswith("VDD")} == {1, 8}, ADUM1201
+assert {p for p, f in ADUM1201.items() if f.startswith("GND")} == {4, 5}, ADUM1201
+assert {p for p, f in ADUM1201.items()
+        if f[0] == "V" and f[1] in "IO"} == {2, 3, 6, 7}, ADUM1201
+
+# 2. Isolation barrier. The board's entire purpose is that no copper crosses
+#    between the two SOIC pad columns; until now that was only asserted in
+#    prose in README.md. Measure it from the emitted geometry instead.
+SIDE1 = {1, 2, 3, 4, 5, 10}    # nets referenced to Kelly V- (floating)
+SIDE2 = {6, 7, 8, 9}           # nets referenced to chassis ground
+assert SIDE1 | SIDE2 == set(NETS), "net not assigned to an isolation domain"
+
+
+def copper():
+    """Yield (net, x_min, x_max) in board mm for every piece of copper."""
+    fp_org = None
+    for line in out.split("\n"):
+        if line.startswith("(footprint"):
+            m = re.search(r"\(at ([\d.]+) ([\d.]+)\)", line)
+            fp_org = (float(m.group(1)) - OX, float(m.group(2)) - OY)
+        m = re.match(r"\(segment \(start ([\d.]+) [\d.]+\) \(end ([\d.]+) "
+                     r"[\d.]+\) \(width ([\d.]+)\).*\(net (\d+)\)", line)
+        if m:
+            a, b, w, n = (float(m[1]) - OX, float(m[2]) - OX,
+                          float(m[3]), int(m[4]))
+            yield n, min(a, b) - w / 2, max(a, b) + w / 2
+        m = re.match(r"\(via \(at ([\d.]+) [\d.]+\) \(size ([\d.]+)\)"
+                     r".*\(net (\d+)\)", line)
+        if m:
+            x, s, n = float(m[1]) - OX, float(m[2]), int(m[3])
+            yield n, x - s / 2, x + s / 2
+        m = re.match(r'\s*\(pad "\S*" \S+ \S+ \(at (-?[\d.]+) (-?[\d.]+)\) '
+                     r'\(size ([\d.]+) [\d.]+\).*\(net (\d+) ', line)
+        if m:
+            x = fp_org[0] + float(m[1])
+            yield int(m[4]), x - float(m[3]) / 2, x + float(m[3]) / 2
+
+
+s1_max = max(hi for n, lo, hi in copper() if n in SIDE1)
+s2_min = min(lo for n, lo, hi in copper() if n in SIDE2)
+GAP = s2_min - s1_max
+assert GAP >= 3.5, (
+    f"isolation gap is {GAP:.2f} mm -- side 1 copper reaches x={s1_max:.2f}, "
+    f"side 2 starts at x={s2_min:.2f}")
+
+# 3. Nothing dangling: every net must land on at least two pads, or it is
+#    wired to exactly one thing and does nothing.
+_pad_nets = re.findall(r'\(pad "\S*" .*\(net (\d+) ', out)
+for _n in NETS:
+    assert _pad_nets.count(str(_n)) >= 2, f"net {NETS[_n]} reaches < 2 pads"
+
 import pathlib
 outfile = pathlib.Path(__file__).parent / "isolator.kicad_pcb"
 outfile.write_text(out)
