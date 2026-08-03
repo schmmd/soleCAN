@@ -10,3 +10,7 @@ out/
 
 # clangd index cache (created by IDE tooling in the firmware tree)
 embedded/esp32-s3/.cache/
+
+# KiCad local state and autosave history repo
+*.kicad_prl
+.history/
