@@ -49,12 +49,52 @@ netlist, so there was nothing to compare against. Rev B adds an assert in
 `generate_board.py` checking every pad's net against `ADUM1201`, a literal
 transcription of the datasheet pinout — the check that was missing.
 
+## Generate-time checks
+
+`generate_board.py` asserts these on every run, against the emitted board
+rather than its own variables:
+
+- **U1 pads match the ADuM1201 pinout** (`ADUM1201`, transcribed from
+  datasheet Rev. L Fig. 5).
+- **Package shape**: supplies on pins 1/8, grounds on 4/5, signals on
+  2/3/6/7. This is a *different* statement than "Fig. 5 says X", so it still
+  fires if the transcription itself is wrong — which is the hole rev A fell
+  through. Rev A's pinout fails it.
+- **Isolation barrier**: no copper of a Kelly-domain net may reach the
+  chassis-domain side or vice versa. Measures the gap and requires ≥ 3.5 mm;
+  currently 3.80 mm.
+- **Nothing dangling**: every net lands on at least two pads.
+
+What none of them catch: a wrong fact that is wrong everywhere. If the
+datasheet transcription and the package-shape rule were both wrong in the
+same direction, the board would still be wrong. The defence against that is
+the bring-up continuity check below, done against a physical board.
+
 ## Board layout
 
 Vertical isolation gap down the middle (marked on silk, both sides). The only
 thing crossing it is the ADuM1201 itself — no copper on any layer between the
-two SOIC pad columns (~3.8 mm gap, the same barrier the SOIC-8 package
-provides between its own pin rows).
+two SOIC pad columns (3.80 mm gap, asserted at generate time, the same
+barrier the SOIC-8 package provides between its own pin rows).
+
+## Bring-up (before soldering U1)
+
+With the board bare, meter on continuity. Each wire pad should reach exactly
+the SOIC pad named below, and the two domains must be open to each other:
+
+| from wire pad | to U1 pad | |
+|---------------|-----------|---|
+| `12V (RED)`   | U2 `I` leg | via C1 |
+| `VOA (BLU)`   | pin 2 (upper-middle, Kelly side) | |
+| `VIB (GRN)`   | pin 3 (lower-middle, Kelly side) | |
+| `GND1 (BLK)`  | pin 4 (bottom, Kelly side) | |
+| `3V3`         | pin 8 (top, ESP32 side) | |
+| `(48) VIA`    | pin 7 | |
+| `(47) VOB`    | pin 6 | |
+| `GND2`        | pin 5 (bottom, ESP32 side) | |
+
+Then confirm **GND1 → GND2 is open** (infinite), and that no Kelly-side pad
+reads continuous to any ESP32-side pad. That is the isolation, measured.
 
 Wire connections are round through-hole solder pads, 3.6 mm diameter with a
 1.3 mm drill (takes up to ~16 AWG; hookup wire tins into it easily), one
