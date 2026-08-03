@@ -329,14 +329,22 @@ route([C2_A, (22.6, 9.0), (22.6, 26.5), R1_A], 3, "B.Cu", TRACE_SIG)
 route([R1_B, D1_A], 10, "F.Cu", TRACE_SIG)
 # D1 cathode -> BLK (GND1)
 route([D1_K, (6.5, 25.5), P_BLK], 2, "F.Cu", TRACE_SIG)
-# GND1 spine (top): BLK -> C1B -> U2 GND, spur east to C2B
+# GND1 spine (top): BLK -> C1B -> U2 GND, spur east to C2B.
+# The spur runs at y=13.5, not 11.5 where it hugged C1: it sat 0.90 mm below
+# C1_A (+12V) and 0.75 mm below the cap body, leaving nothing to get tweezers
+# into. Now 2.90 mm and 2.75 mm.
+# Two clearances at C1 that this does NOT change, both floors rather than
+# choices: C1's own pads are 0.84 mm apart (2.54 mm pitch, 1.7 mm pads), and
+# C1_A sits 1.39 mm from the GND1 spine running up x=12.04 to U2. The
+# tightest copper at C1 is neither -- it is 0.35 mm from C1_B to the +12V run
+# on B.Cu at y=8.0, which is an input-side trace, not this ground line.
 route([P_BLK, (12.04, 23.0), C1_B, U2_GND], 2, "F.Cu", TRACE_PWR)
-route([(12.04, 11.5), (19.5, 11.5), C2_B], 2, "F.Cu", TRACE_SIG)
-# GND1 to pin 4: tee off the C2B spur at (19.5, 11.5) and drop down the west
+route([(12.04, 13.5), (19.5, 13.5), C2_B], 2, "F.Cu", TRACE_SIG)
+# GND1 to pin 4: tee off the C2B spur at (19.5, 13.5) and drop down the west
 # side of the via column, then in from below. Runs left of the pin-2/3 stubs
 # so nothing crosses. C2's return to pin 4 is ~10 mm via this tee -- longer
 # than ideal for a bypass cap, but the link is 19200 Bd with ~10 ns edges.
-route([(19.5, 11.5), (19.5, 16.8), (21.4, 16.8), U1[4][:2]],
+route([(19.5, 13.5), (19.5, 16.8), (21.4, 16.8), U1[4][:2]],
       2, "F.Cu", TRACE_SIG)
 # C1A -> U2 IN (12V)
 route([C1_A, U2_IN], 1, "F.Cu", TRACE_PWR)

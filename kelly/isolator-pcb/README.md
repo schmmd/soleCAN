@@ -31,7 +31,8 @@ KICLI=/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli
 $KICLI pcb drc --severity-error isolator.kicad_pcb
 $KICLI pcb export gerbers --layers F.Cu,B.Cu,F.Mask,B.Mask,F.SilkS,B.SilkS,Edge.Cuts -o gerbers/ isolator.kicad_pcb
 $KICLI pcb export drill --format excellon --excellon-units mm --generate-map --map-format gerberx2 -o gerbers/ isolator.kicad_pcb
-(cd gerbers && zip -q ../isolator-gerbers.zip isolator-*.gb* isolator-*.gt* isolator.drl)
+(cd gerbers && zip -q ../isolator-gerbers.zip isolator-*.gb* isolator-*.gt* isolator-*.gm1 isolator.drl)
+unzip -l isolator-gerbers.zip   # must be 10 files -- the .gm1 edge cuts are easy to glob away
 $KICLI pcb render --side top    --zoom 1.0 --width 1400 --height 950 --quality high -o render_top.png    isolator.kicad_pcb
 $KICLI pcb render --side bottom --zoom 1.0 --width 1400 --height 950 --quality high -o render_bottom.png isolator.kicad_pcb
 ```
