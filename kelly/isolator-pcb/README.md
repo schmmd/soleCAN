@@ -13,6 +13,10 @@ adds the board.
 - `generate_board.py` — writes `isolator.kicad_pcb` from scratch. The script
   is the source of truth; edit it and re-run rather than editing the board in
   KiCad (or fork the `.kicad_pcb` if you prefer the GUI from here on).
+  Output is deterministic — tstamp UUIDs are derived from the element each
+  one belongs to, so re-running with no changes produces a byte-identical
+  file and a real edit shows up in the diff as itself, not as 187 churned
+  UUIDs.
 - `isolator.kicad_pcb` — generated KiCad board (opens in KiCad 7+).
 - `gerbers/`, `isolator-gerbers.zip` — fab outputs (RS-274X + Excellon),
   exported with KiCad 10 `kicad-cli`. Upload the zip as-is to JLCPCB/PCBWay/

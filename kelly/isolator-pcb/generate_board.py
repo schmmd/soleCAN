@@ -22,6 +22,7 @@ RED, BLU, GRN, BLK (blue/green swapped vs. the harness order) so the two
 signal traces reach the ADuM pins without crossing; pads are silk-labeled.
 """
 
+import re
 import uuid
 
 
@@ -111,8 +112,33 @@ VIA_VIB = (20.6, 13.635)
 MOUNT_HOLES = [(3.5, 3.5), (3.5, 28.5), (46.5, 3.5), (46.5, 28.5)]
 
 
+# tstamps are emitted as a placeholder and filled in at the end (see stamp())
+UUID_NS = uuid.uuid5(uuid.NAMESPACE_DNS, "solecan.isolator")
+UUID_MARK = "@@TSTAMP@@"
+
+
 def ts():
-    return f"(tstamp {uuid.uuid4()})"
+    return f"(tstamp {UUID_MARK})"
+
+
+def stamp(text):
+    """Replace tstamp placeholders with UUIDs derived from the line each one
+    sits on, so regenerating is byte-identical and a layout edit churns only
+    the UUIDs of the elements it actually touched -- rather than every UUID
+    after the edit, which is what a running counter would do. Lines that are
+    identical (e.g. the same fp_line in two copies of a footprint) are
+    disambiguated by occurrence count."""
+    seen = {}
+    out_lines = []
+    for line in text.split("\n"):
+        original = line
+        for i in range(original.count(UUID_MARK)):
+            key = f"{original}#{i}"
+            seen[key] = seen.get(key, 0) + 1
+            u = uuid.uuid5(UUID_NS, f"{key}#{seen[key]}")
+            line = line.replace(UUID_MARK, str(u), 1)
+        out_lines.append(line)
+    return "\n".join(out_lines)
 
 
 def at(p, extra=""):
@@ -388,7 +414,12 @@ out = f"""(kicad_pcb (version 20221018) (generator solecan_isolator)
 {nets_sexp}
 """ + "\n".join(body) + "\n)\n"
 
+out = stamp(out)
+assert UUID_MARK not in out, "unfilled tstamp placeholder"
+_ids = re.findall(r"\(tstamp ([0-9a-f-]+)\)", out)
+assert len(_ids) == len(set(_ids)), "duplicate tstamp UUIDs -- stamp() collided"
+
 import pathlib
 outfile = pathlib.Path(__file__).parent / "isolator.kicad_pcb"
 outfile.write_text(out)
-print(f"wrote {outfile}")
+print(f"wrote {outfile} ({len(_ids)} tstamps)")
