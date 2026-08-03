@@ -14,3 +14,4 @@ embedded/esp32-s3/.cache/
 # KiCad local state and autosave history repo
 *.kicad_prl
 .history/
+*.lck
