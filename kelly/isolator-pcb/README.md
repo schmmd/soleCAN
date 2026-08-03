@@ -34,33 +34,16 @@ $KICLI pcb render --side bottom --zoom 1.0 --width 1400 --height 950 --quality h
 
 ## Rev A erratum
 
-**Rev A has U1 side 1 mis-pinned. Do not populate it.** The pin table in
-`generate_board.py` assumed side 1 mirrored side 2 (`VDD1, GND1, sig, sig`),
-but the ADuM1201 puts GND1 on **pin 4**, at the bottom:
-
-| pin | datasheet (Rev. L Fig. 5) | rev A routed | |
-|-----|---------------------------|--------------|---|
-| 1   | V<sub>DD1</sub>           | +5V_K        | ok |
-| 2   | V<sub>OA</sub>            | GND1         | **wrong** |
-| 3   | V<sub>IB</sub>            | VOA          | **wrong** |
-| 4   | GND<sub>1</sub>           | VIB          | **wrong** |
-| 5–8 | GND2, V<sub>OB</sub>, V<sub>IA</sub>, V<sub>DD2</sub> | same | ok |
-
-Side 2 is correct; only the Kelly side is rotated. No chip orientation fixes
-it — every placement lands a rail on a signal pad. Populating rev A shorts
-V<sub>OA</sub> (an output) to GND1 as soon as the Kelly side powers up.
+**Rev A has U1 side 1 mis-pinned — GND1 on pin 2, VOA on 3, VIB on 4. Do not
+populate it.** The pin table assumed side 1 mirrored side 2; the ADuM1201 puts
+GND1 on **pin 4**, at the bottom. Side 2 was correct. No chip orientation
+recovers it, and populating shorts V<sub>OA</sub> (an output) to GND1 on
+power-up. Scrap the board.
 
 DRC passed rev A because the same wrong table generated both the pads and the
 netlist, so there was nothing to compare against. Rev B adds an assert in
-`generate_board.py` checking every pad's net against a literal transcription
-of the datasheet pinout (`ADUM1201`), which is the check that was missing.
-
-Rev A rework (3 cuts + 3 jumpers), if a fabbed board is worth saving: cut the
-F.Cu stubs feeding pads 2/3/4 at x ≈ 20.9, y = 12.37 / 13.64 / 14.91; then
-jumper pin 2 → via at (20.3, 13.635), pin 3 → via at (20.3, 14.905), pin 4 →
-C2's lower pad at (19.5, 10.54). All on the Kelly side of the barrier, so
-creepage is unaffected. Verify pin 4 → BLK continuity and pin 2 → BLK **open**
-before powering.
+`generate_board.py` checking every pad's net against `ADUM1201`, a literal
+transcription of the datasheet pinout — the check that was missing.
 
 ## Board layout
 
@@ -113,8 +96,13 @@ never be tied together.
   CJMCU-1201 breakout from the build plan is not needed on this board.
   TI ISO7721 (same package) does *not* drop in — different pinout; check
   before substituting.
-- U2 — 78L05, TO-92 (flat side toward the board edge; silk `O G I` marks
-  OUT/GND/IN). The 1.1 mm drills also take a TO-220 **L7805CV**, whose
+- U2 — 78L05, TO-92. **Flat side faces the bottom edge — the D1 "5V ON" LED
+  row** — matching the silk outline; that puts V_OUT in the `O` hole. Note the
+  ST L78L datasheet's TO-92 figure is a *bottom* view (its caption says so),
+  so reading it as a front view flips IN and OUT: in backwards you get ~9.7 V
+  on the 5 V rail, back-fed through the pass device. Silk `O G I` marks
+  OUT/GND/IN and is authoritative — the holes are +5V_K, GND1, +12V_K left to
+  right. The 1.1 mm drills also take a TO-220 **L7805CV**, whose
   IN/OUT pins are mirrored vs. the 78L05 — insert it facing the opposite
   way and match the legs to the `O G I` letters. Bend it flat toward the
   board edge if the box lid is tight.

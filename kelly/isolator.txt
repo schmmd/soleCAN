@@ -57,18 +57,26 @@ Wiring
         KELLY SIDE (floating)      | barrier |      BOARD SIDE (chassis)
                                    |         |
  red ---> 78L05 ---> 5V ---> VDD1 -| ADuM    |- VDD2 <--- 3V3
- black --------------------> GND1 -|  1201   |- GND2 <--- GND
+ blue  (Kelly Rx) <--------- VOA  -|  1201   |- VIA  <--- GPIO48 (TX)
  green (Kelly Tx) ---------> VIB  -| breakout|- VOB  ---> GPIO47 (RX)
- blue  (Kelly Rx) <--------- VOA  -|         |- VIA  <--- GPIO48 (TX)
+ black --------------------> GND1 -|         |- GND2 <--- GND
 
-Pin map (datasheet pin numbers — side 1 carries VOA/VIB, side 2 VOB/VIA;
-channel A runs board->Kelly, channel B Kelly->board):
+Rows above are in physical pin order: 1-2-3-4 down side 1, 8-7-6-5 down
+side 2.
+
+Pin map (ADuM1201 datasheet Rev. L Figure 5 — side 1 carries VOA/VIB, side 2
+VOB/VIA; channel A runs board->Kelly, channel B Kelly->board):
 
   Kelly side (isolated, side 1)        Board side (chassis, side 2)
   VDD1 (1) <- 5 V from regulator       VDD2 (8) <- RejsaCAN 3V3
-  GND1 (2) <- Kelly black (V-)         GND2 (5) <- board GND
-  VIB  (4) <- Kelly green (Tx), input  VOB  (6) -> GPIO47 (RX), output
-  VOA  (3) -> Kelly blue (Rx), output  VIA  (7) <- GPIO48 (TX), input
+  VOA  (2) -> Kelly blue (Rx), output  VIA  (7) <- GPIO48 (TX), input
+  VIB  (3) <- Kelly green (Tx), input  VOB  (6) -> GPIO47 (RX), output
+  GND1 (4) <- Kelly black (V-), NOT 2  GND2 (5) <- board GND
+
+**GND1 is pin 4, at the bottom of side 1.** Side 1 is NOT the mirror image
+of side 2 -- assuming it was put the wrong pinout on the rev A PCB. Anything
+deriving pin numbers from this file must use the table above, not the
+row order of a schematic sketch.
 
 There is no longer any wire between Kelly V- and board GND, and no series
 resistor anywhere on the link.

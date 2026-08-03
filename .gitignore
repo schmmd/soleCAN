@@ -21,3 +21,4 @@ worktrees/
 # KiCad local state and autosave history repo
 *.kicad_prl
 .history/
+*.lck
