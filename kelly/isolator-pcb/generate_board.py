@@ -332,12 +332,11 @@ route([D1_K, (6.5, 25.5), P_BLK], 2, "F.Cu", TRACE_SIG)
 # GND1 spine (top): BLK -> C1B -> U2 GND, spur east to C2B
 route([P_BLK, (12.04, 23.0), C1_B, U2_GND], 2, "F.Cu", TRACE_PWR)
 route([(12.04, 11.5), (19.5, 11.5), C2_B], 2, "F.Cu", TRACE_SIG)
-# GND1 to pin 4: tee off the C2B spur at (19.5, 11.5) and drop down the west
-# side of the via column, then in from below. Runs left of the pin-2/3 stubs
-# so nothing crosses. C2's return to pin 4 is ~10 mm via this tee -- longer
-# than ideal for a bypass cap, but the link is 19200 Bd with ~10 ns edges.
-route([(19.5, 11.5), (19.5, 16.8), (21.4, 16.8), U1[4][:2]],
-      2, "F.Cu", TRACE_SIG)
+# GND1 to pin 4: tee off the C2B spur at (19.5, 11.5), drop down the west
+# side of the via column, and go straight in. x=19.5 clears the via annuli by
+# 0.45 mm; the run in at y=14.905 passes 0.77 mm under the pin-3 stub, since
+# pin 4 is already below both signal stubs and nothing has to be dodged.
+route([(19.5, 11.5), (19.5, 14.905), U1[4][:2]], 2, "F.Cu", TRACE_SIG)
 # C1A -> U2 IN (12V)
 route([C1_A, U2_IN], 1, "F.Cu", TRACE_PWR)
 # VOA (chip out -> Kelly Rx, blue): bottom to via, top stub into pin 2
