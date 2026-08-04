@@ -22,6 +22,7 @@ RED, BLU, GRN, BLK (blue/green swapped vs. the harness order) so the two
 signal traces reach the ADuM pins without crossing; pads are silk-labeled.
 """
 
+import pathlib
 import re
 import uuid
 
@@ -357,6 +358,155 @@ route([P_VOB, (29.5, 13.635), U1[6][:2]], 8, "F.Cu", TRACE_SIG)
 route([P_GND, (29.5, 14.905), U1[5][:2]], 7, "F.Cu", TRACE_PWR)
 route([C3_B, (31.0, 20.0), P_GND], 7, "B.Cu", TRACE_SIG)
 
+# --------------------------------------------------------------------- logo
+# The repo's tractor silhouette, on F.SilkS. Converted straight from the SVG
+# (it is all M/C/z, so no rasterising) rather than via bitmap2component, which
+# is not shipped in the macOS KiCad bundle.
+LOGO_SVG = pathlib.Path(__file__).resolve().parents[2] / "img" / "tractor.svg"
+LOGO_CENTER = (32.5, 22.0)     # board mm
+LOGO_WIDTH = 10.0              # board mm across; height follows the artwork
+BEZIER_STEPS = 8
+SIMPLIFY_TOL = 0.02            # mm -- below silk resolution, so invisible
+
+
+def svg_subpaths(d):
+    """Flatten one path's M/C/z data into closed lists of points."""
+    toks = re.findall(r"([MCz])|(-?\d+\.?\d*)", d)
+    nums, cmds = [], []
+    for c, n in toks:
+        (cmds.append((c, len(nums))) if c else nums.append(float(n)))
+    subs, cur, pt = [], [], (0.0, 0.0)
+    for k, (c, idx) in enumerate(cmds):
+        args = nums[idx:cmds[k + 1][1] if k + 1 < len(cmds) else len(nums)]
+        if c == "M":
+            if cur:
+                subs.append(cur)
+            cur = [(args[0], args[1])]
+            pt = cur[0]
+            for j in range(2, len(args), 2):
+                pt = (args[j], args[j + 1])
+                cur.append(pt)
+        elif c == "C":
+            for j in range(0, len(args), 6):
+                p0, p1, p2, p3 = pt, args[j:j+2], args[j+2:j+4], args[j+4:j+6]
+                for s in range(1, BEZIER_STEPS + 1):
+                    t = s / BEZIER_STEPS
+                    u = 1 - t
+                    cur.append((
+                        u**3*p0[0] + 3*u*u*t*p1[0] + 3*u*t*t*p2[0] + t**3*p3[0],
+                        u**3*p0[1] + 3*u*u*t*p1[1] + 3*u*t*t*p2[1] + t**3*p3[1]))
+                pt = (p3[0], p3[1])
+        elif c == "z" and cur:
+            subs.append(cur)
+            cur = []
+    return subs + ([cur] if cur else [])
+
+
+def signed_area(p):
+    return 0.5 * sum(p[i][0] * p[i-1][1] - p[i-1][0] * p[i][1]
+                     for i in range(len(p)))
+
+
+def point_in(pt, poly):
+    x, y = pt
+    c = False
+    for i in range(len(poly)):
+        (xi, yi), (xj, yj) = poly[i], poly[i - 1]
+        if (yi > y) != (yj > y) and x < (xj-xi) * (y-yi) / (yj-yi) + xi:
+            c = not c
+    return c
+
+
+def rdp(pts, tol):
+    """Ramer-Douglas-Peucker on an open chain, iterative to keep the
+    recursion off the stack."""
+    if len(pts) < 3:
+        return list(pts)
+    keep = [False] * len(pts)
+    keep[0] = keep[-1] = True
+    stack = [(0, len(pts) - 1)]
+    while stack:
+        a, b = stack.pop()
+        (x0, y0), (x1, y1) = pts[a], pts[b]
+        dx, dy = x1 - x0, y1 - y0
+        norm = (dx * dx + dy * dy) ** 0.5 or 1.0
+        far, fd = None, tol
+        for i in range(a + 1, b):
+            d = abs(dy * (pts[i][0] - x0) - dx * (pts[i][1] - y0)) / norm
+            if d > fd:
+                far, fd = i, d
+        if far is not None:
+            keep[far] = True
+            stack += [(a, far), (far, b)]
+    return [p for p, k in zip(pts, keep) if k]
+
+
+def simplify(pts, tol):
+    """RDP over a closed ring. Anchoring on first and last point would be
+    degenerate here -- on a ring they are the same place, so the baseline has
+    no length and every vertex measures as zero deviation. Split the ring at
+    its farthest vertex first and simplify the two chains."""
+    far = max(range(len(pts)),
+              key=lambda k: (pts[k][0]-pts[0][0])**2 + (pts[k][1]-pts[0][1])**2)
+    head = rdp(pts[:far + 1], tol)
+    tail = rdp(pts[far:] + [pts[0]], tol)
+    return head[:-1] + tail[:-1]
+
+
+def bridge(outer, holes):
+    """Splice each hole into its parent with a degenerate keyhole cut, since
+    gr_poly holds one contour and has no hole support. The hole is walked in
+    the opposite direction so the traversal fills correctly."""
+    poly = list(outer)
+    for hole in holes:
+        if (signed_area(hole) > 0) == (signed_area(outer) > 0):
+            hole = hole[::-1]
+        bi, bj, bd = 0, 0, float("inf")
+        for i, a in enumerate(poly):
+            for j, b in enumerate(hole):
+                d = (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
+                if d < bd:
+                    bd, bi, bj = d, i, j
+        poly = poly[:bi+1] + hole[bj:] + hole[:bj+1] + poly[bi:]
+    return poly
+
+
+def gr_poly(pts, layer="F.SilkS"):
+    xy = " ".join(f"(xy {OX+x:.3f} {OY+y:.3f})" for x, y in pts)
+    body.append(
+        f'(gr_poly (pts {xy}) (stroke (width 0) (type solid)) (fill solid) '
+        f'(layer "{layer}") {ts()})'
+    )
+
+
+def place_logo():
+    subs = [s for d in re.findall(r'<path[^>]*?d="([^"]+)"',
+                                  LOGO_SVG.read_text(), re.S)
+            for s in svg_subpaths(d) if len(s) >= 3]
+    xs = [p[0] for s in subs for p in s]
+    ys = [p[1] for s in subs for p in s]
+    scale = LOGO_WIDTH / (max(xs) - min(xs))
+    cx, cy = (max(xs) + min(xs)) / 2, (max(ys) + min(ys)) / 2
+
+    def to_board(s):
+        return [(LOGO_CENTER[0] + (x - cx) * scale,
+                 LOGO_CENTER[1] + (y - cy) * scale) for x, y in s]
+
+    subs = [simplify(to_board(s), SIMPLIFY_TOL) for s in subs]
+    # even nesting depth is solid, odd is a hole cut out of its parent
+    depth = [sum(1 for t in subs if t is not s and point_in(s[0], t))
+             for s in subs]
+    for s, dep in zip(subs, depth):
+        if dep % 2:
+            continue
+        kids = [t for t, td in zip(subs, depth)
+                if td == dep + 1 and point_in(t[0], s)]
+        gr_poly(bridge(s, kids))
+    return len(subs), sum(len(s) for s in subs)
+
+
+LOGO_SHAPES, LOGO_POINTS = place_logo()
+
 # --------------------------------------------------------------- silkscreen
 for x in (23.6, 26.4):
     gr_line((x, 1.0), (x, 31.0), layer="F.SilkS", width=0.2)
@@ -473,7 +623,30 @@ assert GAP >= 3.5, (
     f"isolation gap is {GAP:.2f} mm -- side 1 copper reaches x={s1_max:.2f}, "
     f"side 2 starts at x={s2_min:.2f}")
 
-# 3. Nothing dangling: every net must land on at least two pads, or it is
+# 3. No silk on pads. Silkscreen ink over a pad resists solder, and the logo
+#    is the one piece of silk placed by coordinate rather than next to the
+#    thing it labels -- so moving it is exactly how this would get broken.
+LOGO_CLEAR = 0.2
+_logo_pts = [(float(x), float(y)) for poly in re.findall(
+                 r"\(gr_poly \(pts ([^)]*(?:\)[^)]*)*?)\) \(stroke", out)
+             for x, y in re.findall(r"\(xy ([\d.]+) ([\d.]+)\)", poly)]
+assert _logo_pts, "logo emitted no geometry"
+_fp = None
+for _line in out.split("\n"):
+    if _line.startswith("(footprint"):
+        _m = re.search(r"\(at ([\d.]+) ([\d.]+)\)", _line)
+        _fp = (float(_m[1]), float(_m[2]))
+    _m = re.match(r'\s*\(pad "\S*" \S+ \S+ \(at (-?[\d.]+) (-?[\d.]+)\) '
+                  r"\(size ([\d.]+) ([\d.]+)\)", _line)
+    if _m:
+        _px, _py = _fp[0] + float(_m[1]), _fp[1] + float(_m[2])
+        _hx, _hy = float(_m[3]) / 2 + LOGO_CLEAR, float(_m[4]) / 2 + LOGO_CLEAR
+        for _x, _y in _logo_pts:
+            assert not (abs(_x - _px) < _hx and abs(_y - _py) < _hy), (
+                f"logo silk at ({_x-OX:.2f}, {_y-OY:.2f}) lands on the pad at "
+                f"({_px-OX:.2f}, {_py-OY:.2f})")
+
+# 4. Nothing dangling: every net must land on at least two pads, or it is
 #    wired to exactly one thing and does nothing.
 _pad_nets = re.findall(r'\(pad "\S*" .*\(net (\d+) ', out)
 for _n in NETS:
