@@ -363,7 +363,7 @@ route([C3_B, (31.0, 20.0), P_GND], 7, "B.Cu", TRACE_SIG)
 # (it is all M/C/z, so no rasterising) rather than via bitmap2component, which
 # is not shipped in the macOS KiCad bundle.
 LOGO_SVG = pathlib.Path(__file__).resolve().parents[2] / "img" / "tractor.svg"
-LOGO_CENTER = (32.5, 22.0)     # board mm
+LOGO_CENTER = (32.29, 24.201)  # board mm; positioned by hand in KiCad
 LOGO_WIDTH = 10.0              # board mm across; height follows the artwork
 BEZIER_STEPS = 8
 SIMPLIFY_TOL = 0.02            # mm -- below silk resolution, so invisible
