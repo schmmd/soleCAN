@@ -374,15 +374,29 @@ struct Dm1State {
 // match the Python decode — see kelly/README.md for what's CONFIRMED vs
 // TENTATIVE. `valid`/`last_seen_ms` drive JSON freshness like the CAN states.
 struct KellyState {
-    uint8_t  tps_pedal         = 0;
-    uint8_t  b_plus_v          = 0;   // battery volts (raw byte)
-    int16_t  motor_temp_c      = 0;
-    int16_t  controller_temp_c = 0;
-    uint8_t  forward_switch    = 0;
-    uint8_t  low_speed         = 0;   // 1 = low setpoint (~2400), 0 = high (~2800)
-    uint16_t error_status      = 0;   // 16-bit fault bitmask (bit -> KELLY_ERROR_NAMES)
-    uint16_t motor_speed_rpm   = 0;
-    uint16_t phase_current_a   = 0;
+    // All 19 fields the app's "AC Monitor" screen shows, in monitor-block
+    // offset order. Only a subset is surfaced over BLE (see buildJson) but
+    // every field is decoded and available in the full WiFi /json and the
+    // dashboard's Kelly detail view.
+    uint8_t  tps_pedal         = 0;   // off 0  — throttle AD (0..255; ~253 = hydraulic on)
+    uint8_t  brake_pedal       = 0;   // off 1  — brake AD (0..255)
+    uint8_t  brake_switch      = 0;   // off 2
+    uint8_t  foot_switch       = 0;   // off 3
+    uint8_t  forward_switch    = 0;   // off 4
+    uint8_t  reverse_switch    = 0;   // off 5  — app labels this "Reversed"
+    uint8_t  hall_a            = 0;   // off 6
+    uint8_t  hall_b            = 0;   // off 7
+    uint8_t  hall_c            = 0;   // off 8
+    uint8_t  b_plus_v          = 0;   // off 9  — battery volts (raw byte)
+    int16_t  motor_temp_c      = 0;   // off 10
+    int16_t  controller_temp_c = 0;   // off 11
+    uint8_t  set_direction     = 0;   // off 12 — 0 = forward
+    uint8_t  actual_direction  = 0;   // off 13 — 0 = forward
+    uint8_t  brake_switch2     = 0;   // off 14
+    uint8_t  low_speed         = 0;   // off 15 — 1 = low setpoint (~2400), 0 = high (~2800)
+    uint16_t error_status      = 0;   // off 16 — 16-bit fault bitmask (bit -> KELLY_ERROR_NAMES)
+    uint16_t motor_speed_rpm   = 0;   // off 18
+    uint16_t phase_current_a   = 0;   // off 20
     bool     valid             = false;
     uint32_t last_seen_ms      = 0;
 };
@@ -1463,10 +1477,20 @@ static void kellySendQuery(uint8_t cmd) {
 // mirror Monitor.decode; only offsets 0..21 are defined by the protocol.
 static void kellyDecodeBlock(const uint8_t* b) {
     g_kelly.tps_pedal         = b[0];
+    g_kelly.brake_pedal       = b[1];
+    g_kelly.brake_switch      = b[2];
+    g_kelly.foot_switch       = b[3];
     g_kelly.forward_switch    = b[4];
+    g_kelly.reverse_switch    = b[5];
+    g_kelly.hall_a            = b[6];
+    g_kelly.hall_b            = b[7];
+    g_kelly.hall_c            = b[8];
     g_kelly.b_plus_v          = b[9];
     g_kelly.motor_temp_c      = b[10];   // raw byte, as the Python decode leaves it
     g_kelly.controller_temp_c = b[11];
+    g_kelly.set_direction     = b[12];
+    g_kelly.actual_direction  = b[13];
+    g_kelly.brake_switch2     = b[14];
     g_kelly.low_speed         = b[15];
     g_kelly.error_status      = (uint16_t(b[16]) << 8) | b[17];   // big-endian
     g_kelly.motor_speed_rpm   = (uint16_t(b[18]) << 8) | b[19];
@@ -1843,9 +1867,22 @@ String buildJson(bool pretty = true, bool minimal = false) {
         k["controller_temp_c"] = g_kelly.controller_temp_c;
         k["low_speed"]         = g_kelly.low_speed;
         k["error_status"]      = g_kelly.error_status;
+        // The remaining monitor fields are decoded but stripped from the BLE
+        // (minimal) payload to keep it small; the full WiFi /json carries all
+        // 19, which the dashboard's Kelly detail view renders.
         if (!minimal) {
-            k["tps_pedal"]      = g_kelly.tps_pedal;
-            k["forward_switch"] = g_kelly.forward_switch;
+            k["tps_pedal"]        = g_kelly.tps_pedal;
+            k["brake_pedal"]      = g_kelly.brake_pedal;
+            k["brake_switch"]     = g_kelly.brake_switch;
+            k["foot_switch"]      = g_kelly.foot_switch;
+            k["forward_switch"]   = g_kelly.forward_switch;
+            k["reverse_switch"]   = g_kelly.reverse_switch;
+            k["hall_a"]           = g_kelly.hall_a;
+            k["hall_b"]           = g_kelly.hall_b;
+            k["hall_c"]           = g_kelly.hall_c;
+            k["set_direction"]    = g_kelly.set_direction;
+            k["actual_direction"] = g_kelly.actual_direction;
+            k["brake_switch2"]    = g_kelly.brake_switch2;
         }
         auto errs = k["errors"].to<JsonArray>();
         for (int b = 0; b < 16; b++) {
