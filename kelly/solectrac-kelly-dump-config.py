@@ -217,7 +217,7 @@ CATEGORY_ORDER = ("General", "Protection", "Throttle", "Braking", "Speed",
                   "PID tuning", "Advanced", "Motor")
 
 # Model detection threshold for the version word at offset 16..17
-# (big-endian): >= 265 is the KBLS_0109 91-parameter map decoded here;
+# (big-endian): >= 265 is the KBLS_0109 98-parameter map decoded here;
 # 262..264 is the older KBLS_0106 map, which this tool does not decode.
 KBLS_0109_MIN_VERSION = 265
 
