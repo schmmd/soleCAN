@@ -26,6 +26,7 @@
  */
 
 #include <Arduino.h>
+#include <stdarg.h>   // logLine() varargs
 #include <vector>
 #include <WiFi.h>
 #include <Preferences.h>
@@ -1966,6 +1967,43 @@ static char   slcan_buf[32];
 static uint8_t slcan_len = 0;
 static bool   slcan_open = false;
 
+// ── Device log ring ───────────────────────────────────────────────────────────
+// A small in-RAM ring of recent device-status lines, served at GET /log so the
+// log is readable over WiFi in any USB mode. logLine() also echoes to USB when
+// the port isn't carrying a binary stream. Appends come from both the main loop
+// and the WiFi event task, so the ring is guarded by a spinlock.
+static portMUX_TYPE g_log_mux = portMUX_INITIALIZER_UNLOCKED;
+static char   g_log_ring[3072];
+static size_t g_log_head    = 0;
+static bool   g_log_wrapped = false;
+
+// USB text may be written only when the port isn't a binary channel — i.e. not
+// mid-SLCAN-session and not the kelly bridge. (slcan_open only goes true in slcan
+// mode, so logging and pre-session slcan both allow text.)
+static inline bool usbTextAllowed() {
+    return g_usb_mode != USB_KELLY && !slcan_open;
+}
+
+// Append one formatted line to the ring, and echo it to USB when allowed.
+void logLine(const char* fmt, ...) {
+    char buf[192];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof(buf) - 2, fmt, ap);
+    va_end(ap);
+    if (n < 0) return;
+    if (n > (int)sizeof(buf) - 2) n = sizeof(buf) - 2;
+    buf[n++] = '\r';
+    buf[n++] = '\n';
+    portENTER_CRITICAL(&g_log_mux);
+    for (int i = 0; i < n; i++) {
+        g_log_ring[g_log_head++] = buf[i];
+        if (g_log_head >= sizeof(g_log_ring)) { g_log_head = 0; g_log_wrapped = true; }
+    }
+    portEXIT_CRITICAL(&g_log_mux);
+    if (usbTextAllowed()) Serial.write((const uint8_t*)buf, n);
+}
+
 // Marks a served request so an active web client (dashboard poller, file
 // download) defers the CAN-quiet deep sleep — see checkCanQuietSleep(). Called
 // at the top of every real endpoint but deliberately NOT from handleNotFound:
@@ -2164,6 +2202,28 @@ void handleUsbSet() {
     server.send(200, "application/json", out);
 }
 
+// GET /log — dump the recent device-log ring (oldest -> newest) as text. The ring
+// bytes are snapshotted under the spinlock into a local buffer, then sent outside
+// the critical section (no heap work while interrupts are masked).
+void handleLog() {
+    noteHttpActivity();
+    static char snap[sizeof(g_log_ring) + 1];
+    size_t len;
+    portENTER_CRITICAL(&g_log_mux);
+    if (g_log_wrapped) {
+        size_t tail = sizeof(g_log_ring) - g_log_head;
+        memcpy(snap, g_log_ring + g_log_head, tail);
+        memcpy(snap + tail, g_log_ring, g_log_head);
+        len = sizeof(g_log_ring);
+    } else {
+        memcpy(snap, g_log_ring, g_log_head);
+        len = g_log_head;
+    }
+    portEXIT_CRITICAL(&g_log_mux);
+    snap[len] = '\0';
+    server.send(200, "text/plain", len ? snap : "(no log yet)\r\n");
+}
+
 // Apply new STA credentials: AP-password gated, validated, persisted to NVS,
 // then live re-join (no reboot). The soft-AP stays up throughout.
 void handleWifiSave() {
@@ -2192,9 +2252,8 @@ void handleWifiSave() {
     WiFi.disconnect(false);
     if (staConfigured()) WiFi.begin(g_sta_ssid, g_sta_pass);
 
-    if (!slcan_open)
-        Serial.printf("WiFi: STA reconfigured to \"%s\" (pass %u chars)\r\n",
-                      g_sta_ssid, (unsigned)strlen(g_sta_pass));
+    logLine("WiFi: STA reconfigured to \"%s\" (pass %u chars)",
+            g_sta_ssid, (unsigned)strlen(g_sta_pass));
 
     String msg = staConfigured()
         ? String("saved; re-joining \"") + g_sta_ssid + "\"\n"
@@ -2623,7 +2682,7 @@ void usbLoggingPoll() {
                  g_kelly.motor_speed_rpm,
                  (unsigned long)((now - g_kelly.last_seen_ms) / 1000));
 #endif
-    Serial.printf("%s\r\n", msg);
+    logLine("%s", msg);
 }
 
 // ── SLCAN ─────────────────────────────────────────────────────────────────────
@@ -3176,15 +3235,13 @@ void setup() {
         if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
             g_sta_last_disconnect_reason = info.wifi_sta_disconnected.reason;
             g_sta_disconnects = g_sta_disconnects + 1;
-            if (!slcan_open)
-                Serial.printf("WiFi: STA disconnected, reason %u (%s)\r\n",
-                              info.wifi_sta_disconnected.reason,
-                              staDisconnectReasonName(
-                                  info.wifi_sta_disconnected.reason).c_str());
+            logLine("WiFi: STA disconnected, reason %u (%s)",
+                    info.wifi_sta_disconnected.reason,
+                    staDisconnectReasonName(
+                        info.wifi_sta_disconnected.reason).c_str());
         } else if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
-            if (!slcan_open)
-                Serial.printf("WiFi: STA connected, IP %s\r\n",
-                              WiFi.localIP().toString().c_str());
+            logLine("WiFi: STA connected, IP %s",
+                    WiFi.localIP().toString().c_str());
         }
     });
 
@@ -3195,12 +3252,12 @@ void setup() {
     if (join_sta) WiFi.begin(g_sta_ssid, g_sta_pass);
 
     if (join_sta)
-        Serial.printf("WiFi: AP \"%s\" %s; STA joining \"%s\" (pass %u chars)\r\n",
-                      AP_SSID, g_ap_running ? "up" : "FAILED",
-                      g_sta_ssid, (unsigned)strlen(g_sta_pass));
+        logLine("WiFi: AP \"%s\" %s; STA joining \"%s\" (pass %u chars)",
+                AP_SSID, g_ap_running ? "up" : "FAILED",
+                g_sta_ssid, (unsigned)strlen(g_sta_pass));
     else
-        Serial.printf("WiFi: AP \"%s\" %s; STA disabled (no SSID configured)\r\n",
-                      AP_SSID, g_ap_running ? "up" : "FAILED");
+        logLine("WiFi: AP \"%s\" %s; STA disabled (no SSID configured)",
+                AP_SSID, g_ap_running ? "up" : "FAILED");
 
     // Wildcard DNS on the soft-AP: any hostname (tractor.local, tractor,
     // captive-portal probes, etc.) resolves to the board's AP IP. Needed
@@ -3214,6 +3271,7 @@ void setup() {
     server.on("/config", handleConfig);
     server.on("/usb", HTTP_GET, handleUsbPage);   // USB-mode control page
     server.on("/usb", HTTP_PUT, handleUsbSet);    // set USB mode (idempotent)
+    server.on("/log", HTTP_GET, handleLog);       // recent device log (any mode)
     server.on("/wifi", HTTP_GET,  handleWifiForm);
     server.on("/wifi", HTTP_POST, handleWifiSave);
 #if defined(HAS_SD)
