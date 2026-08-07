@@ -68,7 +68,7 @@ ESP32-S3 firmware that re-implements the main-bus J1939 decode in C++ and
 exposes it four ways: WiFi HTML dashboard, JSON endpoint, BLE (Nordic UART
 Service), USB SLCAN, and socketcand. The USB port's role is runtime-switchable
 (`logging` default / `slcan` / `kelly` bridge) via the `/usb` page or a `mode`
-console command, and recent device logs are viewable at `/log`. All logic is in `src/main.cpp`; the board
+console command, and recent device logs are viewable at `/logs`. All logic is in `src/main.cpp`; the board
 pin maps are `#ifdef`-selected (`BOARD_ADAFRUIT_FEATHER_S3` /
 `BOARD_LILYGO_T2CAN`). See `esp32-s3/README.md` for the full build,
 wiring, and flashing guide.

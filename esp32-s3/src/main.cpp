@@ -1968,7 +1968,7 @@ static uint8_t slcan_len = 0;
 static bool   slcan_open = false;
 
 // ── Device log ring ───────────────────────────────────────────────────────────
-// A small in-RAM ring of recent device-status lines, served at GET /log so the
+// A small in-RAM ring of recent device-status lines, served at GET /logs so the
 // log is readable over WiFi in any USB mode. logLine() also echoes to USB when
 // the port isn't carrying a binary stream. Appends come from both the main loop
 // and the WiFi event task, so the ring is guarded by a spinlock.
@@ -2153,7 +2153,7 @@ void handleUsbPage() {
         "kelly = USB\xE2\x86\x94Kelly bridge \xC2\xB7 "
 #endif
         "reverts to logging on power cycle.</p>"
-        "<p><a href=/log>View device log</a> \xC2\xB7 <a href=/>Dashboard</a></p>"
+        "<p><a href=/logs>View device log</a> \xC2\xB7 <a href=/>Dashboard</a></p>"
         "<script>var M=['logging','slcan'"
 #if defined(ENABLE_KELLY)
         ",'kelly'"
@@ -2202,7 +2202,7 @@ void handleUsbSet() {
     server.send(200, "application/json", out);
 }
 
-// GET /log — dump the recent device-log ring (oldest -> newest) as text. The ring
+// GET /logs — dump the recent device-log ring (oldest -> newest) as text. The ring
 // bytes are snapshotted under the spinlock into a local buffer, then sent outside
 // the critical section (no heap work while interrupts are masked).
 void handleLog() {
@@ -3271,7 +3271,7 @@ void setup() {
     server.on("/config", handleConfig);
     server.on("/usb", HTTP_GET, handleUsbPage);   // USB-mode control page
     server.on("/usb", HTTP_PUT, handleUsbSet);    // set USB mode (idempotent)
-    server.on("/log", HTTP_GET, handleLog);       // recent device log (any mode)
+    server.on("/logs", HTTP_GET, handleLog);      // recent device log (any mode)
     server.on("/wifi", HTTP_GET,  handleWifiForm);
     server.on("/wifi", HTTP_POST, handleWifiSave);
 #if defined(HAS_SD)

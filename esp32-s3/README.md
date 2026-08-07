@@ -385,7 +385,7 @@ known state):
 
 | Mode | USB does | Notes |
 |---|---|---|
-| `logging` (default) | streams the device's own status/debug log | a `~2 s` heartbeat plus WiFi/CAN events; the same lines are also at `/log` |
+| `logging` (default) | streams the device's own status/debug log | a `~2 s` heartbeat plus WiFi/CAN events; the same lines are also at `/logs` |
 | `slcan` | SLCAN CAN adapter (see [Endpoints](#endpoints)) | for `python-can`; switch here first |
 | `kelly` | transparent USB↔Kelly bridge (`-DENABLE_KELLY` builds only) | lets `kelly/solectrac-kelly-monitor.py` / `dump-config.py` reach the controller *through* the board; **replaces the old `KELLY_PASSTHROUGH` build flag**. Only the regular Kelly polling is suspended — CAN decode, HTTP, and BLE keep running, so you can switch back over WiFi |
 
@@ -438,7 +438,7 @@ via mDNS.
 | `http://tractor.local/config` | Build + WiFi diagnostics as JSON (board, firmware version, features, STA/AP status) |
 | `http://tractor.local/wifi` | Web form to set the station WiFi SSID/password at runtime (AP-password gated) |
 | `http://tractor.local/usb` | USB-mode control page; `PUT /usb?mode=<logging\|slcan\|kelly>` sets it (see [USB port mode](#usb-port-mode)) |
-| `http://tractor.local/log` | Recent device log as text (works in any USB mode) |
+| `http://tractor.local/logs` | Recent device log as text (works in any USB mode) |
 | `tractor.local:28600` | socketcand TCP stream of raw CAN frames |
 | `/dev/cu.usbmodem*` (USB CDC) | Role depends on the USB mode: SLCAN CAN stream, device log, or Kelly bridge (default: log) |
 | `http://tractor.local/sd/status` | SD logging status + diagnostics (RejsaCAN only) |
