@@ -190,11 +190,6 @@
 #if defined(ENABLE_KELLY) && !defined(BOARD_REJSACAN)
   #error "ENABLE_KELLY requires BOARD_REJSACAN"
 #endif
-// Bench-only: turn the board into a transparent USB<->Kelly-UART bridge so the
-// Python monitor can validate the Kelly UART wiring through the real hardware.
-#if defined(KELLY_PASSTHROUGH) && !defined(ENABLE_KELLY)
-  #error "KELLY_PASSTHROUGH requires ENABLE_KELLY (it needs the UART pins/init)"
-#endif
 
 // WiFi runs in dual AP+STA mode: the board always broadcasts its own hotspot
 // (so it's reachable in the field), and concurrently tries to join the
@@ -448,6 +443,40 @@ char g_sta_pass[64] = "";
 static Preferences g_prefs;
 
 static inline bool staConfigured() { return g_sta_ssid[0] != '\0'; }
+
+// ── USB port role ─────────────────────────────────────────────────────────────
+// The native USB-CDC port has a runtime-selectable role. Boots to LOGGING (enum
+// 0); RAM-only, so a power cycle always returns to logging. Switched via PUT /usb
+// (and the /usb control page) or a `mode` command typed over the USB console.
+//   logging — USB streams device debug/status lines (usbLoggingPoll)
+//   slcan   — USB is the SLCAN CAN channel (slcanPoll)
+//   kelly   — transparent USB<->Kelly bridge (ENABLE_KELLY only); suspends the
+//             regular Kelly monitor polling while active
+enum UsbMode { USB_LOGGING = 0, USB_SLCAN, USB_KELLY };
+static UsbMode g_usb_mode = USB_LOGGING;
+
+static const char* usbModeName(UsbMode m) {
+    switch (m) {
+        case USB_SLCAN:   return "slcan";
+        case USB_KELLY:   return "kelly";
+        case USB_LOGGING: default: return "logging";
+    }
+}
+
+// Parse a mode name into `out`. Rejects "kelly" unless this is an ENABLE_KELLY
+// build, so non-Kelly boards can never select the bridge.
+static bool usbModeFromName(const String& s, UsbMode& out) {
+    if (s == "logging") { out = USB_LOGGING; return true; }
+    if (s == "slcan")   { out = USB_SLCAN;   return true; }
+#if defined(ENABLE_KELLY)
+    if (s == "kelly")   { out = USB_KELLY;   return true; }
+#endif
+    return false;
+}
+
+// Defined near the SLCAN section (they print over Serial / read device state).
+static bool tryModeCommand(const char* line);
+void usbLoggingPoll();
 
 // NVS 'wifi' namespace overrides the compiled defaults; an absent 'ssid' key
 // means "never provisioned", so fall back to the baked-in defaults (keeps the
@@ -1918,6 +1947,10 @@ String buildJson(bool pretty = true, bool minimal = false) {
     }
 #endif
 
+    // Current USB port role (small, device-wide fact — emitted even in the
+    // minimal/BLE snapshot so any client can see the mode).
+    doc["usb"]["mode"] = usbModeName(g_usb_mode);
+
     String out;
     if (pretty) serializeJsonPretty(doc, out);
     else        serializeJson(doc, out);
@@ -2060,6 +2093,75 @@ void handleWifiForm() {
               "<p>AP password (required):<br><input name=ap_pass type=password></p>"
               "<button type=submit>Save &amp; re-join</button></form>");
     server.send(200, "text/html", body);
+}
+
+// GET /usb — small self-contained control page. Buttons PUT /usb?mode=… via fetch
+// (HTML forms can't issue PUT) and reflect the returned state.
+void handleUsbPage() {
+    noteHttpActivity();
+    String body = F(
+        "<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
+        "<title>USB mode</title><style>"
+        "body{font-family:system-ui,sans-serif;max-width:420px;margin:0 auto;padding:16px;"
+        "background:#f0f2f5;color:#212121}h2{font-size:1.1em}"
+        "button{display:block;width:100%;padding:14px;margin:8px 0;border:0;border-radius:10px;"
+        "font-size:1em;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.1);cursor:pointer}"
+        "button.on{background:#c8e6c9;color:#1b5e20;font-weight:600}"
+        ".d{color:#757575;font-size:.85em}a{color:#1976d2}"
+        "#s{min-height:1.2em;font-size:.85em;color:#757575}</style>"
+        "<h2>USB port mode</h2><div id=btns></div><p id=s></p>"
+        "<p class=d>logging = device debug log over USB \xC2\xB7 slcan = CAN adapter \xC2\xB7 "
+#if defined(ENABLE_KELLY)
+        "kelly = USB\xE2\x86\x94Kelly bridge \xC2\xB7 "
+#endif
+        "reverts to logging on power cycle.</p>"
+        "<p><a href=/log>View device log</a> \xC2\xB7 <a href=/>Dashboard</a></p>"
+        "<script>var M=['logging','slcan'"
+#if defined(ENABLE_KELLY)
+        ",'kelly'"
+#endif
+        "];var cur='");
+    body += usbModeName(g_usb_mode);
+    body += F("';function draw(){var h='';M.forEach(function(m){"
+        "h+='<button class=\"'+(m==cur?'on':'')+'\" onclick=\"set(\\''+m+'\\')\">'+m+"
+        "(m==cur?' \\u2713':'')+'</button>';});document.getElementById('btns').innerHTML=h;}"
+        "function set(m){document.getElementById('s').textContent='switching\\u2026';"
+        "fetch('/usb?mode='+m,{method:'PUT'}).then(function(r){return r.json();})"
+        ".then(function(d){if(d.mode){cur=d.mode;draw();document.getElementById('s').textContent='mode: '+cur;}"
+        "else document.getElementById('s').textContent=d.error||'error';})"
+        ".catch(function(){document.getElementById('s').textContent='error';});}draw();</script>");
+    server.send(200, "text/html", body);
+}
+
+// PUT /usb — set the USB mode from the `mode` parameter (query arg, or a
+// `mode=…` form/plain body). Idempotent; returns the new state as JSON.
+void handleUsbSet() {
+    noteHttpActivity();
+    String want = server.hasArg("mode") ? server.arg("mode") : String();
+    if (want.length() == 0 && server.hasArg("plain")) {   // parse `mode=…` body
+        String b = server.arg("plain");
+        int i = b.indexOf("mode=");
+        if (i >= 0) {
+            want = b.substring(i + 5);
+            int amp = want.indexOf('&');
+            if (amp >= 0) want = want.substring(0, amp);
+        }
+    }
+    UsbMode m;
+    if (!usbModeFromName(want, m)) {
+        server.send(400, "application/json",
+                    "{\"error\":\"unknown or unavailable mode\"}");
+        return;
+    }
+    g_usb_mode = m;
+    String out = "{\"mode\":\"";
+    out += usbModeName(m);
+    out += "\",\"modes\":[\"logging\",\"slcan\""
+#if defined(ENABLE_KELLY)
+           ",\"kelly\""
+#endif
+           "]}";
+    server.send(200, "application/json", out);
 }
 
 // Apply new STA credentials: AP-password gated, validated, persisted to NVS,
@@ -2456,6 +2558,74 @@ void handleNotFound() {
     server.send(302, "text/plain", "");
 }
 
+// ── USB mode: console `mode` command + logging-mode input/heartbeat ───────────
+// Recognizes a `mode` line typed over the USB console. `mode` alone reports the
+// current + available modes; `mode <name>` switches. Returns true if the line was
+// a mode command, so the SLCAN handler can consume it before its own parsing.
+static bool tryModeCommand(const char* line) {
+    if (strncmp(line, "mode", 4) != 0) return false;
+    const char* p = line + 4;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p == '\0') {                       // bare `mode` -> report
+        Serial.printf("usb mode: %s (available: logging slcan"
+#if defined(ENABLE_KELLY)
+                      " kelly"
+#endif
+                      ")\r\n", usbModeName(g_usb_mode));
+        return true;
+    }
+    char name[16]; size_t n = 0;            // first whitespace-delimited token
+    while (p[n] && p[n] != ' ' && p[n] != '\t' && n < sizeof(name) - 1) {
+        name[n] = p[n]; n++;
+    }
+    name[n] = '\0';
+    UsbMode m;
+    if (usbModeFromName(String(name), m)) {
+        g_usb_mode = m;
+        Serial.printf("usb mode -> %s\r\n", usbModeName(m));
+    } else {
+        Serial.printf("usb mode: unknown '%s'\r\n", name);
+    }
+    return true;
+}
+
+// Runs each loop iteration while in LOGGING mode: accepts a `mode` command typed
+// over USB (other input discarded) and emits a ~2 s device-status heartbeat.
+void usbLoggingPoll() {
+    static char    buf[24];
+    static uint8_t len = 0;
+    while (Serial.available()) {            // (a) line-buffered `mode` command
+        char c = Serial.read();
+        if (c == '\r' || c == '\n') {
+            if (len > 0) { buf[len] = '\0'; tryModeCommand(buf); len = 0; }
+        } else if (len < sizeof(buf) - 1) {
+            buf[len++] = c;
+        } else {
+            len = 0;                        // overlong line: reset (commands are short)
+        }
+    }
+
+    static uint32_t next = 0;               // (b) periodic heartbeat
+    uint32_t now = millis();
+    if (now < next) return;
+    next = now + 2000;
+    uint32_t age = g_frames_rx ? (now - g_last_frame_ms) : 0;
+    char msg[160];
+    int w = snprintf(msg, sizeof(msg),
+        "[%lus] usb=logging  can:%lu rx last %lus  wifi=%s  heap=%u",
+        (unsigned long)(now / 1000), (unsigned long)g_frames_rx,
+        (unsigned long)(age / 1000),
+        WiFi.status() == WL_CONNECTED ? "sta" : (g_ap_running ? "ap" : "down"),
+        (unsigned)ESP.getFreeHeap());
+#if defined(ENABLE_KELLY)
+    if (g_kelly.valid && w > 0 && w < (int)sizeof(msg))
+        snprintf(msg + w, sizeof(msg) - w, "  kelly:%urpm %lus",
+                 g_kelly.motor_speed_rpm,
+                 (unsigned long)((now - g_kelly.last_seen_ms) / 1000));
+#endif
+    Serial.printf("%s\r\n", msg);
+}
+
 // ── SLCAN ─────────────────────────────────────────────────────────────────────
 // Presents the CAN bus as an SLCAN device over USB CDC serial.
 // python-can: interface='slcan', channel='/dev/cu.usbmodem...'
@@ -2521,6 +2691,9 @@ static bool canTransmit0(uint32_t id, bool extd, uint8_t dlc, const uint8_t* dat
 #endif
 
 void slcanHandleCommand(const char* cmd) {
+    // A `mode …` line switches the USB role (never collides with SLCAN's
+    // single-letter commands, so python-can is unaffected).
+    if (tryModeCommand(cmd)) return;
     switch (cmd[0]) {
         case 'O': slcan_open = true;  Serial.write('\r'); break;
         case 'C': slcan_open = false; Serial.write('\r'); break;
@@ -3039,6 +3212,8 @@ void setup() {
     server.on("/",       handleRoot);
     server.on("/json",   handleJson);
     server.on("/config", handleConfig);
+    server.on("/usb", HTTP_GET, handleUsbPage);   // USB-mode control page
+    server.on("/usb", HTTP_PUT, handleUsbSet);    // set USB mode (idempotent)
     server.on("/wifi", HTTP_GET,  handleWifiForm);
     server.on("/wifi", HTTP_POST, handleWifiSave);
 #if defined(HAS_SD)
@@ -3183,21 +3358,21 @@ static void canServiceTick() {
 }
 
 void loop() {
-#if defined(KELLY_PASSTHROUGH)
-    // Bench passthrough: transparent native-USB <-> Kelly-UART bridge. Lets the
-    // Python monitor (solectrac-kelly-monitor.py --port <this board>) talk to the
-    // controller through the board to validate the Kelly UART wiring and 5 V-TTL
-    // series resistor. Nothing else runs — no CAN, no decode, no SLCAN.
-    // Stream&, not HardwareSerial&: on the S3 `Serial` is HWCDCSerial (the native
-    // USB CDC peripheral), a different class from UART1's HardwareSerial.
-    Stream &usb = Serial;
-    while (usb.available())   kelly.write(usb.read());
-    while (kelly.available()) usb.write(kelly.read());
-    return;
-#endif
     canServiceTick();
     canRecoveryTick();
-    slcanPoll();
+
+    // USB port role (g_usb_mode). slcan parses USB as SLCAN; logging streams
+    // device status + accepts a `mode` command; kelly is a transparent
+    // USB<->Kelly bridge. `Serial` on the S3 is HWCDCSerial (native USB CDC).
+    if      (g_usb_mode == USB_SLCAN)   slcanPoll();
+    else if (g_usb_mode == USB_LOGGING) usbLoggingPoll();
+#if defined(ENABLE_KELLY)
+    else if (g_usb_mode == USB_KELLY) {
+        while (Serial.available()) kelly.write(Serial.read());
+        while (kelly.available())  Serial.write(kelly.read());
+    }
+#endif
+
 #if !defined(NO_WIFI)
     socketcandPoll();
     dns_server.processNextRequest();
@@ -3211,7 +3386,10 @@ void loop() {
     updateVinSense();
 #endif
 #if defined(ENABLE_KELLY)
-    kellyPoll();   // non-blocking: advances the Kelly monitor state machine
+    // Suspend the regular Kelly monitor queries only while the USB is bridged to
+    // the Kelly, so the firmware isn't a second master on that single-master bus.
+    if (g_usb_mode != USB_KELLY)
+        kellyPoll();
 #endif
 #if defined(AUTOSHUTDOWN)
     checkCanQuietSleep();
