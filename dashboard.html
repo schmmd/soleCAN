@@ -392,7 +392,9 @@ function update(d){
   var age=can.last_frame_age_s;
   var dot=can.state==='running'?'<span class="ok">●</span>':'<span class="bad">●</span>';
   var vers=[];
-  if(d.version)vers.push('fw '+d.version);
+  // On a tagged release the firmware also sends d.release; show it with the
+  // SHA in parens (fw v1.0.0 (abc1234)), otherwise just the SHA.
+  if(d.version)vers.push('fw '+(d.release?d.release+' ('+d.version+')':d.version));
   var br=window.DashboardBridge;
   if(br&&br.appVersion){try{var av=br.appVersion();if(av)vers.push('app '+av);}catch(e){}}
   // SD session-logging status (only present on boards with a card reader).

@@ -60,12 +60,16 @@ ARG MDNS_NAME=
 # Host-resolved git SHA (the build context omits .git). Pass with
 # --build-arg GIT_SHA=$(git rev-parse --short HEAD); falls back to "unknown".
 ARG GIT_SHA=unknown
+# Release tag, only on tagged builds (CI passes the tag; empty otherwise). Shown
+# alongside the SHA when set. Pass --build-arg GIT_VERSION=$(git describe --tags --exact-match 2>/dev/null).
+ARG GIT_VERSION=
 ENV WIFI_SSID=${WIFI_SSID}
 ENV WIFI_PASS=${WIFI_PASS}
 ENV AP_SSID=${AP_SSID}
 ENV AP_PASS=${AP_PASS}
 ENV MDNS_NAME=${MDNS_NAME}
 ENV GIT_SHA=${GIT_SHA}
+ENV GIT_VERSION=${GIT_VERSION}
 
 # Optional: pass --build-arg CAN_ALLOW_TX=1 to bring both CAN controllers up in
 # NORMAL mode so they ACK frames and can transmit (SLCAN t/T injection over USB,
