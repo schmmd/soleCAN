@@ -57,6 +57,10 @@ COPY dashboard.html ./dashboard.html
 # --build-arg GIT_SHA=$(git rev-parse --short HEAD); falls back to "unknown".
 ARG GIT_SHA=unknown
 ENV GIT_SHA=${GIT_SHA}
+# Release tag, only on tagged builds (CI passes the tag; empty otherwise). Shown
+# alongside the SHA when set. Pass --build-arg GIT_VERSION=$(git describe --tags --exact-match 2>/dev/null).
+ARG GIT_VERSION=
+ENV GIT_VERSION=${GIT_VERSION}
 
 # Build the debug APK. assembleRelease would need a signing config that
 # isn't checked in, so debug is the reproducible default.
