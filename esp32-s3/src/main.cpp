@@ -2320,15 +2320,14 @@ void handleUsbPage() {
         "font-size:1em;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.1);cursor:pointer}"
         "button.on{background:#c8e6c9;color:#1b5e20;font-weight:600}"
         ".d{color:#757575;font-size:.85em}a{color:#1976d2}"
-        "#s{min-height:1.2em;font-size:.85em;color:#757575}</style>"
+        "#s{font-size:.85em;color:#757575}</style>"
         "<h2>USB port mode</h2><div id=btns></div><p id=s></p>"
         "<p class=d>logging = device debug log over USB<br>"
-        "slcan = CAN adapter<br>"
+        "slcan = CAN adapter"
 #if defined(ENABLE_KELLY)
-        "kelly = USB\xE2\x86\x94Kelly bridge<br>"
+        "<br>kelly = USB\xE2\x86\x94Kelly bridge"
 #endif
-        "reverts to logging on power cycle.</p>"
-        "<p><a href=/logs>View device log</a> \xC2\xB7 <a href=/>Dashboard</a></p>"
+        "</p>"
         "<script>var M=['logging','slcan'"
 #if defined(ENABLE_KELLY)
         ",'kelly'"
@@ -2338,9 +2337,9 @@ void handleUsbPage() {
     body += F("';function draw(){var h='';M.forEach(function(m){"
         "h+='<button class=\"'+(m==cur?'on':'')+'\" onclick=\"set(\\''+m+'\\')\">'+m+"
         "(m==cur?' \\u2713':'')+'</button>';});document.getElementById('btns').innerHTML=h;}"
-        "function set(m){document.getElementById('s').textContent='switching\\u2026';"
+        "function set(m){"
         "fetch('/usb?mode='+m,{method:'PUT'}).then(function(r){return r.json();})"
-        ".then(function(d){if(d.mode){cur=d.mode;draw();document.getElementById('s').textContent='mode: '+cur;}"
+        ".then(function(d){if(d.mode){cur=d.mode;draw();document.getElementById('s').textContent='';}"
         "else document.getElementById('s').textContent=d.error||'error';})"
         ".catch(function(){document.getElementById('s').textContent='error';});}draw();</script>");
     server.send(200, "text/html", body);
