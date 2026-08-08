@@ -6,7 +6,7 @@ exposes the decoded state in four different ways:
 - A mobile-friendly HTML dashboard over WiFi
 - A JSON endpoint for scripting
 - BLE JSON output
-- Raw CAN frames over USB (SLCAN)
+- Raw CAN frames over USB (SLCAN) — one of the runtime-selectable [USB modes](#usb-port-mode)
 - Raw CAN frames over WiFi (socketcand)
 
 ## Supported hardware
@@ -161,6 +161,12 @@ the `kelly` object appears only while the controller is powered and answering.
 Connector pinout, wire protocol, field map, and the series-resistor rationale
 are in [`../../kelly/README.md`](../../kelly/README.md).
 
+To reach the controller with the Python tools *through* the board, switch the USB
+port to the `kelly` bridge mode (see [USB port mode](#usb-port-mode)) — a
+transparent USB↔Kelly passthrough that replaced the old `KELLY_PASSTHROUGH` build
+flag. Note the bridge is byte-transparent, so read-only-ness there depends on the
+host tool (the shipped `kelly/` tools are read-only by construction).
+
 ## What the LED tells you
 
 The LilyGo T-2CAN has no user LED, so its LED calls are no-ops.
@@ -235,7 +241,7 @@ environment in `platformio.ini`.
 | `pio run -e adafruit_feather_s3` | Build firmware for the Adafruit Feather |
 | `pio run -e lilygo_t2can` | Build firmware for the LilyGo T-2CAN |
 | `pio run -e <env> -t upload` | Build and flash to the connected board |
-| `pio device monitor -b 115200` | Open USB serial console (also speaks SLCAN — see below) |
+| `pio device monitor -b 115200` | Open the USB serial console — shows the device log by default; type `mode slcan`/`mode kelly` to switch [USB mode](#usb-port-mode) |
 | `pio run -t clean` | Wipe build cache (useful if PIO ever gets confused) |
 
 If `upload` fails with `port is busy`, something else (often a leftover
@@ -371,6 +377,27 @@ pio run -e lilygo_t2can          # native; or use the Docker --build-arg form ab
 `inject_build_overrides.py` (a no-op when the env vars are unset), so the
 default build is unchanged.
 
+## USB port mode
+
+The native USB-CDC port has a **runtime-selectable role**. It is RAM-only and
+boots to `logging` on every power cycle (so a power cycle always returns you to a
+known state):
+
+| Mode | USB does | Notes |
+|---|---|---|
+| `logging` (default) | streams the device's own status/debug log | a `~10 s` heartbeat plus WiFi/CAN events; the same lines are also at `/logs` |
+| `slcan` | SLCAN CAN adapter (see [Endpoints](#endpoints)) | for `python-can`; switch here first |
+| `kelly` | transparent USB↔Kelly bridge (`-DENABLE_KELLY` builds only) | lets `kelly/solectrac-kelly-monitor.py` / `dump-config.py` reach the controller *through* the board; **replaces the old `KELLY_PASSTHROUGH` build flag**. Only the regular Kelly polling is suspended — CAN decode, HTTP, and BLE keep running, so you can switch back over WiFi |
+
+Change it two ways, no reflash needed:
+
+- **HTTP:** open `http://tractor.local/usb` for a one-tap control page, or script
+  it — `curl -X PUT 'http://tractor.local/usb?mode=slcan'`. The current mode is
+  also in `/json` as `usb.mode`.
+- **USB console:** type `mode <logging|slcan|kelly>` (or just `mode` to report)
+  into the serial console. This works even on `-DNO_WIFI` builds. In `kelly` mode
+  the USB port is the bridge, so switch back over HTTP or by power-cycling.
+
 ## Changing the station WiFi at runtime (`/wifi`)
 
 The station (home/shop network) credentials can also be changed **without
@@ -410,8 +437,10 @@ via mDNS.
 | `http://tractor.local/json` | Decoded state as JSON |
 | `http://tractor.local/config` | Build + WiFi diagnostics as JSON (board, firmware version, features, STA/AP status) |
 | `http://tractor.local/wifi` | Web form to set the station WiFi SSID/password at runtime (AP-password gated) |
+| `http://tractor.local/usb` | USB-mode control page; `PUT /usb?mode=<logging\|slcan\|kelly>` sets it (see [USB port mode](#usb-port-mode)) |
+| `http://tractor.local/logs` | Recent device log as text (works in any USB mode) |
 | `tractor.local:28600` | socketcand TCP stream of raw CAN frames |
-| `/dev/cu.usbmodem*` (USB CDC) | SLCAN stream of raw CAN frames |
+| `/dev/cu.usbmodem*` (USB CDC) | Role depends on the USB mode: SLCAN CAN stream, device log, or Kelly bridge (default: log) |
 | `http://tractor.local/sd/status` | SD logging status + diagnostics (RejsaCAN only) |
 | `http://tractor.local/sd/sessions` | SD session/file inventory as JSON |
 | `http://tractor.local/sd/sessions/N` | `GET` whole session as a `.tar`; `DELETE` removes it |
