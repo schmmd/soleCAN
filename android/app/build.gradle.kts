@@ -31,6 +31,22 @@ fun gitSha(): String {
 }
 val gitShaValue = gitSha()
 
+// Release tag — non-empty only when this commit is a tagged release. Prefer the
+// GIT_VERSION env var (CI passes the tag on tag builds; the Docker context has no
+// .git); otherwise `git describe --tags --exact-match`. Empty when not on a tag.
+fun gitVersion(): String {
+    System.getenv("GIT_VERSION")?.let { return it.trim() }
+    return try {
+        val proc = ProcessBuilder("git", "describe", "--tags", "--exact-match")
+            .directory(rootProject.projectDir.parentFile)
+            .redirectErrorStream(true)
+            .start()
+        val out = proc.inputStream.bufferedReader().readText().trim()
+        if (proc.waitFor() == 0) out else ""
+    } catch (_: Exception) { "" }
+}
+val gitVersionValue = gitVersion()
+
 android {
     namespace = "com.schmitztech.solectrac.dashboard"
     compileSdk = 34
@@ -40,8 +56,9 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = 1
-        versionName = "1.0+$gitShaValue"
+        versionName = if (gitVersionValue.isNotEmpty()) gitVersionValue else "1.0+$gitShaValue"
         buildConfigField("String", "GIT_SHA", "\"$gitShaValue\"")
+        buildConfigField("String", "GIT_VERSION", "\"$gitVersionValue\"")
     }
 
     buildTypes {

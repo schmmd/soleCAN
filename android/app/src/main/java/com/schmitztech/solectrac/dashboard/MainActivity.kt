@@ -164,8 +164,13 @@ class MainActivity : AppCompatActivity(), BleClient.Listener {
             }
         }
 
+        // On a tagged release, show the tag with the SHA in parens
+        // (e.g. "v1.0.0 (abc1234)"); otherwise just the SHA.
         @JavascriptInterface
-        fun appVersion(): String = BuildConfig.GIT_SHA
+        fun appVersion(): String =
+            if (BuildConfig.GIT_VERSION.isNotEmpty())
+                "${BuildConfig.GIT_VERSION} (${BuildConfig.GIT_SHA})"
+            else BuildConfig.GIT_SHA
     }
 
     private fun pushJsonToWebView(json: String) {

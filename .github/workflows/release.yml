@@ -49,6 +49,7 @@ jobs:
           tags: solectrac-fw:release
           build-args: |
             GIT_SHA=${{ steps.sha.outputs.short }}
+            GIT_VERSION=${{ github.ref_type == 'tag' && github.ref_name || '' }}
           cache-from: type=gha,scope=firmware
           cache-to: type=gha,scope=firmware,mode=max
 
@@ -92,6 +93,7 @@ jobs:
           tags: solectrac-android:release
           build-args: |
             GIT_SHA=${{ steps.sha.outputs.short }}
+            GIT_VERSION=${{ github.ref_type == 'tag' && github.ref_name || '' }}
           cache-from: type=gha,scope=android
           cache-to: type=gha,scope=android,mode=max
 

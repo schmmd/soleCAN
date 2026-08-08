@@ -1713,6 +1713,9 @@ String buildJson(bool pretty = true, bool minimal = false) {
 #ifdef GIT_SHA
     doc["version"] = GIT_SHA;
 #endif
+#ifdef GIT_VERSION
+    if (GIT_VERSION[0]) doc["release"] = GIT_VERSION;   // tag, on release builds only
+#endif
 
     // CAN bus health
     auto can = doc["can"].to<JsonObject>();
@@ -2119,6 +2122,9 @@ void handleConfig() {
     doc["uptime"] = millis() / 1000.0;
 #ifdef GIT_SHA
     doc["version"] = GIT_SHA;
+#endif
+#ifdef GIT_VERSION
+    if (GIT_VERSION[0]) doc["release"] = GIT_VERSION;   // tag, on release builds only
 #endif
 #if defined(BOARD_ADAFRUIT_FEATHER_S3)
     doc["board"] = "adafruit_feather_s3";
