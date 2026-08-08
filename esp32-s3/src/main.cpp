@@ -20,7 +20,8 @@
  *   GET    /sd/sessions         — list recorded sessions JSON (BOARD_REJSACAN only)
  *   GET    /sd/sessions/{id}    — download one session as a USTAR tar stream (BOARD_REJSACAN only)
  *   DELETE /sd/sessions/{id}    — delete one (non-active) recorded session (BOARD_REJSACAN only)
- *   anything else 302-redirects to / (captive-portal auto-open on the AP)
+ *   anything else 302-redirects to / on the soft-AP (captive-portal auto-open)
+ *                and 404s on the station interface
  *
  * Non-HTTP: also exposes decoded frames over BLE (Nordic UART Service) and,
  * on BOARD_REJSACAN, raw CAN over USB SLCAN and socketcand.
@@ -2615,10 +2616,16 @@ void handleNotFound() {
     // connectivity probes (generate_204 / hotspot-detect.html). Answering
     // those with a redirect — not a 404 — makes the OS classify the AP as a
     // captive portal and auto-open the dashboard when someone joins.
-    // localIP() is the board's address on whichever interface (AP or STA)
-    // the request arrived on, so bench-network clients redirect sensibly too.
-    server.sendHeader("Location",
-                      "http://" + server.client().localIP().toString() + "/");
+    // localIP() is the board's address on whichever interface the request
+    // arrived on, so it also tells AP requests apart from station ones: on the
+    // bench network there's no wildcard DNS and no portal to satisfy, so a
+    // mistyped path should say 404 rather than silently bounce to the root.
+    IPAddress local = server.client().localIP();
+    if (local != WiFi.softAPIP()) {
+        server.send(404, "text/plain", "Not found: " + server.uri() + "\n");
+        return;
+    }
+    server.sendHeader("Location", "http://" + local.toString() + "/");
     server.send(302, "text/plain", "");
 }
 
