@@ -2306,49 +2306,9 @@ void handleWifiForm() {
     server.send(200, "text/html", body);
 }
 
-// GET /usb — small self-contained control page. Buttons PUT /usb?mode=… via fetch
-// (HTML forms can't issue PUT) and reflect the returned state.
-void handleUsbPage() {
-    noteHttpActivity();
-    String body = F(
-        "<!doctype html><meta charset=utf-8>"
-        "<meta name=viewport content='width=device-width,initial-scale=1'>"
-        "<title>USB mode</title><style>"
-        "body{font-family:system-ui,sans-serif;max-width:420px;margin:0 auto;padding:16px;"
-        "background:#f0f2f5;color:#212121}h2{font-size:1.1em}"
-        "button{display:block;width:100%;padding:14px;margin:8px 0;border:0;border-radius:10px;"
-        "font-size:1em;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.1);cursor:pointer}"
-        "button.on{background:#c8e6c9;color:#1b5e20;font-weight:600}"
-        ".d{color:#757575;font-size:.85em}a{color:#1976d2}"
-        "#s{font-size:.85em;color:#757575}</style>"
-        "<h2>USB port mode</h2><div id=btns></div><p id=s></p>"
-        "<p class=d>logging = device debug log over USB<br>"
-        "slcan = CAN adapter"
-#if defined(ENABLE_KELLY)
-        "<br>kelly = USB\xE2\x86\x94Kelly bridge"
-#endif
-        "</p>"
-        "<script>var M=['logging','slcan'"
-#if defined(ENABLE_KELLY)
-        ",'kelly'"
-#endif
-        "];var cur='");
-    body += usbModeName(g_usb_mode);
-    body += F("';function draw(){var h='';M.forEach(function(m){"
-        "h+='<button class=\"'+(m==cur?'on':'')+'\" onclick=\"set(\\''+m+'\\')\">'+m+"
-        "(m==cur?' \\u2713':'')+'</button>';});document.getElementById('btns').innerHTML=h;}"
-        "function set(m){"
-        "fetch('/usb?mode='+m,{method:'PUT'}).then(function(r){return r.json();})"
-        ".then(function(d){if(d.mode){cur=d.mode;draw();document.getElementById('s').textContent='';}"
-        "else document.getElementById('s').textContent=d.error||'error';})"
-        ".catch(function(){document.getElementById('s').textContent='error';});}draw();</script>");
-    server.send(200, "text/html", body);
-}
-
-// PUT /usb — set the USB mode from the `mode` parameter (query arg, or a
-// `mode=…` form/plain body). Idempotent; returns the new state as JSON.
-void handleUsbSet() {
-    noteHttpActivity();
+// Parse the desired USB mode from a `mode` query arg, a form-urlencoded field,
+// or a `mode=…` plain body. Returns false if absent or not a valid mode.
+static bool usbWantedMode(UsbMode& out) {
     String want = server.hasArg("mode") ? server.arg("mode") : String();
     if (want.length() == 0 && server.hasArg("plain")) {   // parse `mode=…` body
         String b = server.arg("plain");
@@ -2359,8 +2319,70 @@ void handleUsbSet() {
             if (amp >= 0) want = want.substring(0, amp);
         }
     }
+    return usbModeFromName(want, out);
+}
+
+// The selectable USB modes, in display order. kelly only when compiled in.
+static const UsbMode kUsbModes[] = {
+    USB_LOGGING, USB_SLCAN,
+#if defined(ENABLE_KELLY)
+    USB_KELLY,
+#endif
+};
+
+// GET /usb — small self-contained, JS-free control page. Each mode is a POST
+// form; submitting sets the mode and 303-redirects back here so the page
+// re-renders with the active button marked (and a refresh doesn't re-submit).
+void handleUsbPage() {
+    noteHttpActivity();
+    String body = F(
+        "<!doctype html><meta charset=utf-8>"
+        "<meta name=viewport content='width=device-width,initial-scale=1'>"
+        "<title>USB mode</title><style>"
+        "body{font-family:system-ui,sans-serif;max-width:420px;margin:0 auto;padding:16px;"
+        "background:#f0f2f5;color:#212121}h2{font-size:1.1em}form{margin:0}"
+        "button{display:block;width:100%;padding:14px;margin:8px 0;border:0;border-radius:10px;"
+        "font-size:1em;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.1);cursor:pointer}"
+        "button.on{background:#c8e6c9;color:#1b5e20;font-weight:600}"
+        ".d{color:#757575;font-size:.85em}a{color:#1976d2}</style>"
+        "<h2>USB port mode</h2>");
+    for (UsbMode m : kUsbModes) {
+        const char* name = usbModeName(m);
+        bool on = (m == g_usb_mode);
+        body += F("<form method=post action=/usb><button name=mode value=");
+        body += name;
+        if (on) body += F(" class=on");
+        body += F(">");
+        body += name;
+        if (on) body += F(" \xE2\x9C\x93");   // ✓
+        body += F("</button></form>");
+    }
+    body += F("<p class=d>logging = device debug log over USB<br>"
+        "slcan = CAN adapter"
+#if defined(ENABLE_KELLY)
+        "<br>kelly = USB\xE2\x86\x94Kelly bridge"
+#endif
+        "</p>");
+    server.send(200, "text/html", body);
+}
+
+// POST /usb — set the mode from a submitted form, then 303 back to GET /usb so
+// the page shows the new state. An unknown/unavailable mode is a no-op redirect
+// (the buttons only ever submit valid modes).
+void handleUsbPost() {
+    noteHttpActivity();
     UsbMode m;
-    if (!usbModeFromName(want, m)) {
+    if (usbWantedMode(m)) g_usb_mode = m;
+    server.sendHeader("Location", "/usb");
+    server.send(303, "text/plain", "");
+}
+
+// PUT /usb — programmatic API: set the USB mode from the `mode` parameter (query
+// arg, or a `mode=…` form/plain body). Idempotent; returns the new state as JSON.
+void handleUsbSet() {
+    noteHttpActivity();
+    UsbMode m;
+    if (!usbWantedMode(m)) {
         server.send(400, "application/json",
                     "{\"error\":\"unknown or unavailable mode\"}");
         return;
@@ -3450,7 +3472,8 @@ void setup() {
     server.on("/json",   handleJson);
     server.on("/config", handleConfig);
     server.on("/usb", HTTP_GET, handleUsbPage);   // USB-mode control page
-    server.on("/usb", HTTP_PUT, handleUsbSet);    // set USB mode (idempotent)
+    server.on("/usb", HTTP_POST, handleUsbPost);  // form submit -> 303 to /usb
+    server.on("/usb", HTTP_PUT, handleUsbSet);    // set USB mode (JSON API)
     server.on("/logs", HTTP_GET, handleLog);      // recent device log (any mode)
 #if defined(ENABLE_KELLY)
     server.on("/kelly/config", handleKellyConfig);
