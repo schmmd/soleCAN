@@ -463,8 +463,8 @@ static inline bool staConfigured() { return g_sta_ssid[0] != '\0'; }
 
 // ── USB port role ─────────────────────────────────────────────────────────────
 // The native USB-CDC port has a runtime-selectable role. Boots to LOGGING (enum
-// 0); RAM-only, so a power cycle always returns to logging. Switched via PUT /usb
-// (and the /usb control page) or a `mode` command typed over the USB console.
+// 0); RAM-only, so a power cycle always returns to logging. Switched via the
+// /usb control page (POST) or a `mode` command typed over the USB console.
 //   logging — USB streams device debug/status lines (usbLoggingPoll)
 //   slcan   — USB is the SLCAN CAN channel (slcanPoll)
 //   kelly   — transparent USB<->Kelly bridge (ENABLE_KELLY only); suspends the
@@ -2366,36 +2366,21 @@ void handleUsbPage() {
     server.send(200, "text/html", body);
 }
 
-// POST /usb — set the mode from a submitted form, then 303 back to GET /usb so
-// the page shows the new state. An unknown/unavailable mode is a no-op redirect
-// (the buttons only ever submit valid modes).
+// POST /usb — the one mode-setting endpoint, for both the page's form buttons
+// and scripting. Sets the mode from a submitted form field or query arg, then
+// 303-redirects back to GET /usb so the page re-renders with the new state (and
+// a refresh doesn't re-submit). Scripting: curl -L -X POST '.../usb?mode=slcan'.
+// An unknown/unavailable mode is a 400; the buttons only ever submit valid ones.
 void handleUsbPost() {
     noteHttpActivity();
     UsbMode m;
-    if (usbWantedMode(m)) g_usb_mode = m;
-    server.sendHeader("Location", "/usb");
-    server.send(303, "text/plain", "");
-}
-
-// PUT /usb — programmatic API: set the USB mode from the `mode` parameter (query
-// arg, or a `mode=…` form/plain body). Idempotent; returns the new state as JSON.
-void handleUsbSet() {
-    noteHttpActivity();
-    UsbMode m;
     if (!usbWantedMode(m)) {
-        server.send(400, "application/json",
-                    "{\"error\":\"unknown or unavailable mode\"}");
+        server.send(400, "text/plain", "unknown or unavailable mode\r\n");
         return;
     }
     g_usb_mode = m;
-    String out = "{\"mode\":\"";
-    out += usbModeName(m);
-    out += "\",\"modes\":[\"logging\",\"slcan\""
-#if defined(ENABLE_KELLY)
-           ",\"kelly\""
-#endif
-           "]}";
-    server.send(200, "application/json", out);
+    server.sendHeader("Location", "/usb");
+    server.send(303, "text/plain", "");
 }
 
 // GET /logs — dump the recent device-log ring (oldest -> newest) as text. The ring
@@ -3472,8 +3457,7 @@ void setup() {
     server.on("/json",   handleJson);
     server.on("/config", handleConfig);
     server.on("/usb", HTTP_GET, handleUsbPage);   // USB-mode control page
-    server.on("/usb", HTTP_POST, handleUsbPost);  // form submit -> 303 to /usb
-    server.on("/usb", HTTP_PUT, handleUsbSet);    // set USB mode (JSON API)
+    server.on("/usb", HTTP_POST, handleUsbPost);  // set USB mode -> 303 to /usb
     server.on("/logs", HTTP_GET, handleLog);      // recent device log (any mode)
 #if defined(ENABLE_KELLY)
     server.on("/kelly/config", handleKellyConfig);

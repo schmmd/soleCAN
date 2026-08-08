@@ -392,8 +392,8 @@ known state):
 Change it two ways, no reflash needed:
 
 - **HTTP:** open `http://tractor.local/usb` for a one-tap control page, or script
-  it — `curl -X PUT 'http://tractor.local/usb?mode=slcan'`. The current mode is
-  also in `/json` as `usb.mode`.
+  it — `curl -L -X POST 'http://tractor.local/usb?mode=slcan'`. The current mode
+  is also in `/json` as `usb.mode`.
 - **USB console:** type `mode <logging|slcan|kelly>` (or just `mode` to report)
   into the serial console. This works even on `-DNO_WIFI` builds. In `kelly` mode
   the USB port is the bridge, so switch back over HTTP or by power-cycling.
@@ -437,7 +437,7 @@ via mDNS.
 | `http://tractor.local/json` | Decoded state as JSON |
 | `http://tractor.local/config` | Build + WiFi diagnostics as JSON (board, firmware version, features, STA/AP status) |
 | `http://tractor.local/wifi` | Web form to set the station WiFi SSID/password at runtime (AP-password gated) |
-| `http://tractor.local/usb` | USB-mode control page; `PUT /usb?mode=<logging\|slcan\|kelly>` sets it (see [USB port mode](#usb-port-mode)) |
+| `http://tractor.local/usb` | USB-mode control page; `POST /usb?mode=<logging\|slcan\|kelly>` sets it (see [USB port mode](#usb-port-mode)) |
 | `http://tractor.local/logs` | Recent device log as text (works in any USB mode) |
 | `tractor.local:28600` | socketcand TCP stream of raw CAN frames |
 | `/dev/cu.usbmodem*` (USB CDC) | Role depends on the USB mode: SLCAN CAN stream, device log, or Kelly bridge (default: log) |
