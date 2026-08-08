@@ -439,6 +439,7 @@ via mDNS.
 | `http://tractor.local/wifi` | Web form to set the station WiFi SSID/password at runtime (AP-password gated) |
 | `http://tractor.local/usb` | USB-mode control page; `PUT /usb?mode=<logging\|slcan\|kelly>` sets it (see [USB port mode](#usb-port-mode)) |
 | `http://tractor.local/logs` | Recent device log as text (works in any USB mode) |
+| `http://tractor.local/kelly/config` | Kelly pump flash config as JSON: `raw` hex, `version_word`, and the decoded KBLS_0109 `parameters` (`-DENABLE_KELLY` builds only; on-demand, blocks briefly) |
 | `tractor.local:28600` | socketcand TCP stream of raw CAN frames |
 | `/dev/cu.usbmodem*` (USB CDC) | Role depends on the USB mode: SLCAN CAN stream, device log, or Kelly bridge (default: log) |
 | `http://tractor.local/sd/status` | SD logging status + diagnostics (RejsaCAN only) |

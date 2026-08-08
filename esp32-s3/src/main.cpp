@@ -14,7 +14,7 @@
  *   GET    /                    — mobile-friendly dashboard (auto-refreshing)
  *   GET    /json                — raw JSON snapshot of decoded signals
  *   GET    /config              — build/board/WiFi/feature info as JSON
- *   GET    /kelly/config        — Kelly pump 512-byte flash config as hex (ENABLE_KELLY only)
+ *   GET    /kelly/config        — Kelly pump flash config: raw hex + decoded parameters (ENABLE_KELLY only)
  *   GET    /sd                  — SD-card session browser (BOARD_REJSACAN only)
  *   GET    /sd/status           — SD logging status JSON (BOARD_REJSACAN only)
  *   GET    /sd/sessions         — list recorded sessions JSON (BOARD_REJSACAN only)
@@ -2252,15 +2252,182 @@ void handleConfig() {
 }
 
 #if defined(ENABLE_KELLY)
+// KBLS_0109 flash parameter map — a C++ mirror of PARAMS_KBLS_0109 in
+// kelly/solectrac-kelly-dump-config.py, which stays the source of truth. It is
+// duplicated here so /kelly/config decodes on-device (no companion script
+// needed for a quick look); keep the two in sync. Encodings:
+//   KP_BIT  → one bit at `pos` of the byte at `offset`      (value 0 or 1)
+//   KP_BYTE → the single byte at `offset`
+//   KP_WORD → `pos`+1 bytes at `offset`, big-endian
+// fmt: KP_U unsigned number · KP_HEX lowercase hex string · KP_ASCII trimmed
+// text. This is the version_word >= 265 map (this tractor reads 518); older
+// firmware would need a different table — see the Python module.
+enum : uint8_t { KP_BIT, KP_BYTE, KP_WORD };
+enum : uint8_t { KP_U, KP_HEX, KP_ASCII };
+struct KellyParam {
+    const char* name;
+    uint16_t    offset;
+    uint8_t     size;
+    uint8_t     pos;   // bit position (KP_BIT) or byte-count-1 (KP_WORD)
+    uint8_t     fmt;
+};
+static const KellyParam KELLY_PARAMS[] = {
+    {"Module Name",          0, KP_WORD, 7, KP_ASCII},
+    {"User Name",            8, KP_WORD, 3, KP_ASCII},
+    {"Serial Number",       12, KP_WORD, 3, KP_HEX},
+    {"Software Version",     16, KP_WORD, 3, KP_HEX},
+    {"Startup H-Pedel",     20, KP_BIT,  0, KP_U},
+    {"Brake H-Pedel",       20, KP_BIT,  1, KP_U},
+    {"NTL H-Pedel",         20, KP_BIT,  2, KP_U},
+    {"Joystick",            20, KP_BIT,  4, KP_U},
+    {"Three Gears Switch",  20, KP_BIT,  6, KP_U},
+    {"Boost",               20, KP_BIT,  7, KP_U},
+    {"Foot Switch",         21, KP_BIT,  0, KP_U},
+    {"SW Level",            21, KP_BIT,  1, KP_U},
+    {"0,HIM;1,KIM",         21, KP_BIT,  3, KP_U},
+    {"Cruise",              21, KP_BIT,  4, KP_U},
+    {"Anti-theft",          21, KP_BIT,  5, KP_U},
+    {"Anti slip",           21, KP_BIT,  6, KP_U},
+    {"Change Dir",          21, KP_BIT,  7, KP_U},
+    {"Controller Volt",     23, KP_WORD, 1, KP_U},
+    {"Low Volt",            25, KP_WORD, 1, KP_U},
+    {"Over Volt",           27, KP_WORD, 1, KP_U},
+    {"Hall Galvan Rate",    29, KP_WORD, 1, KP_U},
+    {"PhaseCurr Max AD",    31, KP_WORD, 1, KP_U},
+    {"Motor_Current%",      37, KP_BYTE, 0, KP_U},
+    {"Batt_Current%",       38, KP_BYTE, 0, KP_U},
+    {"Identify Angle",      56, KP_BYTE, 0, KP_U},
+    {"Brake SW Level",      82, KP_BYTE, 0, KP_U},
+    {"TPS Low",             92, KP_BYTE, 0, KP_U},
+    {"TPS High",            93, KP_BYTE, 0, KP_U},
+    {"TPS Type",            95, KP_BYTE, 0, KP_U},
+    {"TPS Dead Low",        96, KP_BYTE, 0, KP_U},
+    {"TPS Dead High",       97, KP_BYTE, 0, KP_U},
+    {"TPS Forw MAP",        98, KP_BYTE, 0, KP_U},
+    {"TPS Rev MAP",         99, KP_BYTE, 0, KP_U},
+    {"Brake Type",         100, KP_BYTE, 0, KP_U},
+    {"Brake Dead Low",     101, KP_BYTE, 0, KP_U},
+    {"Brake Dead High",    102, KP_BYTE, 0, KP_U},
+    {"Max Output Fre",     105, KP_WORD, 1, KP_U},
+    {"Max Speed",          107, KP_WORD, 1, KP_U},
+    {"Max Forw Speed%",    109, KP_BYTE, 0, KP_U},
+    {"Max Rev Speed%",     110, KP_BYTE, 0, KP_U},
+    {"MidSpeed Forw Speed",111, KP_BYTE, 0, KP_U},
+    {"MidSpeed Rev Speed", 112, KP_BYTE, 0, KP_U},
+    {"LowSpeed Forw Speed",113, KP_BYTE, 0, KP_U},
+    {"LowSpeed Rev Speed", 114, KP_BYTE, 0, KP_U},
+    {"Three Speed",        126, KP_BYTE, 0, KP_U},
+    {"PWM frequency",      127, KP_BYTE, 0, KP_U},
+    {"IQ Kp",              128, KP_WORD, 1, KP_U},
+    {"IQ Ki",              130, KP_WORD, 1, KP_U},
+    {"ID Kp",              134, KP_WORD, 1, KP_U},
+    {"ID Ki",              136, KP_WORD, 1, KP_U},
+    {"ID Err",             138, KP_WORD, 1, KP_U},
+    {"HS_ACQR_Kp",         200, KP_WORD, 1, KP_U},
+    {"HS_ACQR_Ki",         202, KP_WORD, 1, KP_U},
+    {"HS_ACDR_Kp",         204, KP_WORD, 1, KP_U},
+    {"HS_ACDR_Ki",         206, KP_WORD, 1, KP_U},
+    {"BRK_AD Brk %#",      226, KP_BYTE, 0, KP_U},
+    {"Anti-theft Curr#",   227, KP_BYTE, 0, KP_U},
+    {"Brk_Speed Limit",    228, KP_WORD, 1, KP_U},
+    {"RLS_TPS Brk Per%",   230, KP_BYTE, 0, KP_U},
+    {"NTL Brk Per%",       231, KP_BYTE, 0, KP_U},
+    {"Accel Time",         239, KP_BYTE, 0, KP_U},
+    {"Accel Release Time", 240, KP_BYTE, 0, KP_U},
+    {"Brake Time",         241, KP_BYTE, 0, KP_U},
+    {"Brake Release Time", 242, KP_BYTE, 0, KP_U},
+    {"BRK_SW Brk Per%",    243, KP_BYTE, 0, KP_U},
+    {"Change Dir Brk%",    244, KP_BYTE, 0, KP_U},
+    {"Compensation Per%",  245, KP_BYTE, 0, KP_U},
+    {"IVT BRK Max",        246, KP_WORD, 1, KP_U},
+    {"IVT BRK Min",        248, KP_WORD, 1, KP_U},
+    {"Torque Speed Kp",    250, KP_WORD, 1, KP_U},
+    {"Torque Speed Ki",    252, KP_WORD, 1, KP_U},
+    {"Speed Err Limit",    254, KP_WORD, 1, KP_U},
+    {"Motor Nominal Curr", 258, KP_WORD, 1, KP_U},
+    {"Motor Poles",        268, KP_BYTE, 0, KP_U},
+    {"Speed Sensor Type",  269, KP_BYTE, 0, KP_U},
+    {"Resolver Poles",     272, KP_BYTE, 0, KP_U},
+    {"Min Excitation Curr",310, KP_WORD, 1, KP_U},
+    {"Motor Temp Sensor",  318, KP_BYTE, 0, KP_U},
+    {"High Temp Cut C",    319, KP_BYTE, 0, KP_U},
+    {"High Temp Resume",   320, KP_BYTE, 0, KP_U},
+    {"High Temp Str C",    321, KP_BYTE, 0, KP_U},
+    {"High Temp Week %",   322, KP_BYTE, 0, KP_U},
+    {"Line Hall Zero",     332, KP_WORD, 1, KP_U},
+    {"Line Hall amplitude",334, KP_WORD, 1, KP_U},
+    {"Line Hall High Err", 336, KP_WORD, 1, KP_U},
+    {"Line Hall Low Err",  338, KP_WORD, 1, KP_U},
+    {"Swap Motor Phase",   340, KP_BYTE, 0, KP_U},
+    {"Resolver init angle",341, KP_WORD, 1, KP_U},
+    {"0 deg Hall",         343, KP_BYTE, 0, KP_U},
+    {"60 deg Hall",        344, KP_BYTE, 0, KP_U},
+    {"120 deg Hall",       345, KP_BYTE, 0, KP_U},
+    {"180 deg Hall",       346, KP_BYTE, 0, KP_U},
+    {"240 deg Hall",       347, KP_BYTE, 0, KP_U},
+    {"300 deg Hall",       348, KP_BYTE, 0, KP_U},
+    {"Forw A Rise Hall",   349, KP_BYTE, 0, KP_U},
+    {"Forw A Fall Hall",   350, KP_BYTE, 0, KP_U},
+    {"Rev A Rise Hall",    351, KP_BYTE, 0, KP_U},
+    {"Rev A Fall Hall",    352, KP_BYTE, 0, KP_U},
+};
+
+// A whitespace/NUL byte that ASCII fields trim from both ends, matching the
+// Python decoder's .strip("\x00").strip().
+static bool kellyTrimByte(uint8_t c) {
+    return c == 0x00 || c == ' ' || c == '\t' || c == '\n' ||
+           c == '\r' || c == '\v' || c == '\f';
+}
+
+// Append `p`'s decoded value to `out` as a JSON value: a bare number for KP_U
+// and KP_BIT, or a quoted string for KP_HEX and KP_ASCII. Mirrors read_param()
+// in the Python dumper.
+static void kellyAppendParamValue(String& out, const uint8_t* f, const KellyParam& p) {
+    static const char hexd[] = "0123456789abcdef";
+    if (p.size == KP_BIT) {
+        out += (int)((f[p.offset] >> p.pos) & 1);
+        return;
+    }
+    uint8_t n = (p.size == KP_BYTE) ? 1 : (uint8_t)(p.pos + 1);
+    if (p.fmt == KP_HEX) {
+        out += '"';
+        for (uint8_t i = 0; i < n; i++) {
+            uint8_t b = f[p.offset + i];
+            out += hexd[b >> 4];
+            out += hexd[b & 0x0F];
+        }
+        out += '"';
+    } else if (p.fmt == KP_ASCII) {
+        int lo = p.offset, hi = p.offset + n;                 // half-open [lo, hi)
+        while (lo < hi && kellyTrimByte(f[lo])) lo++;
+        while (hi > lo && kellyTrimByte(f[hi - 1])) hi--;
+        out += '"';
+        for (int i = lo; i < hi; i++) {
+            uint8_t c = f[i];
+            if (c >= 0x80)      out += "\\uFFFD";              // decode("ascii","replace")
+            else if (c == '"')  out += "\\\"";
+            else if (c == '\\') out += "\\\\";
+            else if (c < 0x20) { out += "\\u00"; out += hexd[c >> 4]; out += hexd[c & 0x0F]; }
+            else                out += (char)c;
+        }
+        out += '"';
+    } else {                                                  // KP_U: big-endian unsigned
+        uint32_t v = 0;
+        for (uint8_t i = 0; i < n; i++) v = (v << 8) | f[p.offset + i];
+        out += v;
+    }
+}
+
 // GET /kelly/config — one-shot, read-only dump of the Kelly pump's 512-byte
 // flash configuration (the app's "AC Calibration" parameters). Static data, so
 // it is fetched only on demand, never polled. The read blocks ~0.2 s (live
 // link) up to ~3 s (flaky link), pausing CAN/monitor servicing for the burst —
 // acceptable for a rare manual call.
 //
-// Returns the raw block as hex plus the parsed version word. Decoding the 98
-// parameters stays in kelly/solectrac-kelly-dump-config.py, the single source
-// of truth for the map — rather than duplicating that table into firmware.
+// Returns the raw block as hex, the parsed version word, and the decoded
+// KBLS_0109 parameters (KELLY_PARAMS above). blocks_read < 32 means the dump is
+// partial: the missing 16-byte blocks read back as zeros, so their decoded
+// fields are 0/empty.
 void handleKellyConfig() {
     noteHttpActivity();
     static uint8_t flash[512];
@@ -2272,10 +2439,20 @@ void handleKellyConfig() {
     }
     uint16_t ver = (uint16_t(flash[16]) << 8) | flash[17];
     String out;
-    out.reserve(1120);                       // 512*2 hex + small envelope
+    out.reserve(3584);                       // 512*2 hex + decoded params + envelope
     out = "{\"blocks_read\":";      out += ok;
     out += ",\"blocks_total\":32";
     out += ",\"version_word\":";    out += (int)ver;
+    out += ",\"parameters\":{";
+    const size_t nparams = sizeof(KELLY_PARAMS) / sizeof(KELLY_PARAMS[0]);
+    for (size_t i = 0; i < nparams; i++) {
+        if (i) out += ',';
+        out += '"';
+        out += KELLY_PARAMS[i].name;         // fixed table, all JSON-safe keys
+        out += "\":";
+        kellyAppendParamValue(out, flash, KELLY_PARAMS[i]);
+    }
+    out += '}';
     out += ",\"raw\":\"";
     static const char hexd[] = "0123456789abcdef";   // not HEX: that's an Arduino macro
     for (int i = 0; i < 512; i++) {
