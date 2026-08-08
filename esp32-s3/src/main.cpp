@@ -463,8 +463,8 @@ static inline bool staConfigured() { return g_sta_ssid[0] != '\0'; }
 
 // ── USB port role ─────────────────────────────────────────────────────────────
 // The native USB-CDC port has a runtime-selectable role. Boots to LOGGING (enum
-// 0); RAM-only, so a power cycle always returns to logging. Switched via PUT /usb
-// (and the /usb control page) or a `mode` command typed over the USB console.
+// 0); RAM-only, so a power cycle always returns to logging. Switched via the
+// /usb control page (POST) or a `mode` command typed over the USB console.
 //   logging — USB streams device debug/status lines (usbLoggingPoll)
 //   slcan   — USB is the SLCAN CAN channel (slcanPoll)
 //   kelly   — transparent USB<->Kelly bridge (ENABLE_KELLY only); suspends the
@@ -2483,50 +2483,9 @@ void handleWifiForm() {
     server.send(200, "text/html", body);
 }
 
-// GET /usb — small self-contained control page. Buttons PUT /usb?mode=… via fetch
-// (HTML forms can't issue PUT) and reflect the returned state.
-void handleUsbPage() {
-    noteHttpActivity();
-    String body = F(
-        "<!doctype html><meta charset=utf-8>"
-        "<meta name=viewport content='width=device-width,initial-scale=1'>"
-        "<title>USB mode</title><style>"
-        "body{font-family:system-ui,sans-serif;max-width:420px;margin:0 auto;padding:16px;"
-        "background:#f0f2f5;color:#212121}h2{font-size:1.1em}"
-        "button{display:block;width:100%;padding:14px;margin:8px 0;border:0;border-radius:10px;"
-        "font-size:1em;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.1);cursor:pointer}"
-        "button.on{background:#c8e6c9;color:#1b5e20;font-weight:600}"
-        ".d{color:#757575;font-size:.85em}a{color:#1976d2}"
-        "#s{min-height:1.2em;font-size:.85em;color:#757575}</style>"
-        "<h2>USB port mode</h2><div id=btns></div><p id=s></p>"
-        "<p class=d>logging = device debug log over USB<br>"
-        "slcan = CAN adapter<br>"
-#if defined(ENABLE_KELLY)
-        "kelly = USB\xE2\x86\x94Kelly bridge<br>"
-#endif
-        "reverts to logging on power cycle.</p>"
-        "<p><a href=/logs>View device log</a> \xC2\xB7 <a href=/>Dashboard</a></p>"
-        "<script>var M=['logging','slcan'"
-#if defined(ENABLE_KELLY)
-        ",'kelly'"
-#endif
-        "];var cur='");
-    body += usbModeName(g_usb_mode);
-    body += F("';function draw(){var h='';M.forEach(function(m){"
-        "h+='<button class=\"'+(m==cur?'on':'')+'\" onclick=\"set(\\''+m+'\\')\">'+m+"
-        "(m==cur?' \\u2713':'')+'</button>';});document.getElementById('btns').innerHTML=h;}"
-        "function set(m){document.getElementById('s').textContent='switching\\u2026';"
-        "fetch('/usb?mode='+m,{method:'PUT'}).then(function(r){return r.json();})"
-        ".then(function(d){if(d.mode){cur=d.mode;draw();document.getElementById('s').textContent='mode: '+cur;}"
-        "else document.getElementById('s').textContent=d.error||'error';})"
-        ".catch(function(){document.getElementById('s').textContent='error';});}draw();</script>");
-    server.send(200, "text/html", body);
-}
-
-// PUT /usb — set the USB mode from the `mode` parameter (query arg, or a
-// `mode=…` form/plain body). Idempotent; returns the new state as JSON.
-void handleUsbSet() {
-    noteHttpActivity();
+// Parse the desired USB mode from a `mode` query arg, a form-urlencoded field,
+// or a `mode=…` plain body. Returns false if absent or not a valid mode.
+static bool usbWantedMode(UsbMode& out) {
     String want = server.hasArg("mode") ? server.arg("mode") : String();
     if (want.length() == 0 && server.hasArg("plain")) {   // parse `mode=…` body
         String b = server.arg("plain");
@@ -2537,21 +2496,68 @@ void handleUsbSet() {
             if (amp >= 0) want = want.substring(0, amp);
         }
     }
+    return usbModeFromName(want, out);
+}
+
+// The selectable USB modes, in display order. kelly only when compiled in.
+static const UsbMode kUsbModes[] = {
+    USB_LOGGING, USB_SLCAN,
+#if defined(ENABLE_KELLY)
+    USB_KELLY,
+#endif
+};
+
+// GET /usb — small self-contained, JS-free control page. Each mode is a POST
+// form; submitting sets the mode and 303-redirects back here so the page
+// re-renders with the active button marked (and a refresh doesn't re-submit).
+void handleUsbPage() {
+    noteHttpActivity();
+    String body = F(
+        "<!doctype html><meta charset=utf-8>"
+        "<meta name=viewport content='width=device-width,initial-scale=1'>"
+        "<title>USB mode</title><style>"
+        "body{font-family:system-ui,sans-serif;max-width:420px;margin:0 auto;padding:16px;"
+        "background:#f0f2f5;color:#212121}h2{font-size:1.1em}form{margin:0}"
+        "button{display:block;width:100%;padding:14px;margin:8px 0;border:0;border-radius:10px;"
+        "font-size:1em;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.1);cursor:pointer}"
+        "button.on{background:#c8e6c9;color:#1b5e20;font-weight:600}"
+        ".d{color:#757575;font-size:.85em}a{color:#1976d2}</style>"
+        "<h2>USB port mode</h2>");
+    for (UsbMode m : kUsbModes) {
+        const char* name = usbModeName(m);
+        bool on = (m == g_usb_mode);
+        body += F("<form method=post action=/usb><button name=mode value=");
+        body += name;
+        if (on) body += F(" class=on");
+        body += F(">");
+        body += name;
+        if (on) body += F(" \xE2\x9C\x93");   // ✓
+        body += F("</button></form>");
+    }
+    body += F("<p class=d>logging = device debug logging messages<br>"
+        "slcan = CAN adapter over USB"
+#if defined(ENABLE_KELLY)
+        "<br>kelly = hydraulic Kelly controller bridge over USB"
+#endif
+        "</p>");
+    server.send(200, "text/html", body);
+}
+
+// POST /usb — the one mode-setting endpoint, for both the page's form buttons
+// and scripting. Sets the mode from a submitted form field or query arg, then
+// 303-redirects back to GET /usb so the page re-renders with the new state (and
+// a refresh doesn't re-submit). Scripting: curl -L -X POST '.../usb?mode=slcan'.
+// An unknown/unavailable mode is a 400; the buttons only ever submit valid ones.
+void handleUsbPost() {
+    noteHttpActivity();
     UsbMode m;
-    if (!usbModeFromName(want, m)) {
-        server.send(400, "application/json",
-                    "{\"error\":\"unknown or unavailable mode\"}");
+    if (!usbWantedMode(m)) {
+        server.send(400, "text/plain", "unknown or unavailable mode\r\n");
         return;
     }
     g_usb_mode = m;
-    String out = "{\"mode\":\"";
-    out += usbModeName(m);
-    out += "\",\"modes\":[\"logging\",\"slcan\""
-#if defined(ENABLE_KELLY)
-           ",\"kelly\""
-#endif
-           "]}";
-    server.send(200, "application/json", out);
+    server.sendHeader("Location", "/usb");
+    server.send(303, "text/plain", "");
 }
 
 // GET /logs — dump the recent device-log ring (oldest -> newest) as text. The ring
@@ -3469,6 +3475,13 @@ static void bleQueueFramed(const String& payload) {
 }
 
 void bleTick() {
+    // Log connect/disconnect edges here rather than in the callbacks: those run
+    // on the Bluedroid task and logLine() may echo to Serial.
+    static bool was_connected = false;
+    if (g_ble_connected != was_connected) {
+        was_connected = g_ble_connected;
+        logLine("BLE: client %s", was_connected ? "connected" : "disconnected");
+    }
     if (!g_ble_connected || !g_ble_tx) {
         g_ble_tx_len = g_ble_tx_off = 0;   // abort any in-flight frame
         return;
@@ -3628,7 +3641,7 @@ void setup() {
     server.on("/json",   handleJson);
     server.on("/config", handleConfig);
     server.on("/usb", HTTP_GET, handleUsbPage);   // USB-mode control page
-    server.on("/usb", HTTP_PUT, handleUsbSet);    // set USB mode (idempotent)
+    server.on("/usb", HTTP_POST, handleUsbPost);  // set USB mode -> 303 to /usb
     server.on("/logs", HTTP_GET, handleLog);      // recent device log (any mode)
 #if defined(ENABLE_KELLY)
     server.on("/kelly/config", handleKellyConfig);
