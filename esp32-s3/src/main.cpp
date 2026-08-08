@@ -2241,6 +2241,11 @@ void handleConfig() {
     features["vin_sense"] = false;
 #endif
 
+    // Runtime USB port role, same key as /json. Not a "feature": the others
+    // above are baked into the binary, this one changes via /usb or the `mode`
+    // console command.
+    doc["usb"]["mode"] = usbModeName(g_usb_mode);
+
     auto wifi = doc["wifi"].to<JsonObject>();
 
     auto sta = wifi["sta"].to<JsonObject>();
