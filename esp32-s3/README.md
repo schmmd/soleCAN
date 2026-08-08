@@ -385,7 +385,7 @@ known state):
 
 | Mode | USB does | Notes |
 |---|---|---|
-| `logging` (default) | streams the device's own status/debug log | a `~2 s` heartbeat plus WiFi/CAN events; the same lines are also at `/logs` |
+| `logging` (default) | streams the device's own status/debug log | a `~10 s` heartbeat plus WiFi/CAN events; the same lines are also at `/logs` |
 | `slcan` | SLCAN CAN adapter (see [Endpoints](#endpoints)) | for `python-can`; switch here first |
 | `kelly` | transparent USB↔Kelly bridge (`-DENABLE_KELLY` builds only) | lets `kelly/solectrac-kelly-monitor.py` / `dump-config.py` reach the controller *through* the board; **replaces the old `KELLY_PASSTHROUGH` build flag**. Only the regular Kelly polling is suspended — CAN decode, HTTP, and BLE keep running, so you can switch back over WiFi |
 

@@ -2119,7 +2119,7 @@ void handleConfig() {
 // so it is reachable to fix a bad join.
 void handleWifiForm() {
     noteHttpActivity();
-    String body = F("<!doctype html><meta name=viewport "
+    String body = F("<!doctype html><meta charset=utf-8><meta name=viewport "
                     "content='width=device-width,initial-scale=1'>"
                     "<title>WiFi setup</title><h2>SoleCAN WiFi</h2><p>Current SSID: <b>");
     body += staConfigured() ? htmlEscape(g_sta_ssid) : String("(none \xE2\x80\x94 AP only)");
@@ -2138,7 +2138,8 @@ void handleWifiForm() {
 void handleUsbPage() {
     noteHttpActivity();
     String body = F(
-        "<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
+        "<!doctype html><meta charset=utf-8>"
+        "<meta name=viewport content='width=device-width,initial-scale=1'>"
         "<title>USB mode</title><style>"
         "body{font-family:system-ui,sans-serif;max-width:420px;margin:0 auto;padding:16px;"
         "background:#f0f2f5;color:#212121}h2{font-size:1.1em}"
@@ -2148,9 +2149,10 @@ void handleUsbPage() {
         ".d{color:#757575;font-size:.85em}a{color:#1976d2}"
         "#s{min-height:1.2em;font-size:.85em;color:#757575}</style>"
         "<h2>USB port mode</h2><div id=btns></div><p id=s></p>"
-        "<p class=d>logging = device debug log over USB \xC2\xB7 slcan = CAN adapter \xC2\xB7 "
+        "<p class=d>logging = device debug log over USB<br>"
+        "slcan = CAN adapter<br>"
 #if defined(ENABLE_KELLY)
-        "kelly = USB\xE2\x86\x94Kelly bridge \xC2\xB7 "
+        "kelly = USB\xE2\x86\x94Kelly bridge<br>"
 #endif
         "reverts to logging on power cycle.</p>"
         "<p><a href=/logs>View device log</a> \xC2\xB7 <a href=/>Dashboard</a></p>"
@@ -2649,7 +2651,7 @@ static bool tryModeCommand(const char* line) {
 }
 
 // Runs each loop iteration while in LOGGING mode: accepts a `mode` command typed
-// over USB (other input discarded) and emits a ~2 s device-status heartbeat.
+// over USB (other input discarded) and emits a ~10 s device-status heartbeat.
 void usbLoggingPoll() {
     static char    buf[24];
     static uint8_t len = 0;
@@ -2667,7 +2669,7 @@ void usbLoggingPoll() {
     static uint32_t next = 0;               // (b) periodic heartbeat
     uint32_t now = millis();
     if (now < next) return;
-    next = now + 2000;
+    next = now + 10000;
     uint32_t age = g_frames_rx ? (now - g_last_frame_ms) : 0;
     char msg[160];
     int w = snprintf(msg, sizeof(msg),
@@ -2678,8 +2680,8 @@ void usbLoggingPoll() {
         (unsigned)ESP.getFreeHeap());
 #if defined(ENABLE_KELLY)
     if (g_kelly.valid && w > 0 && w < (int)sizeof(msg))
-        snprintf(msg + w, sizeof(msg) - w, "  kelly:%urpm %lus",
-                 g_kelly.motor_speed_rpm,
+        snprintf(msg + w, sizeof(msg) - w, "  kelly:%lu rx last %lus",
+                 (unsigned long)g_kelly_blocks_ok,
                  (unsigned long)((now - g_kelly.last_seen_ms) / 1000));
 #endif
     logLine("%s", msg);
