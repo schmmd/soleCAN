@@ -277,3 +277,54 @@ The field offsets and scalings come from the `kelly-connect-oss` `PROTOCOL.md`
 and match live readings on this tractor, but scalings can differ by firmware.
 The first time, compare the tool's output against the Kelly app on the same
 controller. If a field is off, correct its offset/scale in `Monitor.decode`.
+
+## The config-dump tool
+
+`solectrac-kelly-dump-config.py` reads the controller's **512-byte flash
+calibration region** — the stored parameter map the Kelly app edits on its AC
+Calibration screens — and prints it as a labelled listing (or `--json`). This
+is a different command set from the live monitor above: it opens a flash
+session (`0xF1`) and reads it 16 bytes at a time (`0xF2`).
+
+### Read-only by design
+
+Like the monitor, every outbound frame passes through a single `_transmit()`
+guard, here allowing only `0x11` (code version), `0xF1` (open session), and
+`0xF2` (block read). The flash write/erase/burn commands (`0xF3`, `0xF4`,
+`0xB1..0xB4`) can never be sent, so the stored configuration cannot be altered.
+No close is sent — the session clears when the controller powers off.
+
+### Usage
+
+```bash
+# read the live controller and print the labelled config
+python3 solectrac-kelly-dump-config.py --port /dev/cu.usbserial-XXXX
+
+# each read saves a raw kelly-config-<timestamp>.bin alongside the listing
+```
+
+### Decode a saved dump offline
+
+No serial port needed — decode a previously saved `.bin`, or a raw hex string.
+The 98-parameter map lives in this script, so this is the way to interpret the
+firmware's flash hex rather than duplicating the map into `main.cpp`.
+
+```bash
+# a saved .bin dump
+python3 solectrac-kelly-dump-config.py --from-file kelly-config-20260807.bin
+
+# a raw hex string (1024 hex chars; whitespace ignored)
+python3 solectrac-kelly-dump-config.py --from-string "aa bb cc ..."
+```
+
+The firmware's `GET /kelly/config` returns a JSON envelope with the flash region
+in its `raw` field (`{"version_word":…,"raw":"<1024 hex chars>"}`). Pull that
+field out and feed it in — both flags take `-` for stdin:
+
+```bash
+curl -sS http://tractor.local/kelly/config | jq -r .raw | \
+    python3 solectrac-kelly-dump-config.py --from-string -
+```
+
+Add `--json` for a machine-readable object, or `--raw` for a hexdump of the
+512 bytes.
