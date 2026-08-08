@@ -422,14 +422,19 @@ uint32_t    g_kelly_polls    = 0;   // query cycles started
 // Not just instrumentation: kellyPoll() snapshots this when a query goes out and
 // compares on timeout to tell silence (-> timeouts) from corruption
 // (-> frames_bad). Removing it collapses those two counters into one.
-uint32_t    g_kelly_rx_total = 0;   // total bytes ever read from the Kelly UART -> bytes_rx
+uint32_t    g_kelly_bytes_rx = 0;   // total bytes ever read from the Kelly UART
 uint8_t     g_kelly_last_rx[32];    // last raw chunk received
 uint8_t     g_kelly_last_rx_len = 0;
 // Flicker/reliability counters: how cleanly frames land.
 uint32_t    g_kelly_frames_ok   = 0;      // replies that checksummed
 uint32_t    g_kelly_frames_bad  = 0;      // bytes arrived but no frame checksummed
 uint32_t    g_kelly_timeouts    = 0;      // no bytes at all (controller unpowered/absent)
-uint32_t    g_kelly_blocks_ok   = 0;      // full blocks decoded (a card update) -> blocks_decoded
+uint32_t    g_kelly_blocks_decoded   = 0;      // full blocks decoded (a card update)
+// The two _ms globals below are millis() *timestamps*, which is why they keep
+// names the JSON does not use: /json reports last_block_age_ms, a duration
+// derived as (millis() - g_kelly_last_block_ms). Every other counter here is
+// named for its JSON key. Don't "fix" these to _age_ — the value is an
+// absolute time, not an age.
 uint32_t    g_kelly_last_block_ms    = 0; // millis() of last full decode
 uint32_t    g_kelly_last_frame_ms    = 0; // millis() of last good 16-byte reply (yellow LED heartbeat)
 uint32_t    g_kelly_block_gap_max_ms = 0; // worst gap between full decodes (worst flicker)
@@ -1574,7 +1579,7 @@ void kellyPoll() {
     static uint8_t  cur    = 0;      // command index currently in flight
     static uint32_t next_ms = 0;     // earliest time to send the next query
     static uint32_t sent_ms = 0;     // when the current query went out
-    static uint32_t sent_rx_total = 0;   // g_kelly_rx_total when the query went out
+    static uint32_t sent_bytes_rx = 0;   // g_kelly_bytes_rx when the query went out
 
     uint32_t now = millis();
 
@@ -1585,7 +1590,7 @@ void kellyPoll() {
         g_kelly_polls++;
         kellySendQuery(KELLY_MON_CMDS[cur]);
         sent_ms = now;
-        sent_rx_total = g_kelly_rx_total;
+        sent_bytes_rx = g_kelly_bytes_rx;
         state   = KWAIT;
         return;
     }
@@ -1593,9 +1598,9 @@ void kellyPoll() {
     // KWAIT: gather the reply for command `cur`, resync on [CMD, 0x10, <16>, CHK].
     while (kelly.available() && rxlen < sizeof(rxbuf)) {
         rxbuf[rxlen++] = (uint8_t)kelly.read();
-        g_kelly_rx_total++;
+        g_kelly_bytes_rx++;
     }
-    if (rxlen > 0) {   // snapshot for /json kelly_serial.last_frame_hex
+    if (rxlen > 0) {   // snapshot for /json kelly_serial.last_rx_hex
         g_kelly_last_rx_len = rxlen < 32 ? rxlen : 32;
         memcpy(g_kelly_last_rx, rxbuf, g_kelly_last_rx_len);
     }
@@ -1616,7 +1621,7 @@ void kellyPoll() {
             if (!slot_ms[s] || (now - slot_ms[s]) >= KELLY_STALE_MS) all_fresh = false;
         if (all_fresh) {
             kellyDecodeBlock(block);
-            g_kelly_blocks_ok++;
+            g_kelly_blocks_decoded++;
             if (g_kelly_last_block_ms != 0) {
                 uint32_t gap = now - g_kelly_last_block_ms;
                 if (gap > g_kelly_block_gap_max_ms) g_kelly_block_gap_max_ms = gap;
@@ -1642,7 +1647,7 @@ void kellyPoll() {
         rxlen = 18;
     }
     if (now - sent_ms > KELLY_CMD_TIMEOUT_MS) {   // no valid reply this attempt
-        if (g_kelly_rx_total == sent_rx_total)
+        if (g_kelly_bytes_rx == sent_bytes_rx)
             g_kelly_timeouts++;                   // silence: unpowered/absent, not corruption
         else
             g_kelly_frames_bad++;                 // one clean count per failed attempt
@@ -2044,11 +2049,11 @@ String buildJson(bool pretty = true, bool minimal = false) {
     if (!minimal) {
         auto ks = doc["kelly_serial"].to<JsonObject>();
         ks["polls"]      = g_kelly_polls;
-        ks["bytes_rx"]   = g_kelly_rx_total;
+        ks["bytes_rx"]   = g_kelly_bytes_rx;
         ks["frames_ok"]  = g_kelly_frames_ok;
         ks["frames_bad"] = g_kelly_frames_bad;
         ks["timeouts"]   = g_kelly_timeouts;
-        ks["blocks_decoded"]   = g_kelly_blocks_ok;
+        ks["blocks_decoded"]   = g_kelly_blocks_decoded;
         ks["block_gap_max_ms"] = g_kelly_block_gap_max_ms;
         ks["last_block_age_ms"] = g_kelly_last_block_ms ? (millis() - g_kelly_last_block_ms) : 0;
         // Raw bytes of the last chunk read, for framing checks on the bench.
@@ -2057,7 +2062,7 @@ String buildJson(bool pretty = true, bool minimal = false) {
         uint8_t n = g_kelly_last_rx_len < 32 ? g_kelly_last_rx_len : 32;
         for (uint8_t i = 0; i < n; i++) sprintf(hex + i * 2, "%02X", g_kelly_last_rx[i]);
         hex[n * 2] = '\0';
-        ks["last_frame_hex"] = hex;
+        ks["last_rx_hex"] = hex;
     }
 #endif  // ENABLE_KELLY
 
@@ -3060,7 +3065,7 @@ void usbLoggingPoll() {
 #if defined(ENABLE_KELLY)
     if (g_kelly.valid && w > 0 && w < (int)sizeof(msg))
         snprintf(msg + w, sizeof(msg) - w, "  kelly:%lu rx last %lus",
-                 (unsigned long)g_kelly_blocks_ok,
+                 (unsigned long)g_kelly_blocks_decoded,
                  (unsigned long)((now - g_kelly.last_seen_ms) / 1000));
 #endif
     logLine("%s", msg);
