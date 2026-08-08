@@ -14,12 +14,14 @@
  *   GET    /                    — mobile-friendly dashboard (auto-refreshing)
  *   GET    /json                — raw JSON snapshot of decoded signals
  *   GET    /config              — build/board/WiFi/feature info as JSON
+ *   GET    /kelly/config        — Kelly pump 512-byte flash config as hex (ENABLE_KELLY only)
  *   GET    /sd                  — SD-card session browser (BOARD_REJSACAN only)
  *   GET    /sd/status           — SD logging status JSON (BOARD_REJSACAN only)
  *   GET    /sd/sessions         — list recorded sessions JSON (BOARD_REJSACAN only)
  *   GET    /sd/sessions/{id}    — download one session as a USTAR tar stream (BOARD_REJSACAN only)
  *   DELETE /sd/sessions/{id}    — delete one (non-active) recorded session (BOARD_REJSACAN only)
- *   anything else 302-redirects to / (captive-portal auto-open on the AP)
+ *   anything else 302-redirects to / on the soft-AP (captive-portal auto-open)
+ *                and 404s on the station interface
  *
  * Non-HTTP: also exposes decoded frames over BLE (Nordic UART Service) and,
  * on BOARD_REJSACAN, raw CAN over USB SLCAN and socketcand.
@@ -370,15 +372,29 @@ struct Dm1State {
 // match the Python decode — see kelly/README.md for what's CONFIRMED vs
 // TENTATIVE. `valid`/`last_seen_ms` drive JSON freshness like the CAN states.
 struct KellyState {
-    uint8_t  tps_pedal         = 0;
-    uint8_t  b_plus_v          = 0;   // battery volts (raw byte)
-    int16_t  motor_temp_c      = 0;
-    int16_t  controller_temp_c = 0;
-    uint8_t  forward_switch    = 0;
-    uint8_t  low_speed         = 0;   // 1 = low setpoint (~2400), 0 = high (~2800)
-    uint16_t error_status      = 0;   // 16-bit fault bitmask (bit -> KELLY_ERROR_NAMES)
-    uint16_t motor_speed_rpm   = 0;
-    uint16_t phase_current_a   = 0;
+    // All 19 fields the app's "AC Monitor" screen shows, in monitor-block
+    // offset order. Only a subset is surfaced over BLE (see buildJson) but
+    // every field is decoded and available in the full WiFi /json and the
+    // dashboard's Kelly detail view.
+    uint8_t  tps_pedal         = 0;   // off 0  — throttle AD (0..255; ~253 = hydraulic on)
+    uint8_t  brake_pedal       = 0;   // off 1  — brake AD (0..255)
+    uint8_t  brake_switch      = 0;   // off 2
+    uint8_t  foot_switch       = 0;   // off 3
+    uint8_t  forward_switch    = 0;   // off 4
+    uint8_t  reverse_switch    = 0;   // off 5  — app labels this "Reversed"
+    uint8_t  hall_a            = 0;   // off 6
+    uint8_t  hall_b            = 0;   // off 7
+    uint8_t  hall_c            = 0;   // off 8
+    uint8_t  b_plus_v          = 0;   // off 9  — battery volts (raw byte)
+    int16_t  motor_temp_c      = 0;   // off 10
+    int16_t  controller_temp_c = 0;   // off 11
+    uint8_t  set_direction     = 0;   // off 12 — 0 = forward
+    uint8_t  actual_direction  = 0;   // off 13 — 0 = forward
+    uint8_t  brake_switch2     = 0;   // off 14
+    uint8_t  low_speed         = 0;   // off 15 — 1 = low setpoint (~2400), 0 = high (~2800)
+    uint16_t error_status      = 0;   // off 16 — 16-bit fault bitmask (bit -> KELLY_ERROR_NAMES)
+    uint16_t motor_speed_rpm   = 0;   // off 18
+    uint16_t phase_current_a   = 0;   // off 20
     bool     valid             = false;
     uint32_t last_seen_ms      = 0;
 };
@@ -1465,6 +1481,10 @@ static const uint32_t KELLY_CMD_TIMEOUT_MS   = 600;    // per-command reply wait
 static const uint32_t KELLY_STALE_MS         = 5000;   // JSON freshness window (a
                                                        // little headroom over the
                                                        // observed worst-case gap)
+static const uint32_t KELLY_FLASH_TIMEOUT_MS = 250;    // per flash-read exchange
+                                                       // (a live link answers in
+                                                       // ms; short so the whole
+                                                       // burst is bounded)
 
 // Display-only fault names by error_status bit (0..15). Kept in the renderer per
 // project convention; the encoding (BE u16 @ block offset 16) is the protocol
@@ -1476,10 +1496,15 @@ static const char* const KELLY_ERROR_NAMES[16] = {
     "Reserved", "Emergency Rev Err", "Motor OverTemp Err", "Current Meter Err",
 };
 
-// Read-only transmit chokepoint: only the three zero-data monitor queries are
-// ever put on the wire (mirrors READ_ONLY_COMMANDS in the Python monitor). No
-// flash session is opened, so the firmware cannot write or reconfigure the
-// controller — read-only by construction.
+// Read-only by construction. Only two command sets ever reach the wire:
+//   * kellySendQuery below — the three zero-data monitor queries (0x3A/3B/3C).
+//   * kellyReadFlash below — a flash-session OPEN (0xF1) and block READs (0xF2),
+//     for the on-demand /kelly/config dump.
+// The write/burn/erase commands (0xF3/0xF4/0xB1..0xB4) are never emitted, so the
+// firmware can read configuration but cannot alter it — mirroring the allowlists
+// in the Python monitor and dump-config tools. Opening a flash session is benign:
+// the official app does it on every connect to detect the model, and it clears
+// when the controller powers off (no close is sent — 0xF4 doubles as the burn).
 static bool kellyIsMonitorCmd(uint8_t cmd) {
     return cmd == 0x3A || cmd == 0x3B || cmd == 0x3C;
 }
@@ -1493,10 +1518,20 @@ static void kellySendQuery(uint8_t cmd) {
 // mirror Monitor.decode; only offsets 0..21 are defined by the protocol.
 static void kellyDecodeBlock(const uint8_t* b) {
     g_kelly.tps_pedal         = b[0];
+    g_kelly.brake_pedal       = b[1];
+    g_kelly.brake_switch      = b[2];
+    g_kelly.foot_switch       = b[3];
     g_kelly.forward_switch    = b[4];
+    g_kelly.reverse_switch    = b[5];
+    g_kelly.hall_a            = b[6];
+    g_kelly.hall_b            = b[7];
+    g_kelly.hall_c            = b[8];
     g_kelly.b_plus_v          = b[9];
     g_kelly.motor_temp_c      = b[10];   // raw byte, as the Python decode leaves it
     g_kelly.controller_temp_c = b[11];
+    g_kelly.set_direction     = b[12];
+    g_kelly.actual_direction  = b[13];
+    g_kelly.brake_switch2     = b[14];
     g_kelly.low_speed         = b[15];
     g_kelly.error_status      = (uint16_t(b[16]) << 8) | b[17];   // big-endian
     g_kelly.motor_speed_rpm   = (uint16_t(b[18]) << 8) | b[19];
@@ -1602,6 +1637,89 @@ void kellyPoll() {
         state   = KIDLE;
     }
 }
+
+// ── Kelly flash-config read (read-only, on-demand) ──────────────────────────
+// Blocking read of the 512-byte configuration region, mirroring
+// solectrac-kelly-dump-config.py. Unlike kellyPoll's cooperative state machine
+// this runs to completion synchronously (inside the /kelly/config web handler),
+// so the whole burst owns the UART with no monitor query interleaved. It is
+// deliberately never called from loop() — only from a manual request.
+
+// Read exactly n bytes from the Kelly, or false on timeout at `deadline`.
+static bool kellyReadExact(uint8_t* buf, size_t n, uint32_t deadline) {
+    size_t got = 0;
+    while (got < n) {
+        if ((int32_t)(millis() - deadline) >= 0) return false;   // wrap-safe
+        if (kelly.available()) buf[got++] = (uint8_t)kelly.read();
+        else delay(1);   // yields to WiFi/other tasks while we wait
+    }
+    return true;
+}
+
+// Read one checksum-valid ETS reply for `cmd`, resyncing on the echoed command
+// byte. Fills out[len] (len<=16) and *out_len. False on timeout.
+static bool kellyReadReply(uint8_t cmd, uint8_t* out, uint8_t* out_len) {
+    const uint32_t deadline = millis() + KELLY_FLASH_TIMEOUT_MS;
+    while ((int32_t)(millis() - deadline) < 0) {
+        uint8_t b;
+        if (!kellyReadExact(&b, 1, deadline)) return false;
+        if (b != cmd) continue;                      // resync on echoed CMD
+        uint8_t len;
+        if (!kellyReadExact(&len, 1, deadline)) return false;
+        if (len > 16) continue;                      // not a frame we expect
+        uint8_t body[17];                            // len data bytes + checksum
+        if (!kellyReadExact(body, (size_t)len + 1, deadline)) return false;
+        uint16_t sum = (uint16_t)cmd + len;
+        for (uint8_t j = 0; j < len; j++) sum += body[j];
+        if ((uint8_t)(sum & 0xFF) != body[len]) continue;   // bad checksum: keep scanning
+        if (out) memcpy(out, body, len);
+        if (out_len) *out_len = len;
+        return true;
+    }
+    return false;
+}
+
+// Fill flash[512] from the controller. Returns the number of 16-byte blocks
+// successfully read (32 = full), or -1 if no flash session could be opened
+// (controller unpowered/absent). Bounded to ~3 s total so a flaky or silent
+// link can't stall the web handler indefinitely; unread blocks are zero-filled.
+static int kellyReadFlash(uint8_t* flash) {
+    const uint32_t start = millis();
+    const uint32_t OVERALL_MS = 3000;
+    while (kelly.available()) kelly.read();           // clear stale monitor bytes
+
+    const uint8_t open_frame[3] = {0xF1, 0x00, 0xF1}; // [CMD, LEN=0, CHK=CMD]
+    kelly.write(open_frame, sizeof(open_frame));
+    uint8_t tmp[16], tlen;
+    if (!kellyReadReply(0xF1, tmp, &tlen)) return -1;  // session never opened
+
+    int ok = 0;
+    for (int blk = 0; blk < 32; blk++) {
+        uint16_t addr = (uint16_t)blk * 16;
+        uint8_t lo = addr & 0xFF, hi = (addr >> 8) & 0xFF;
+        // read frame: [0xF2, LEN=3, lo, 0x10 (count), hi, CHK]
+        uint8_t chk = (uint8_t)(0xF2 + 0x03 + lo + 0x10 + hi);
+        uint8_t frame[6] = {0xF2, 0x03, lo, 0x10, hi, chk};
+        bool got = false;
+        for (int attempt = 0; attempt < 2 && !got; attempt++) {
+            if (millis() - start > OVERALL_MS) break;
+            while (kelly.available()) kelly.read();
+            kelly.write(frame, sizeof(frame));
+            uint8_t data[16], dlen;
+            if (kellyReadReply(0xF2, data, &dlen) && dlen == 16) {
+                memcpy(flash + addr, data, 16);
+                got = true;
+            }
+        }
+        if (got) ok++;
+        else memset(flash + addr, 0, 16);
+        if (millis() - start > OVERALL_MS) {          // out of time: zero the rest
+            for (int r = blk + 1; r < 32; r++) memset(flash + r * 16, 0, 16);
+            break;
+        }
+    }
+    return ok;
+}
 #endif  // ENABLE_KELLY
 
 // ── JSON builder ──────────────────────────────────────────────────────────────
@@ -1624,6 +1742,9 @@ String buildJson(bool pretty = true, bool minimal = false) {
     doc["uptime"] = millis() / 1000.0;
 #ifdef GIT_SHA
     doc["version"] = GIT_SHA;
+#endif
+#ifdef GIT_VERSION
+    if (GIT_VERSION[0]) doc["release"] = GIT_VERSION;   // tag, on release builds only
 #endif
 
     // CAN bus health
@@ -1873,9 +1994,22 @@ String buildJson(bool pretty = true, bool minimal = false) {
         k["controller_temp_c"] = g_kelly.controller_temp_c;
         k["low_speed"]         = g_kelly.low_speed;
         k["error_status"]      = g_kelly.error_status;
+        // The remaining monitor fields are decoded but stripped from the BLE
+        // (minimal) payload to keep it small; the full WiFi /json carries all
+        // 19, which the dashboard's Kelly detail view renders.
         if (!minimal) {
-            k["tps_pedal"]      = g_kelly.tps_pedal;
-            k["forward_switch"] = g_kelly.forward_switch;
+            k["tps_pedal"]        = g_kelly.tps_pedal;
+            k["brake_pedal"]      = g_kelly.brake_pedal;
+            k["brake_switch"]     = g_kelly.brake_switch;
+            k["foot_switch"]      = g_kelly.foot_switch;
+            k["forward_switch"]   = g_kelly.forward_switch;
+            k["reverse_switch"]   = g_kelly.reverse_switch;
+            k["hall_a"]           = g_kelly.hall_a;
+            k["hall_b"]           = g_kelly.hall_b;
+            k["hall_c"]           = g_kelly.hall_c;
+            k["set_direction"]    = g_kelly.set_direction;
+            k["actual_direction"] = g_kelly.actual_direction;
+            k["brake_switch2"]    = g_kelly.brake_switch2;
         }
         auto errs = k["errors"].to<JsonArray>();
         for (int b = 0; b < 16; b++) {
@@ -2060,6 +2194,9 @@ void handleConfig() {
 #ifdef GIT_SHA
     doc["version"] = GIT_SHA;
 #endif
+#ifdef GIT_VERSION
+    if (GIT_VERSION[0]) doc["release"] = GIT_VERSION;   // tag, on release builds only
+#endif
 #if defined(BOARD_ADAFRUIT_FEATHER_S3)
     doc["board"] = "adafruit_feather_s3";
 #elif defined(BOARD_LILYGO_T2CAN)
@@ -2113,6 +2250,42 @@ void handleConfig() {
     serializeJsonPretty(doc, out);
     server.send(200, "application/json", out);
 }
+
+#if defined(ENABLE_KELLY)
+// GET /kelly/config — one-shot, read-only dump of the Kelly pump's 512-byte
+// flash configuration (the app's "AC Calibration" parameters). Static data, so
+// it is fetched only on demand, never polled. The read blocks ~0.2 s (live
+// link) up to ~3 s (flaky link), pausing CAN/monitor servicing for the burst —
+// acceptable for a rare manual call.
+//
+// Returns the raw block as hex plus the parsed version word. Decoding the 98
+// parameters stays in kelly/solectrac-kelly-dump-config.py, the single source
+// of truth for the map — rather than duplicating that table into firmware.
+void handleKellyConfig() {
+    noteHttpActivity();
+    static uint8_t flash[512];
+    int ok = kellyReadFlash(flash);
+    if (ok < 0) {
+        server.send(503, "application/json",
+                    "{\"error\":\"no flash session (Kelly unpowered or absent)\"}");
+        return;
+    }
+    uint16_t ver = (uint16_t(flash[16]) << 8) | flash[17];
+    String out;
+    out.reserve(1120);                       // 512*2 hex + small envelope
+    out = "{\"blocks_read\":";      out += ok;
+    out += ",\"blocks_total\":32";
+    out += ",\"version_word\":";    out += (int)ver;
+    out += ",\"raw\":\"";
+    static const char hexd[] = "0123456789abcdef";   // not HEX: that's an Arduino macro
+    for (int i = 0; i < 512; i++) {
+        out += hexd[flash[i] >> 4];
+        out += hexd[flash[i] & 0x0F];
+    }
+    out += "\"}";
+    server.send(200, "application/json", out);
+}
+#endif  // ENABLE_KELLY
 
 // Human-facing STA WiFi form. Shows the current SSID and whether a password is
 // set (never the password itself). Served on the always-up AP as well as STA,
@@ -2612,10 +2785,16 @@ void handleNotFound() {
     // connectivity probes (generate_204 / hotspot-detect.html). Answering
     // those with a redirect — not a 404 — makes the OS classify the AP as a
     // captive portal and auto-open the dashboard when someone joins.
-    // localIP() is the board's address on whichever interface (AP or STA)
-    // the request arrived on, so bench-network clients redirect sensibly too.
-    server.sendHeader("Location",
-                      "http://" + server.client().localIP().toString() + "/");
+    // localIP() is the board's address on whichever interface the request
+    // arrived on, so it also tells AP requests apart from station ones: on the
+    // bench network there's no wildcard DNS and no portal to satisfy, so a
+    // mistyped path should say 404 rather than silently bounce to the root.
+    IPAddress local = server.client().localIP();
+    if (local != WiFi.softAPIP()) {
+        server.send(404, "text/plain", "Not found: " + server.uri() + "\n");
+        return;
+    }
+    server.sendHeader("Location", "http://" + local.toString() + "/");
     server.send(302, "text/plain", "");
 }
 
@@ -3274,6 +3453,9 @@ void setup() {
     server.on("/usb", HTTP_GET, handleUsbPage);   // USB-mode control page
     server.on("/usb", HTTP_PUT, handleUsbSet);    // set USB mode (idempotent)
     server.on("/logs", HTTP_GET, handleLog);      // recent device log (any mode)
+#if defined(ENABLE_KELLY)
+    server.on("/kelly/config", handleKellyConfig);
+#endif
     server.on("/wifi", HTTP_GET,  handleWifiForm);
     server.on("/wifi", HTTP_POST, handleWifiSave);
 #if defined(HAS_SD)

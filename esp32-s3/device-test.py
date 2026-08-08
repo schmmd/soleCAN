@@ -81,6 +81,7 @@ SOCKETCAND_PORT = 28600
 SOCKETCAND_HANDSHAKE_MS = 10000
 SLCAN_VERSION_REPLY = b"V1013"
 DASHBOARD_MARKER = b"Tractor Dashboard"
+AP_IP = "192.168.4.1"
 
 NUS_SVC_UUID = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
 NUS_TX_UUID = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
@@ -341,11 +342,19 @@ def stage_http(args) -> dict | None:
           "GET / serves the embedded dashboard",
           f"status={status}, {len(body)} bytes")
 
+    # The captive-portal redirect is AP-only: on the soft-AP an unknown path
+    # must 302 so phones auto-open the dashboard, but over the bench network
+    # (station interface) a mistyped path is a plain 404.
     status, headers, _ = http_get(args.host, "/definitely-not-a-page")
     loc = headers.get("Location", "")
-    check(status == 302 and loc.startswith("http://"),
-          "unknown path 302-redirects (captive portal)",
-          f"status={status}, Location={loc!r}")
+    if args.host.split(":")[0] == AP_IP:
+        check(status == 302 and loc.startswith("http://"),
+              "unknown path 302-redirects on the AP (captive portal)",
+              f"status={status}, Location={loc!r}")
+    else:
+        check(status == 404,
+              "unknown path 404s on the station interface",
+              f"status={status}")
     return j
 
 
@@ -1301,7 +1310,7 @@ def main() -> int:
         description="Bench acceptance test for a flashed Solectrac "
                     "CAN-monitor device.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    ap.add_argument("--host", default="192.168.4.1",
+    ap.add_argument("--host", default=AP_IP,
                     help="device IP or hostname (AP address by default)")
     ap.add_argument("--ap-pass", default="electricity",
                     help="AP password (AP_PASS) — required to POST /wifi; "
