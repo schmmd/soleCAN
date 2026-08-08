@@ -2357,10 +2357,10 @@ void handleUsbPage() {
         if (on) body += F(" \xE2\x9C\x93");   // ✓
         body += F("</button></form>");
     }
-    body += F("<p class=d>logging = device debug log over USB<br>"
-        "slcan = CAN adapter"
+    body += F("<p class=d>logging = device debug logging messages<br>"
+        "slcan = CAN adapter over USB"
 #if defined(ENABLE_KELLY)
-        "<br>kelly = USB\xE2\x86\x94Kelly bridge"
+        "<br>kelly = hydraulic Kelly controller bridge over USB"
 #endif
         "</p>");
     server.send(200, "text/html", body);
@@ -3298,6 +3298,13 @@ static void bleQueueFramed(const String& payload) {
 }
 
 void bleTick() {
+    // Log connect/disconnect edges here rather than in the callbacks: those run
+    // on the Bluedroid task and logLine() may echo to Serial.
+    static bool was_connected = false;
+    if (g_ble_connected != was_connected) {
+        was_connected = g_ble_connected;
+        logLine("BLE: client %s", was_connected ? "connected" : "disconnected");
+    }
     if (!g_ble_connected || !g_ble_tx) {
         g_ble_tx_len = g_ble_tx_off = 0;   // abort any in-flight frame
         return;
