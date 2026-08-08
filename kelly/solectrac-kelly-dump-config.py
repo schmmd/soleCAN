@@ -93,6 +93,10 @@ def build_tx(cmd: int, data: bytes = b"") -> bytes:
 # tractor reads 0x0206 = 518). Offsets and encodings from kelly-connect-oss
 # ParameterDefinitions.kt; names as the Kelly app displays them.
 #
+# This table is the source of truth for the map. The ESP32 firmware mirrors it
+# in C++ (KELLY_PARAMS in esp32-s3/src/main.cpp) so its /kelly/config route can
+# decode on-device — keep the two in sync when editing this list.
+#
 # size: "bit" (pos = bit position), "byte", or "word" (pos = byte count - 1,
 # big-endian). fmt: "u" unsigned int, "h" hex string, "a" ASCII. ro marks
 # fields the app treats as read-only. vendor is the KLS7218MC factory value
