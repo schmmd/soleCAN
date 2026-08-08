@@ -425,6 +425,25 @@ def to_json(flash: bytes, code_version: str, port: str, when: float) -> str:
     })
 
 
+def load_flash_file(path: str) -> bytes:
+    """Read a 512-byte config from a saved .bin file. "-" reads stdin."""
+    data = sys.stdin.buffer.read() if path == "-" else open(path, "rb").read()
+    if len(data) != FLASH_SIZE:
+        raise ValueError(f"expected {FLASH_SIZE} bytes, got {len(data)}")
+    return data
+
+
+def load_flash_hex(text: str) -> bytes:
+    """Decode a 512-byte config from a raw hex string (whitespace ignored).
+    "-" reads the hex from stdin."""
+    if text == "-":
+        text = sys.stdin.buffer.read().decode("utf-8", "replace")
+    flash = bytes.fromhex("".join(text.split()))
+    if len(flash) != FLASH_SIZE:
+        raise ValueError(f"expected {FLASH_SIZE} bytes, got {len(flash)}")
+    return flash
+
+
 def list_serial_ports() -> None:
     ports = list(list_ports.comports())
     if not ports:
@@ -448,6 +467,14 @@ def main() -> int:
         "Bluetooth SPP adapter, which appears as /dev/cu.<name>. "
         "Omit to list available ports.",
     )
+    src = parser.add_mutually_exclusive_group()
+    src.add_argument("-f", "--from-file", metavar="PATH",
+                     help="decode a saved .bin dump (512 raw bytes) instead of "
+                     "reading the controller. \"-\" reads stdin.")
+    src.add_argument("-s", "--from-string", metavar="HEX",
+                     help="decode a raw hex string (512 bytes = 1024 hex "
+                     "chars; whitespace ignored) instead of reading the "
+                     "controller. \"-\" reads the hex from stdin.")
     parser.add_argument("-b", "--baud", type=int, default=BAUD,
                         help=f"baud rate (default {BAUD})")
     parser.add_argument("-o", "--out",
@@ -463,6 +490,26 @@ def main() -> int:
                         help="log every TX frame and the raw bytes seen for "
                         "each reply (for diagnosing a silent controller)")
     args = parser.parse_args()
+
+    if args.from_file or args.from_string:
+        source = args.from_file or "<hex>"
+        try:
+            if args.from_file:
+                flash = load_flash_file(args.from_file)
+            else:
+                flash = load_flash_hex(args.from_string)
+        except (OSError, ValueError) as e:
+            print(f"Could not read dump: {e}", file=sys.stderr)
+            return 1
+        version, when = "", time.time()
+        if args.json:
+            print(to_json(flash, version, source, when))
+        else:
+            print(format_text(flash, version, when))
+            if args.raw:
+                print()
+                print(hexdump(flash))
+        return 0
 
     if not args.port:
         list_serial_ports()
