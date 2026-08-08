@@ -502,6 +502,9 @@ static bool usbModeFromName(const String& s, UsbMode& out) {
 // Defined near the SLCAN section (they print over Serial / read device state).
 static bool tryModeCommand(const char* line);
 void usbLoggingPoll();
+// Defined with the /config handler; sdStartSession() writes it once per session
+// folder, well before that point in the file.
+static String buildConfigJson();
 
 // NVS 'wifi' namespace overrides the compiled defaults; an absent 'ssid' key
 // means "never provisioned", so fall back to the baked-in defaults (keeps the
@@ -593,6 +596,8 @@ extern const uint8_t dashboard_html_end[]   asm("_binary_src_dashboard_html_end"
 //   /sNNNNN/can_PP.asc    every received CAN frame, Vector ASCII — replayable by
 //                         solecan-analyze.py / solecan-stream.py --replay unchanged
 //   /sNNNNN/data_PP.jsonl one buildJson() snapshot per line at SD_JSON_HZ (default 1)
+//   /sNNNNN/config.json   the /config payload, written once at session start —
+//                         firmware/board/features/USB role behind these logs
 //
 // Design (see also the plan): loop() (core 1) only *formats* bytes and pushes them
 // into two PSRAM ring buffers; a dedicated writer task (core 0) does every SD I/O.
@@ -795,6 +800,22 @@ static bool sdStartSession() {
     snprintf(dir, sizeof dir, "/s%05lu", (unsigned long)g_sd.session);
     if (!SD.mkdir(dir)) return false;
     g_sd_session_start_us = esp_timer_get_time();
+    // Session provenance: firmware/board/features/USB role that produced these
+    // logs, written once instead of repeated in every data_PP.jsonl line. It is
+    // the /config payload verbatim, so one parser reads both.
+    //
+    // Caveat for readers: this is config *at session start*. sdInit() runs a few
+    // lines after WiFi.begin() in setup(), and the join is async, so wifi.sta
+    // will often say "connecting" with no ip/rssi even on a device that
+    // associates fine a second later. Build identity and features are exact.
+    //
+    // Best-effort: a failed write must not cost the session, so no early return.
+    char cpath[32];
+    snprintf(cpath, sizeof cpath, "/s%05lu/config.json", (unsigned long)g_sd.session);
+    if (File cf = SD.open(cpath, FILE_WRITE)) {
+        cf.print(buildConfigJson());
+        cf.close();
+    }
     if (!sdOpenPart(g_sd_raw)) return false;
     if (!sdOpenPart(g_sd_json)) { g_sd_raw.file.close(); return false; }
     return true;
@@ -2204,8 +2225,7 @@ static String staDisconnectReasonName(uint8_t reason) {
 // compiled WIFI_SSID/WIFI_PASS defaults. The soft-AP is always up, so /config
 // stays reachable at 192.168.4.1 even when the STA join failed — one request
 // distinguishes "wrong password" from "wrong SSID" from "no station configured".
-void handleConfig() {
-    noteHttpActivity();
+static String buildConfigJson() {
     JsonDocument doc;
 
     doc["uptime"] = millis() / 1000.0;
@@ -2271,7 +2291,15 @@ void handleConfig() {
 
     String out;
     serializeJsonPretty(doc, out);
-    server.send(200, "application/json", out);
+    return out;
+}
+
+// noteHttpActivity() belongs here, not in buildConfigJson(): sdStartSession()
+// calls that too, and opening a log session is not HTTP traffic — counting it
+// as such would defer the quiet-bus sleep on a device nobody is talking to.
+void handleConfig() {
+    noteHttpActivity();
+    server.send(200, "application/json", buildConfigJson());
 }
 
 #if defined(ENABLE_KELLY)
