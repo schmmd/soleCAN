@@ -2104,10 +2104,6 @@ String buildJson(bool pretty = true, bool minimal = false) {
     }
 #endif
 
-    // Current USB port role (small, device-wide fact — emitted even in the
-    // minimal/BLE snapshot so any client can see the mode).
-    doc["usb"]["mode"] = usbModeName(g_usb_mode);
-
     String out;
     if (pretty) serializeJsonPretty(doc, out);
     else        serializeJson(doc, out);
