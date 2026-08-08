@@ -110,7 +110,34 @@ Behavior notes
   - The ADuM1201 is fail-safe high: with the tractor off (Kelly side
     unpowered) GPIO47 sees a clean idle-high line, not garbage, so the
     firmware's existing stale-out handles key-off with no code changes.
-  - Verification: flash the dashboard firmware (-DENABLE_KELLY
-    -DKELLY_DEBUG), power the board from the OBD port, run the pump, and
-    watch /json kelly_dbg — frames_ok should climb at ~99% of polls, as it
-    does on floating USB power.
+  - Verification: flash the dashboard firmware (-DENABLE_KELLY), power the
+    board from the OBD port, run the pump, and watch /json kelly_serial —
+    frames_ok should climb at ~99% of polls, as it does on floating USB
+    power.
+
+Verification result — PASS
+--------------------------
+Measured 2026-08-08. Board on OBD power (chassis-referenced, the
+configuration that previously degraded or killed the link), isolator
+inline, pump running. Three /json kelly_serial samples, differenced:
+
+  interval             polls  frames_ok  frames_bad  timeouts   bytes_rx
+  USB + OBD             +419       +419           0         0     +7,961
+  OBD only (USB out)   +1728      +1728           0         0    +32,832
+  total                +2147      +2147           0         0    +40,793
+
+100.0% frame success over 2147 consecutive polls, against the ~99%
+acceptance bar above. bytes_rx advances by exactly 19 bytes per reply
+(419*19 = 7,961; 1728*19 = 32,832) — one clean frame per poll and zero
+stray bytes, so the continuous foreign chatter this line showed before
+the isolator is entirely gone.
+
+Lifetime counters at the end of the run read frames_bad 2, timeouts 213,
+block_gap_max_ms 166,463. All three are frozen startup artifacts, not an
+ongoing rate: the timeouts are one contiguous pre-power stretch (213 *
+600 ms timeout + 40 ms ~= 136 s, matching that worst gap) from before the
+controller's PWR came up past ~18 V. None incremented during any
+measured interval.
+
+Counters kept climbing across the USB unplug, so the board also rides
+through that transition on OBD power alone.

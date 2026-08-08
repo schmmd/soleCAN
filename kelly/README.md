@@ -54,8 +54,7 @@ documents the field offsets.
 
 **Line rate is the documented 19200 baud — CONFIRMED** (sustained ~99 % frame
 success once the receive path was fixed). What earlier looked like a baud
-mismatch was two independent receive-path problems, both since fixed, plus one
-still open:
+mismatch was three independent receive-path problems, all since fixed:
 
 1. **Arduino core 2.0.x broke Kelly reception in the RejsaCAN firmware.**
    Builds on Arduino core 2.0.17 (the last version PlatformIO's official
@@ -68,8 +67,15 @@ still open:
    a known-good core — they are the ESP32-S3's UART0 console pins, and the
    boot ROM also prints on TXD0 at every reset. The Kelly UART now uses plain
    GPIOs 47/48 — fixed, CONFIRMED.
-3. **Chassis-vs-traction grounding** (below) still degrades the link when the
-   board runs on OBD power; `isolator.txt` documents the planned fix.
+3. **Chassis-vs-traction grounding** (below) degraded the link whenever the
+   board ran on OBD power. Fixed by the galvanic UART isolator in
+   `isolator.txt`, now built and in service — fixed, CONFIRMED. With the
+   isolator inline and the board on OBD power (chassis-referenced, the
+   configuration that previously killed the link), 2147 consecutive polls
+   returned 2147 good frames: zero bad, zero timeouts, and `bytes_rx`
+   advancing by exactly 19 bytes per reply — no stray bytes on the line at
+   all. Includes a 1728-poll stretch on OBD power alone with USB unplugged.
+   See "Verification result" in `isolator.txt`.
 
 The ~19,900 edge-timing figure was measured through problems 1 and 2 together
 and is void; the auto-baud sweep has been removed and all tooling pins 19200.
@@ -81,9 +87,11 @@ powered from the OBD 12 V) injects the chassis-to-traction noise into the
 signal reference and the link degrades or dies outright; the same adapter
 floating (battery laptop, no chassis contact) reads cleanly. Always connect
 V− as the signal return, and keep the receiver otherwise floating — or
-galvanically isolate the UART when the host must share chassis ground. The
-build plan for that isolator (ADuM1201 dongle powered from SM-4P pin 1) is in
-`isolator.txt`.
+galvanically isolate the UART when the host must share chassis ground. That
+isolator (ADuM1201 dongle powered from SM-4P pin 1) is built and is the
+standard way to run the RejsaCAN on this port; with it inline the board reads
+the Kelly cleanly on OBD power, which was previously the failing case. Build
+plan and measured result are in `isolator.txt`.
 
 **Signal level is logic-level (TTL) UART, not bipolar RS-232 — CONFIRMED.** A
 full bidirectional monitor session succeeded through a bare CH340 (TTL)

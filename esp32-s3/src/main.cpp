@@ -415,18 +415,21 @@ ChargerState g_charger;
 ChgrCmdState g_chgr_cmd;
 #if defined(ENABLE_KELLY)
 KellyState  g_kelly;   // updated by kellyPoll() in loop(), read when building JSON
-// Debug counters, always exposed in /json under "kelly_dbg" so we can see the
+// Link-health counters, exposed in /json under "kelly_serial" so we can see the
 // serial path even when no valid frame decodes: how many polls fired, how many
 // bytes came back, and the raw hex of the last chunk received.
 uint32_t    g_kelly_polls    = 0;   // query cycles started
-uint32_t    g_kelly_rx_total = 0;   // total bytes ever read from the Kelly UART
+// Not just instrumentation: kellyPoll() snapshots this when a query goes out and
+// compares on timeout to tell silence (-> timeouts) from corruption
+// (-> frames_bad). Removing it collapses those two counters into one.
+uint32_t    g_kelly_rx_total = 0;   // total bytes ever read from the Kelly UART -> bytes_rx
 uint8_t     g_kelly_last_rx[32];    // last raw chunk received
 uint8_t     g_kelly_last_rx_len = 0;
 // Flicker/reliability counters: how cleanly frames land.
 uint32_t    g_kelly_frames_ok   = 0;      // replies that checksummed
 uint32_t    g_kelly_frames_bad  = 0;      // bytes arrived but no frame checksummed
 uint32_t    g_kelly_timeouts    = 0;      // no bytes at all (controller unpowered/absent)
-uint32_t    g_kelly_blocks_ok   = 0;      // full 48-byte blocks decoded (a card update)
+uint32_t    g_kelly_blocks_ok   = 0;      // full blocks decoded (a card update) -> blocks_decoded
 uint32_t    g_kelly_last_block_ms    = 0; // millis() of last full decode
 uint32_t    g_kelly_last_frame_ms    = 0; // millis() of last good 16-byte reply (yellow LED heartbeat)
 uint32_t    g_kelly_block_gap_max_ms = 0; // worst gap between full decodes (worst flicker)
@@ -1471,7 +1474,15 @@ static HardwareSerial &kelly = Serial1;
 // §"Actual line rate".
 static const uint32_t KELLY_BAUD = 19200;
 static const uint8_t  KELLY_MON_CMDS[3]      = {0x3A, 0x3B, 0x3C};
-static const uint32_t KELLY_POLL_INTERVAL_MS = 40;     // gap between individual queries
+// Gap between individual queries. A poll costs this plus ~20 ms of wire time
+// (3-byte query + 19-byte reply at 19200, plus controller turnaround), and a
+// field only refreshes once its own command comes round again — every 2nd
+// poll. So a field updates every 2*(INTERVAL+20) ms: 180 ms here, just inside
+// the dashboard's 200 ms refresh, so every page poll sees new data and no
+// reading is sampled and then thrown away. Raise to slow it further; the
+// ceiling is KELLY_STALE_MS below, which drops the reading if a slot goes
+// unrefreshed for 5 s (interval must stay well under ~2.4 s).
+static const uint32_t KELLY_POLL_INTERVAL_MS = 70;
 static const uint32_t KELLY_CMD_TIMEOUT_MS   = 600;    // per-command reply wait
                                                        // (matches the Python
                                                        // monitor's 0.6 s; the
@@ -1584,7 +1595,7 @@ void kellyPoll() {
         rxbuf[rxlen++] = (uint8_t)kelly.read();
         g_kelly_rx_total++;
     }
-    if (rxlen > 0) {   // snapshot for /json kelly_dbg
+    if (rxlen > 0) {   // snapshot for /json kelly_serial.last_frame_hex
         g_kelly_last_rx_len = rxlen < 32 ? rxlen : 32;
         memcpy(g_kelly_last_rx, rxbuf, g_kelly_last_rx_len);
     }
@@ -1617,12 +1628,15 @@ void kellyPoll() {
         state   = KIDLE;
         return;
     }
-    // No match: slide the window instead of jamming. The Kelly's line can
-    // carry a second continuous transmission (~19.9k stream) plus noise, so a
-    // fixed snapshot fills with non-reply bytes before the reply arrives.
-    // Every start position the scan just exhausted is dead; keep only the
-    // tail that could still begin a frame, so the reply is found no matter
-    // how much chatter precedes it.
+    // No match: slide the window instead of jamming. Every start position the
+    // scan just exhausted is dead; keep only the tail that could still begin a
+    // frame, so the reply is found no matter how much chatter precedes it.
+    // This was written against an ungrounded-reference line that carried a
+    // second continuous transmission plus noise, filling a fixed snapshot with
+    // non-reply bytes before the reply arrived. The galvanic isolator
+    // (kelly/isolator.txt) removed that chatter — the line now delivers
+    // exactly 19 bytes per poll — so this path is defensive only. Keep it: it
+    // is what makes a bad harness degrade instead of stall.
     if (rxlen > 18) {
         memmove(rxbuf, rxbuf + rxlen - 18, 18);
         rxlen = 18;
@@ -2016,32 +2030,35 @@ String buildJson(bool pretty = true, bool minimal = false) {
             if (g_kelly.error_status & (1 << b)) errs.add(KELLY_ERROR_NAMES[b]);
         }
     }
-#if defined(KELLY_DEBUG)
-    // Serial-path diagnostics (build with -DKELLY_DEBUG). polls should climb
-    // (board is querying); rx_total > 0 means the Kelly is answering; frames_ok
-    // vs frames_bad is the per-attempt success rate on a live link; timeouts
-    // counts attempts with zero bytes back (controller unpowered, e.g. key-off);
-    // block_gap_max_ms is the worst flicker; last_rx shows raw bytes for
-    // framing/baud checks.
+    // Kelly serial-link health, the peer of the "can" section above: "kelly"
+    // carries the decoded telemetry, "kelly_serial" says how well the link
+    // that produced it is running. polls should climb (board is querying);
+    // frames_ok vs frames_bad is the per-attempt success rate on a live link;
+    // timeouts counts attempts with zero bytes back (controller unpowered,
+    // e.g. key-off); block_gap_max_ms is the worst flicker.
+    //
+    // bytes_rx is the one field that can see junk *between* frames: a healthy
+    // link advances it by exactly 19 per frames_ok, so a drifting ratio is an
+    // early warning (a loose isolator, a re-terminated harness) that shows up
+    // before frames start failing. See kelly/isolator.txt.
     if (!minimal) {
-        auto kd = doc["kelly_dbg"].to<JsonObject>();
-        kd["polls"]       = g_kelly_polls;
-        kd["rx_total"]    = g_kelly_rx_total;
-        kd["baud"]        = KELLY_BAUD;
-        kd["frames_ok"]   = g_kelly_frames_ok;
-        kd["frames_bad"]  = g_kelly_frames_bad;
-        kd["timeouts"]    = g_kelly_timeouts;
-        kd["blocks_ok"]   = g_kelly_blocks_ok;
-        kd["block_gap_max_ms"] = g_kelly_block_gap_max_ms;
-        kd["block_gap_ms"]     = g_kelly_last_block_ms ? (millis() - g_kelly_last_block_ms) : 0;
-        kd["last_rx_len"] = g_kelly_last_rx_len;
+        auto ks = doc["kelly_serial"].to<JsonObject>();
+        ks["polls"]      = g_kelly_polls;
+        ks["bytes_rx"]   = g_kelly_rx_total;
+        ks["frames_ok"]  = g_kelly_frames_ok;
+        ks["frames_bad"] = g_kelly_frames_bad;
+        ks["timeouts"]   = g_kelly_timeouts;
+        ks["blocks_decoded"]   = g_kelly_blocks_ok;
+        ks["block_gap_max_ms"] = g_kelly_block_gap_max_ms;
+        ks["last_block_age_ms"] = g_kelly_last_block_ms ? (millis() - g_kelly_last_block_ms) : 0;
+        // Raw bytes of the last chunk read, for framing checks on the bench.
+        // Length is strlen()/2 — no separate field.
         char hex[65];
         uint8_t n = g_kelly_last_rx_len < 32 ? g_kelly_last_rx_len : 32;
         for (uint8_t i = 0; i < n; i++) sprintf(hex + i * 2, "%02X", g_kelly_last_rx[i]);
         hex[n * 2] = '\0';
-        kd["last_rx"] = hex;
+        ks["last_frame_hex"] = hex;
     }
-#endif  // KELLY_DEBUG
 #endif  // ENABLE_KELLY
 
     if (!minimal) {
