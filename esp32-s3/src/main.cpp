@@ -2302,7 +2302,8 @@ void handleWifiForm() {
               "<p>SSID (blank = AP only):<br><input name=ssid maxlength=32></p>"
               "<p>Password:<br><input name=pass type=password maxlength=63></p>"
               "<p>AP password (required):<br><input name=ap_pass type=password></p>"
-              "<button type=submit>Save &amp; re-join</button></form>");
+              "<button type=submit>Save &amp; re-join</button></form>"
+              "<p><a href=/>&lsaquo; Dashboard</a></p>");
     server.send(200, "text/html", body);
 }
 
@@ -2473,6 +2474,7 @@ static const char SD_INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
   th,td{border-color:#333}a{color:#6bf}}
 </style>
 <h1>SD sessions</h1>
+<p><a href=/>&lsaquo; Dashboard</a></p>
 <div id=status class=muted>Loading&hellip;</div>
 <p><button onclick=load()>Refresh</button> <span id=err class=muted></span></p>
 <table><thead><tr><th>Session<th class=num>Files<th class=num>Size<th>Download</thead>
