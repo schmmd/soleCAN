@@ -300,10 +300,15 @@ def stage_http(args) -> dict | None:
         report("WARN", f"firmware version is {version!r} — build was made "
                        "without GIT_SHA; flashed image is not identifiable")
     else:
-        report("INFO", f"firmware version {version}")
+        release = j.get("release")
+        report("INFO", f"firmware version {version}"
+                       + (f" ({release})" if release else ""))
     if args.expect_version:
-        check(version == args.expect_version, "firmware version matches",
-              f"expected {args.expect_version}, got {version}")
+        release = j.get("release")
+        check(args.expect_version in (version, release),
+              "firmware version matches",
+              f"expected {args.expect_version}, got {version}"
+              + (f" ({release})" if release else ""))
 
     state = jget(j, "can.state")
     check(state == "running", "CAN controller running", f"state={state}")
@@ -1347,8 +1352,9 @@ def main() -> int:
     ap.add_argument("--expect-mode", choices=["listen_only", "normal"],
                     default="listen_only",
                     help="CAN bus mode the flashed build should report")
-    ap.add_argument("--expect-version", metavar="SHA",
-                    help="git short SHA the flashed build should report")
+    ap.add_argument("--expect-version", metavar="SHA|TAG",
+                    help="git short SHA or release tag the flashed build "
+                         "should report")
     ap.add_argument("--expect-vin", type=float, metavar="VOLTS",
                     help="expected 12 V rail reading (RejsaCAN VIN sense)")
     ap.add_argument("--expect-sd", action="store_true",
