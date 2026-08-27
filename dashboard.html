@@ -12,8 +12,12 @@ h3{font-size:.68em;text-transform:uppercase;letter-spacing:.1em;color:#757575;ma
 .g4{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:8px}
 @media(max-width:400px){.g4{grid-template-columns:1fr 1fr}}
 .card{background:#fff;border-radius:10px;padding:12px;box-shadow:0 1px 2px rgba(0,0,0,.06)}
-/* Last-known values, no longer updating (e.g. Kelly pump after key-off). */
-.stale{opacity:.55}
+/* Last-known values that have stopped updating: one card (the Kelly pump once
+   it goes quiet) or the whole page (key-off). The status banner and footer are
+   exempt — they are what tells you *why* everything else is frozen. Opacity
+   can't be undone by a descendant, so the page-level form dims each child of
+   #main rather than #main itself. */
+.stale,#main.stale>*:not(.status):not(#foot){opacity:.82}
 .big{font-size:1.9em;font-weight:700;line-height:1.1}
 .unit{font-size:.5em;color:#9e9e9e;font-weight:400}
 .sub{font-size:.72em;color:#757575;margin-top:2px}
@@ -222,6 +226,9 @@ function update(d){
   statEl.className='status '+tractor;
   var vinTxt = (d.vin_v != null) ? ' ('+d.vin_v.toFixed(1)+' V)' : '';
   statEl.textContent=(tractor==='on' ? 'Tractor On' : 'Tractor Off') + vinTxt;
+  // Key-off freezes every J1939 reading at its last value; dim them so the
+  // page doesn't read as live.
+  document.getElementById('main').classList.toggle('stale',tractor!=='on');
   const soc=p.soc_pct,scls=soc==null?'':soc<20?'bad':soc<40?'warn':'ok';
   const cur=p.current_a,pwr=p.power_w;
   // Sign convention everywhere: positive = into pack (charging), negative = out.
