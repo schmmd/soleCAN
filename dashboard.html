@@ -12,6 +12,8 @@ h3{font-size:.68em;text-transform:uppercase;letter-spacing:.1em;color:#757575;ma
 .g4{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:8px}
 @media(max-width:400px){.g4{grid-template-columns:1fr 1fr}}
 .card{background:#fff;border-radius:10px;padding:12px;box-shadow:0 1px 2px rgba(0,0,0,.06)}
+/* Last-known values, no longer updating (e.g. Kelly pump after key-off). */
+.stale{opacity:.55}
 .big{font-size:1.9em;font-weight:700;line-height:1.1}
 .unit{font-size:.5em;color:#9e9e9e;font-weight:400}
 .sub{font-size:.72em;color:#757575;margin-top:2px}
@@ -377,10 +379,11 @@ function update(d){
     kv('BMS setpoint V / A',f(cmd.voltage_v)+' / '+f(cmd.current_a))+'</div>';
   // Kelly e-hydraulic pump controller (RejsaCAN ENABLE_KELLY build only). The
   // card renders only when the firmware is emitting `kelly`; absent otherwise,
-  // so non-Kelly tractors/boards are unaffected. Freshness is gated firmware-
-  // side, so a present object is a live reading.
+  // so non-Kelly tractors/boards are unaffected. The firmware keeps emitting
+  // last-known values after the pump goes quiet (key-off), flagged `stale`;
+  // the card stays put and greys out rather than vanishing.
   if(d.kelly){
-    bot+='<div class="card tap" style="grid-column:1/-1" onclick="openDetail(\'kelly\')"><h3>Hydraulic Pump (Kelly)</h3>'+
+    bot+='<div class="card tap'+(k.stale?' stale':'')+'" style="grid-column:1/-1" onclick="openDetail(\'kelly\')"><h3>Hydraulic Pump (Kelly)</h3>'+
       kv('B+ voltage',k.b_plus_v!=null?k.b_plus_v+' V':'–')+
       kv('Pump RPM',k.motor_speed_rpm!=null?k.motor_speed_rpm:'–')+
       kv('Phase current',k.phase_current_a!=null?k.phase_current_a+' A':'–')+
@@ -504,7 +507,7 @@ function renderKellyDetail(d){
     '<div class="card note">Switch, pedal, hall and direction detail appear '+
     'only over Wi-Fi — the Bluetooth payload omits them to save bandwidth.</div>';
   el.innerHTML=note+
-    '<div class="card"><h3>Live</h3>'+
+    '<div class="card'+(k.stale?' stale':'')+'"><h3>Live</h3>'+
       kv('B+ voltage',k.b_plus_v!=null?k.b_plus_v+' V':'–')+
       kv('Pump RPM',k.motor_speed_rpm!=null?k.motor_speed_rpm:'–')+
       kv('Phase current',k.phase_current_a!=null?k.phase_current_a+' A':'–')+

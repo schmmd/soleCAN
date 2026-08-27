@@ -1982,11 +1982,14 @@ String buildJson(bool pretty = true, bool minimal = false) {
     }
 
 #if defined(ENABLE_KELLY)
-    // Kelly e-hydraulic pump controller. Emitted only while fresh; when the pump
-    // system is unpowered the controller goes silent and the object drops out
-    // (the dashboard then hides its card). Key names match dashboard.html.
-    if (g_kelly.valid && (millis() - g_kelly.last_seen_ms) < KELLY_STALE_MS) {
+    // Kelly e-hydraulic pump controller. Emitted once we have ever decoded a
+    // block this boot, so the card stays put (showing last-known values) when
+    // the pump system is unpowered and the controller goes silent. `stale`
+    // says those values have stopped updating; the dashboard greys the card.
+    // Key names match dashboard.html.
+    if (g_kelly.valid) {
         auto k = doc["kelly"].to<JsonObject>();
+        k["stale"]             = (millis() - g_kelly.last_seen_ms) >= KELLY_STALE_MS;
         k["b_plus_v"]          = g_kelly.b_plus_v;
         k["motor_speed_rpm"]   = g_kelly.motor_speed_rpm;
         k["phase_current_a"]   = g_kelly.phase_current_a;
