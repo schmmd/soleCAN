@@ -29,11 +29,42 @@ exactly the UART topology. 2500 V RMS isolation, >=1 Mbps (50x headroom
 over the link's 19200 Bd). Sold on ~$3-8 breakout boards, often labeled
 "CJMCU-1201". Any speed grade (A/B/C suffix) works.
 
-Do NOT substitute:
-  - ISO1540 / ADuM1250 / ADuM1251 — those are I2C isolators (bidirectional
-    open-drain with arbitration); driving them with push-pull UART fights
-    their design.
-  - TI ISO7721 is a fine equivalent if a breakout of it is easier to get.
+Cheaper drop-in: 2Pai Semi pi122U31, ~$0.26 against ~$4.82 for an
+ADuM1201ARZ. Identical SOIC-8 pinout, better isolation and CMTI, and its
+150 kbps ceiling still leaves 8x headroom at 19200 Bd.
+
+Cross-vendor drop-ins
+---------------------
+Every vendor numbers the three channel arrangements differently: pi121 is
+not the NSi8221 equivalent, and CA-IS3721 is not either. Use the middle
+column, never infer from the digits.
+
+  vendor        2 fwd / 0 rev    1/1, ADuM1201        1/1, mirrored
+                (cannot UART)    pin order (USE)      (not a drop-in)
+  ADI           ADuM1200         ADuM1201             --
+  2Pai Semi     pi120U31         pi122U31             pi121U31
+  NOVOSENSE     NSi8220          NSi8221              NSi8222
+  Chipanalog    CA-IS3720        CA-IS3722            CA-IS3721
+  NVE           IL711            IL721                IL712
+
+Middle column verified against each vendor's own datasheet pin table. All
+SOIC-8, all 1..8 = VDD1/VOA/VIB/GND1/GND2/VOB/VIA/VDD2, all fine at 5 V
+one side and 3.3 V the other (prices Aug 2026, qty 1-5):
+
+  part                    iso       max rate    CMTI        price
+  2Pai pi122U31           3.0 kV    150 kbps    250 kV/us   $0.26
+  Chipanalog CA-IS3722HS  3.75 kV   150 Mbps    150 kV/us   $0.22
+  NOVOSENSE NSi8221N1     3.75 kV   150 Mbps    250 kV/us   $0.56
+  NVE IL721-3E            2.5 kV    110 Mbps    100 kV/us   ~$5
+  ADI ADuM1201ARZ         2.5 kV      1 Mbps     25 kV/us   $4.82
+
+Take the default-output-HIGH variant: pi122U31 (trailing 1), CA-IS3722HS
+(H), NSi8221N1 (N1), ADuM1201ARZ. The key-off behavior note at the bottom
+of this file depends on it, and the IL721-3E has no defined default at all.
+
+CA-IS3722HS is the better chip (Schmitt inputs, 5 ns min pulse) at the same
+price; the pi122U31 wins on stock alone. ADI's own ADuM121N is marketed as
+ADuM1201-compatible, but its pin table is unverified here.
 
 Isolated-side power: 12 V -> 5 V
 --------------------------------
@@ -107,7 +138,10 @@ middle of one small (~3 x 4 cm) perfboard:
 
 Bill of materials (~$10)
 ------------------------
-  - ADuM1201 breakout board ("CJMCU-1201")
+  - Isolator chip. The PCB in isolator-pcb/ takes a bare SOIC-8 soldered
+    directly — either an ADuM1201 or a pi122U31 from the table above. The
+    CJMCU-1201 breakout is only for the perfboard packaging described
+    above; it is not used on the PCB.
   - 78L05 + 0.33 uF + 0.1 uF ceramics (or AMS1117-5.0 module)
   - LED + 1 kOhm resistor
   - perfboard ~3 x 4 cm, two 4-pin JST-XH pairs (or screw terminals),

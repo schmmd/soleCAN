@@ -63,6 +63,8 @@ P_GND = (44.5, 23.0)
 # authority; U1 below is checked against it so a mis-assigned pin can't reach
 # fab again. Side 1 runs VDD1/VOA/VIB/GND1 top-to-bottom -- it is NOT the
 # mirror image of side 2, which is the trap that shipped rev A.
+# 2Pai Semi pi122U31 shares this pinout exactly (its Table 3) and drops in;
+# pi120U31/pi121U31 do NOT -- wrong channel directions for a UART.
 ADUM1201 = {1: "VDD1", 2: "VOA", 3: "VIB", 4: "GND1",
             5: "GND2", 6: "VOB", 7: "VIA", 8: "VDD2"}
 # which ADuM1201 pin function each board net is supposed to land on

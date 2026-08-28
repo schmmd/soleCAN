@@ -138,8 +138,11 @@ never be tied together.
 
 - U1 — ADuM1201 (any speed grade), **SOIC-8 soldered directly**; the
   CJMCU-1201 breakout from the build plan is not needed on this board.
-  TI ISO7721 (same package) does *not* drop in — different pinout; check
-  before substituting.
+  Verified cheaper drop-ins are in the cross-vendor table in
+  `../isolator.txt`; **2Pai Semi π122U31** (~$0.26) is the current pick.
+  Check that table before substituting — the sibling part numbers
+  (π121U31, NSi8222, CA-IS3721) are mirrored rather than drop-in, and TI
+  ISO7721 has a different pinout again.
 - U2 — 78L05, TO-92. **Flat side faces the bottom edge — the D1 "5V ON" LED
   row** — matching the silk outline; that puts V_OUT in the `O` hole. Note the
   ST L78L datasheet's TO-92 figure is a *bottom* view (its caption says so),
