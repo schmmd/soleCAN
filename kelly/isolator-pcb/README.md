@@ -1,12 +1,9 @@
 # Kelly UART isolator PCB
 
-Status: **PLANNED — rev B, not yet fabbed.** Rev A was fabbed and is
-**scrapped**; see [Rev A erratum](#rev-a-erratum) before soldering anything to
-a board you already have. PCB realization of `../isolator.txt` — a galvanic
-isolator dongle between the Kelly KLS7218M SM-4P port (floating, traction-pack
-referenced) and the OBD-powered RejsaCAN. Electrical design rationale, part
-choices, and behavior notes live in `../isolator.txt`; this directory only
-adds the board.
+PCB realization of `../isolator.txt` — a galvanic isolator dongle between the
+Kelly KLS7218M SM-4P port (floating, traction-pack referenced) and the
+OBD-powered RejsaCAN. Electrical design rationale, part choices, and behavior
+notes live in `../isolator.txt`; this directory only adds the board.
 
 ## Files
 
@@ -136,9 +133,7 @@ never be tied together.
 
 ## BOM (matches ../isolator.txt except the breakout)
 
-- U1 — ADuM1201 (any speed grade), **SOIC-8 soldered directly**; the
-  CJMCU-1201 breakout from the build plan is not needed on this board.
-  Verified cheaper drop-ins are in the cross-vendor table in
+- U1 — ADuM1201 (any speed grade), **SOIC-8 soldered directly**. Verified cheaper drop-ins are in the cross-vendor table in
   `../isolator.txt`; **2Pai Semi π122U31** (~$0.26) is the current pick.
   Check that table before substituting — the sibling part numbers
   (π121U31, NSi8222, CA-IS3721) are mirrored rather than drop-in, and TI

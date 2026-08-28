@@ -1,9 +1,8 @@
 Kelly UART galvanic isolator — build plan
 =========================================
 
-Status: PLANNED (not yet built/validated). Expected result: OBD-powered
-RejsaCAN reads the Kelly with the same ~99% frame success as a floating
-USB-powered board.
+Goal: an OBD-powered RejsaCAN reads the Kelly with the same ~99% frame
+success as a floating USB-powered board.
 
 Why
 ---
@@ -26,8 +25,7 @@ Part choice
 -----------
 ADuM1201 dual-channel digital isolator, one channel in each direction —
 exactly the UART topology. 2500 V RMS isolation, >=1 Mbps (50x headroom
-over the link's 19200 Bd). Sold on ~$3-8 breakout boards, often labeled
-"CJMCU-1201". Any speed grade (A/B/C suffix) works.
+over the link's 19200 Bd). Any speed grade (A/B/C suffix) works.
 
 Cheaper drop-in: 2Pai Semi pi122U31, ~$0.26 against ~$4.82 for an
 ADuM1201ARZ. Identical SOIC-8 pinout, better isolation and CMTI, and its
@@ -116,36 +114,22 @@ Note the ADuM1201's input thresholds scale with each side's own VDD, so
 the Kelly side must actually be powered at 5 V; at 3.3 V it would
 under-drive the Kelly's Rx again.
 
-Packaging
----------
-Build it as an inline dongle on the harness, isolation barrier down the
-middle of one small (~3 x 4 cm) perfboard:
-
- 1. Regulator + caps + LED on the Kelly third, ADuM1201 breakout across
-    the middle, board-side connector on the other third. Iron rule: no
-    wire, trace, or component leg crosses the middle except the isolator
-    itself — that gap IS the isolation.
- 2. A 4-pin connector (JST-XH or screw terminals) on each end makes the
-    dongle removable. Kelly side: red/green/blue/black in SM-4P harness
-    order. Board side: 3V3, GND, GPIO47, GPIO48.
- 3. Twist the pairs in the Kelly-side cable (green+black, blue+red), keep
-    that run short, and route it away from the pump phase leads. The
-    board-side run is noise-immune by construction.
- 4. Zip-tie both cables through holes in the perfboard corners for strain
-    relief, then sleeve the whole board in large-diameter heatshrink or a
-    small project box, LED visible.
- 5. Label both ends (KELLY / REJSACAN) — the dongle looks symmetric.
+Cabling
+-------
+Twist the pairs in the Kelly-side cable (green+black, blue+red), keep that
+run short, and route it away from the pump phase leads. The board-side run
+is noise-immune by construction. Label both ends (KELLY / REJSACAN) — the
+dongle looks symmetric.
 
 Bill of materials (~$10)
 ------------------------
-  - Isolator chip. The PCB in isolator-pcb/ takes a bare SOIC-8 soldered
-    directly — either an ADuM1201 or a pi122U31 from the table above. The
-    CJMCU-1201 breakout is only for the perfboard packaging described
-    above; it is not used on the PCB.
+  - the PCB from isolator-pcb/ (2-layer, 50 x 32 mm)
+  - isolator chip: bare SOIC-8, ADuM1201 or pi122U31 (see the table
+    above), soldered directly to the board
   - 78L05 + 0.33 uF + 0.1 uF ceramics (or AMS1117-5.0 module)
   - LED + 1 kOhm resistor
-  - perfboard ~3 x 4 cm, two 4-pin JST-XH pairs (or screw terminals),
-    heatshrink, twisted hookup wire
+  - twisted hookup wire for both runs; enclosure options are in
+    isolator-pcb/README.md
 
 Behavior notes
 --------------

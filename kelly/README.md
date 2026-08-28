@@ -69,7 +69,7 @@ still open:
    boot ROM also prints on TXD0 at every reset. The Kelly UART now uses plain
    GPIOs 47/48 — fixed, CONFIRMED.
 3. **Chassis-vs-traction grounding** (below) still degrades the link when the
-   board runs on OBD power; `isolator.txt` documents the planned fix.
+   board runs on OBD power; `isolator.txt` documents the fix.
 
 The ~19,900 edge-timing figure was measured through problems 1 and 2 together
 and is void; the auto-baud sweep has been removed and all tooling pins 19200.
