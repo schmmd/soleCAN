@@ -610,6 +610,8 @@ void logLine(const char* fmt, ...);   // defined with the device log ring below
 #define SD_RAW_RING_BYTES   (1024UL * 1024)           // PSRAM ring for raw .asc
 #define SD_JSON_RING_BYTES  (256UL * 1024)            // PSRAM ring for json lines
 #define SD_FREE_CHECK_MS    10000                     // usedBytes() is slow — poll sparingly
+#define SD_MOUNT_ATTEMPTS   4                         // boot probe tries before giving up
+#define SD_MOUNT_HZ         4000000UL                 // data-phase clock (init is always 400 kHz)
 #define SD_RECOVER_ATTEMPTS 5                         // remount tries before latching error
 #define SD_RECOVER_DELAY_MS 250                       // backoff base between remount tries
 #define SD_WRITE_CHUNK_BYTES 8192                     // batch writes into bursts this size
@@ -968,11 +970,28 @@ static void sdInit() {
     }
 
     SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
-    if (!SD.begin(SD_CS_PIN)) {
+    // Retry the probe: a marginal card or reader can miss the first attempt.
+    // The driver always runs its init handshake at 400 kHz, so only the data
+    // phase uses this clock — halve it for the later tries in case 4 MHz is
+    // what the signal path can't hold. Logging the winning attempt/clock keeps
+    // a recovered mount from hiding a reader that's on its way out.
+    int attempt = 1;
+    uint32_t hz = SD_MOUNT_HZ;
+    for (; attempt <= SD_MOUNT_ATTEMPTS; attempt++) {
+        hz = attempt <= 2 ? SD_MOUNT_HZ : SD_MOUNT_HZ / 4;
+        if (SD.begin(SD_CS_PIN, SPI, hz)) break;
+        SD.end();
+        delay(SD_RECOVER_DELAY_MS * attempt);
+    }
+    if (attempt > SD_MOUNT_ATTEMPTS) {
         g_sd.state = "no_card";
-        logLine("SD: no card at boot — the card is probed only at startup");
+        logLine("SD: no card at boot after %d probes — the card is probed "
+                "only at startup", SD_MOUNT_ATTEMPTS);
         return;
     }
+    if (attempt > 1)
+        logLine("SD: mounted on probe %d at %u kHz — marginal card or reader",
+                attempt, (unsigned)(hz / 1000));
     if (!sdStartSession()) {
         g_sd.fail_op = "start_session";
         g_sd.state   = "error";
