@@ -21,21 +21,36 @@ The isolator also replaces the two level-shift hacks: run its Kelly side at
 at a full 5 V, while the board side regenerates everything at 3.3 V. The
 ~1-2.2 kOhm series resistor on the RX line is no longer needed.
 
-Part choice
------------
-ADuM1201 dual-channel digital isolator, one channel in each direction —
-exactly the UART topology. 2500 V RMS isolation, >=1 Mbps (50x headroom
-over the link's 19200 Bd). Any speed grade (A/B/C suffix) works.
+Isolator options
+----------------
+Any dual-channel digital isolator with one channel in each direction, in
+SOIC-8, pins 1..8 = VDD1/VOA/VIB/GND1/GND2/VOB/VIA/VDD2. Take the
+default-output-HIGH variant of whichever part — the key-off behavior note
+at the bottom of this file depends on it. All of these are happy at 5 V on
+the Kelly side and 3.3 V on the board side, and all are far faster than
+the link's 19200 Bd needs. Prices Aug 2026, qty 1-5:
 
-Cheaper drop-in: 2Pai Semi pi122U31, ~$0.26 against ~$4.82 for an
-ADuM1201ARZ. Identical SOIC-8 pinout, better isolation and CMTI, and its
-150 kbps ceiling still leaves 8x headroom at 19200 Bd.
+  - NOVOSENSE NSi8221N1-DSPR — $1.08 at DigiKey, US stock. 3.75 kV,
+    150 Mbps, 200 kV/us CMTI, AEC-Q100. The pick if you want one this
+    week without an international order.
+  - 2Pai Semi pi122U31 — $0.26, LCSC/JLCPCB only, no US distribution.
+    3.0 kV, 150 kbps (still 8x headroom at 19200 Bd), 250 kV/us. Cheapest
+    by far, and effectively free riding along on a JLCPCB board order.
+  - Chipanalog CA-IS3722HS — $0.22 at LCSC. 3.75 kV, 150 Mbps, Schmitt
+    inputs, 5 ns min pulse. Best of the lot on paper, but was out of
+    stock when checked.
+  - ADI ADuM1201ARZ — $4.82, the original. 2.5 kV, 1 Mbps, 25 kV/us: the
+    worst specs here at ~5x the price. Kept only because the board and
+    these docs are written around its pinout.
+  - NVE IL721-3E — $8.05 at DigiKey, fabbed in Minnesota. Only if US
+    manufacture is the requirement: its datasheet defines NO default
+    output state for an unpowered input side, so key-off would be
+    undefined rather than idle-high.
 
-Cross-vendor drop-ins
----------------------
-Every vendor numbers the three channel arrangements differently: pi121 is
-not the NSi8221 equivalent, and CA-IS3721 is not either. Use the middle
-column, never infer from the digits.
+Every vendor numbers the three channel arrangements differently, so the
+part numbers rhyme and mean opposite things. The middle column below is
+verified against each vendor's own datasheet pin table; check anything
+not on this list the same way before ordering.
 
   vendor        2 fwd / 0 rev    1/1, ADuM1201        1/1, mirrored
                 (cannot UART)    pin order (USE)      (not a drop-in)
@@ -44,25 +59,6 @@ column, never infer from the digits.
   NOVOSENSE     NSi8220          NSi8221              NSi8222
   Chipanalog    CA-IS3720        CA-IS3722            CA-IS3721
   NVE           IL711            IL721                IL712
-
-Middle column verified against each vendor's own datasheet pin table. All
-SOIC-8, all 1..8 = VDD1/VOA/VIB/GND1/GND2/VOB/VIA/VDD2, all fine at 5 V
-one side and 3.3 V the other (prices Aug 2026, qty 1-5):
-
-  part                    iso       max rate    CMTI        price
-  2Pai pi122U31           3.0 kV    150 kbps    250 kV/us   $0.26
-  Chipanalog CA-IS3722HS  3.75 kV   150 Mbps    150 kV/us   $0.22
-  NOVOSENSE NSi8221N1     3.75 kV   150 Mbps    250 kV/us   $0.56
-  NVE IL721-3E            2.5 kV    110 Mbps    100 kV/us   ~$5
-  ADI ADuM1201ARZ         2.5 kV      1 Mbps     25 kV/us   $4.82
-
-Take the default-output-HIGH variant: pi122U31 (trailing 1), CA-IS3722HS
-(H), NSi8221N1 (N1), ADuM1201ARZ. The key-off behavior note at the bottom
-of this file depends on it, and the IL721-3E has no defined default at all.
-
-CA-IS3722HS is the better chip (Schmitt inputs, 5 ns min pulse) at the same
-price; the pi122U31 wins on stock alone. ADI's own ADuM121N is marketed as
-ADuM1201-compatible, but its pin table is unverified here.
 
 Isolated-side power: 12 V -> 5 V
 --------------------------------
@@ -73,8 +69,8 @@ isolator directly; regulate it down:
 
   - 78L05 (TO-92) + 0.33 uF ceramic on IN and 0.1 uF on OUT, both right at
     the regulator. Load is a few mA, so dissipation is ~40 mW — no heat
-    sink. A pre-made AMS1117-5.0 breakout module is an equivalent
-    no-soldering option.
+    sink. A TO-220 LM7805 (or L7805CV) works with the same two caps if
+    that is what is in the drawer.
   - Do not use a switching buck module: at 5 mA there is no efficiency
     argument, and it puts converter hash next to the UART lines.
   - Optional but useful: LED + 1 kOhm across the 5 V rail. It lights only
@@ -124,9 +120,8 @@ dongle looks symmetric.
 Bill of materials (~$10)
 ------------------------
   - the PCB from isolator-pcb/ (2-layer, 50 x 32 mm)
-  - isolator chip: bare SOIC-8, ADuM1201 or pi122U31 (see the table
-    above), soldered directly to the board
-  - 78L05 + 0.33 uF + 0.1 uF ceramics (or AMS1117-5.0 module)
+  - isolator chip: bare SOIC-8 soldered directly to the board
+  - 78L05 (or LM7805) + 0.33 uF + 0.1 uF ceramics
   - LED + 1 kOhm resistor
   - twisted hookup wire for both runs; enclosure options are in
     isolator-pcb/README.md

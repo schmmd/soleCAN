@@ -133,7 +133,7 @@ never be tied together.
 
 ## BOM (matches ../isolator.txt except the breakout)
 
-- U1 — ADuM1201 (any speed grade), **SOIC-8 soldered directly**. Verified cheaper drop-ins are in the cross-vendor table in
+- U1 — ADuM1201 (any speed grade), **SOIC-8 soldered directly**. Cheaper verified drop-ins are under "Isolator options" in
   `../isolator.txt`; **2Pai Semi π122U31** (~$0.26) is the current pick.
   Check that table before substituting — the sibling part numbers
   (π121U31, NSi8222, CA-IS3721) are mirrored rather than drop-in, and TI
@@ -144,7 +144,7 @@ never be tied together.
   so reading it as a front view flips IN and OUT: in backwards you get ~9.7 V
   on the 5 V rail, back-fed through the pass device. Silk `O G I` marks
   OUT/GND/IN and is authoritative — the holes are +5V_K, GND1, +12V_K left to
-  right. The 1.1 mm drills also take a TO-220 **L7805CV**, whose
+  right. The 1.1 mm drills also take a TO-220 **LM7805 / L7805CV**, whose
   IN/OUT pins are mirrored vs. the 78L05 — insert it facing the opposite
   way and match the legs to the `O G I` letters. Bend it flat toward the
   board edge if the box lid is tight.
