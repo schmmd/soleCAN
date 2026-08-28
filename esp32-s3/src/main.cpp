@@ -598,6 +598,8 @@ extern const uint8_t dashboard_html_end[]   asm("_binary_src_dashboard_html_end"
 // inserted later).
 #if defined(HAS_SD)
 
+void logLine(const char* fmt, ...);   // defined with the device log ring below
+
 // ── Tunables ──
 #ifndef SD_JSON_HZ
 #define SD_JSON_HZ          1                         // decoded-snapshot cadence
@@ -961,21 +963,28 @@ static void sdInit() {
     if (!g_sd_mutex || !sdInitRing(g_sd_raw) || !sdInitRing(g_sd_json)) {
         g_sd.fail_op = "ring_alloc";
         g_sd.state   = "error";
+        logLine("SD: init failed at ring_alloc");
         return;
     }
 
     SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
-    if (!SD.begin(SD_CS_PIN)) { g_sd.state = "no_card"; return; }
+    if (!SD.begin(SD_CS_PIN)) {
+        g_sd.state = "no_card";
+        logLine("SD: no card at boot — the card is probed only at startup");
+        return;
+    }
     if (!sdStartSession()) {
         g_sd.fail_op = "start_session";
         g_sd.state   = "error";
         SD.end();
+        logLine("SD: init failed at start_session");
         return;
     }
 
     g_sd.state = "logging";
     xTaskCreatePinnedToCore(sdWriterTask, "sdwriter", 8192, nullptr, 1, nullptr, 0);
     g_sd_active = true;   // arm the producer last, once everything is ready
+    logLine("SD: mounted, logging session %u", g_sd.session);
 }
 
 #endif  // HAS_SD
