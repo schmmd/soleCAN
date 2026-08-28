@@ -79,6 +79,8 @@ isolator directly; regulate it down:
 
 Wiring
 ------
+isolator.svg draws all of this out, including the passives.
+
         KELLY SIDE (floating)      | barrier |      BOARD SIDE (chassis)
                                    |         |
  red ---> 78L05 ---> 5V ---> VDD1 -| ADuM    |- VDD2 <--- 3V3
