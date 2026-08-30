@@ -85,10 +85,15 @@ valid checksummed frames through the dongle: the Kelly's rate is fixed, so the
 dongle's UART had to match, and the bridge had to be byte-transparent or the
 19-byte checksum would break. That argument was sound and its conclusion held,
 but it could not rule out auto-bauding, and it could not distinguish 8N1 from
-other framings — which is why **frame format remains TENTATIVE**. Transparency
-is likewise only spot-checked so far (`0x55`, and printable text with CR/LF in
-both directions); the bytes most likely to break a naive bridge — `0x00`,
-`0x11`/`0x13`, `0x1A`, and the high-bit range — have not been swept.
+other framings — which is why **frame format remains TENTATIVE**.
+
+**Byte transparency has since been swept — CONFIRMED.** Over a direct RFCOMM
+channel with a CH340 on the dongle's wire side, `00 01 02 03 11 13 1a 7f 80 81
+fe ff` was sent Bluetooth→wire and arrived byte-for-byte and in order, and
+`a1 a2 a3 a4 a5 a6` sent wire→Bluetooth likewise. That covers null, XON/XOFF,
+EOF, `0x7F`, and the high-bit range — the bytes that break a naive bridge. The
+dongle adds no framing, escaping, or flow-control interception in either
+direction.
 
 Note that the *host* side tells you nothing about the wire. Over SPP the
 `/dev/cu.*` node is a virtual port on an RFCOMM channel, and the rate set on it
@@ -290,6 +295,40 @@ anything else.
 The general rule: **gate on a data probe, not on connection status.** Send a
 byte and require it to arrive.
 
+#### Cause: the `/dev/cu.*` node, not the dongle — CONFIRMED
+
+Reproduced on a second Mac (Apple Silicon, macOS 15, BCM_4388C2) and traced.
+The fault is entirely in the host's tty-to-RFCOMM bridge:
+
+- Opening `/dev/cu.26061702` returns in **0.00 s**, emits **no Bluetooth log
+  activity whatsoever** (`log stream` on the Bluetooth subsystem is silent),
+  and passes zero bytes. The `/dev/tty.*` node, which should block for carrier,
+  behaves identically.
+- The pairing record is correct. `defaults read /Library/Preferences/com.apple.Bluetooth`
+  shows `PersistentPorts -> "20:24:06:19:06:77" = { BSDName = 26061702;
+  RFCOMMChannel = 1; }`.
+- The dongle is fine: a Classic inquiry answers, and an SDP query returns one
+  service record on **RFCOMM channel 1, UUID 1101** (Serial Port).
+- Toggling the Bluetooth radio recreates the `/dev` node and changes nothing.
+- `blueutil --connect` brings up the *baseband* link (`--is-connected` → 1, and
+  it stays 1 while the port is held open — this is not the Settings flicker),
+  but the LED keeps blinking, so **no RFCOMM session ever opens**. This is why
+  `--is-connected` is worthless here: it reports ACL, not SPP.
+
+**Opening the RFCOMM channel directly through IOBluetooth works on the same
+machine**, with the tty layer bypassed entirely. Verified against a CH340 wired
+to the dongle's SM-4P data pins (the step-3 rig below): bytes written to the
+channel appeared on the wire byte-for-byte and in order.
+
+This is what `kelly/kelly_rfcomm.py` does, so `solectrac-kelly-monitor.py` and
+`solectrac-kelly-dump-config.py` now take the RFCOMM path automatically when
+`--port` names a paired dongle. See `README.md` §"Bluetooth (SPP)".
+
+Two things this does **not** establish: *why* macOS declines to bridge the node
+(the daemon logs nothing, so there is no failure to read), and whether the
+Intel Mac's earlier failure has the same root cause — its reported symptoms
+differed slightly, in that Settings showed **Connected** without being forced.
+
 ### Phone-in-the-loop, when the host's SPP stack won't cooperate
 
 A host that cannot open an SPP session can still characterize the dongle
@@ -321,14 +360,17 @@ Answering any of these would tighten this document:
 - **Connected-state current draw** of the official dongle, which is the honest
   number for regulator sizing — the one remaining number that a bench session
   with the genuine unit would settle.
-- **Full byte transparency.** Only `0x55` and printable text have been passed in
-  anger. The sweep that matters — `0x00`, `0x11`/`0x13`, `0x1A`, `0x80`–`0xFF` —
-  is described under "Phone-in-the-loop" and has not been run.
+- ~~**Full byte transparency.**~~ **Answered** — the sweep was run over a direct
+  RFCOMM channel and passes in both directions. See "The official adapter, as
+  measured" above.
 - **The frame format.** 19200 is measured; 8N1 is assumed from the Kelly side
   and has never been distinguished from 8N2 or a parity setting.
-- **Why macOS associates but passes no data**, and whether it affects all Macs
-  or one machine. A working host would also finally settle latency and
-  throughput, which the phone rig cannot measure.
+- **Why macOS associates but passes no data.** *Partly answered:* the fault is
+  the host's `/dev/cu.*` tty-to-RFCOMM bridge, and opening the RFCOMM channel
+  through IOBluetooth directly works on the same Mac — see "Cause: the
+  `/dev/cu.*` node, not the dongle" above. Still open: *why* the bridge declines
+  (the Bluetooth daemon logs nothing at all), and whether the Intel Mac fails
+  the same way. Latency and throughput are now measurable but still unmeasured.
 - **Whether SM-4P pin 1 is live with the tractor off** — the dongle pairs long
   before the controller talks, but it is not recorded whether pin 1 is always
   hot or comes up with the key.

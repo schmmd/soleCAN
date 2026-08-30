@@ -62,6 +62,11 @@ presentation in the consumer.
   transmit choke-point allows only the monitor/version query commands, so it
   cannot write controller config. Connector pinout, wire protocol, and field
   map are in `kelly/README.md`.
+- `kelly_rfcomm.py` — shared transport for both Kelly tools. `open_port()`
+  returns a `serial.Serial` for a USB adapter, or an `RFCOMMPort` (macOS
+  IOBluetooth, `[bluetooth]` extra) when `--port` names a paired SPP dongle,
+  because the `/dev/cu.<name>` node is inert on some Macs. Bytes only — the
+  read-only guard stays in each tool's `_transmit()`.
 
 ### Embedded firmware (`esp32-s3/`)
 ESP32-S3 firmware that re-implements the main-bus J1939 decode in C++ and

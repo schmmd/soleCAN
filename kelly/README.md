@@ -277,6 +277,44 @@ macOS gotchas, learned the hard way:
 - **One host at a time.** These adapters accept a single connection, so
   disconnect the phone / Kelly app (turn the phone's Bluetooth off) before the
   Mac can use it.
+- **On some Macs `/dev/cu.<name>` is inert** — it opens, accepts writes, and
+  passes zero bytes forever, while Bluetooth Settings still says Connected. The
+  tools now work around this automatically (below); if you are debugging by
+  hand with `screen` or `pyserial`, this is what you are hitting, and the
+  dongle's blinking LED is the giveaway.
+
+#### Bluetooth needs the `bluetooth` extra
+
+Because of that inert-node bug, the tools do not go through `/dev/cu.*` for
+Bluetooth at all. `kelly_rfcomm.py` opens the Classic RFCOMM channel directly
+through the macOS IOBluetooth framework, which works on Macs where the serial
+node does not. Install it once:
+
+```bash
+pip install '.[bluetooth]'      # or: uv sync --extra bluetooth
+```
+
+Then pass the dongle either way — both reach the same RFCOMM path:
+
+```bash
+# the serial node macOS names after the device (recognised, not opened as a tty)
+python3 solectrac-kelly-monitor.py --port /dev/cu.26061702 --tui
+
+# or the Bluetooth address directly, if the node does not exist
+python3 solectrac-kelly-monitor.py --port 20-24-06-19-06-77 --tui
+```
+
+`--port` still takes a normal USB adapter (`/dev/cu.usbserial-XXXX`) and behaves
+exactly as before; the Bluetooth path is chosen only when the port names a
+paired device. `--baud` is ignored over Bluetooth — the wire rate is fixed by
+the dongle's own UART setting and nothing the host sets ever reaches the wire.
+The same applies to `solectrac-kelly-dump-config.py`.
+
+Without the extra installed, a Bluetooth port falls back to the old pyserial
+behaviour, which on an affected Mac means reading nothing.
+
+`kelly_rfcomm.py` transports bytes only — it has no notion of a Kelly frame, so
+the read-only command guard in each tool's `_transmit()` is unchanged.
 
 ### Validate before trusting the decode
 

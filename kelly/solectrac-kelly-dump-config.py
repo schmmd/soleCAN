@@ -49,6 +49,8 @@ try:
 except ImportError:
     sys.exit("This tool needs pyserial:  pip install pyserial")
 
+import kelly_rfcomm  # sits alongside this script; adds Bluetooth SPP transport
+
 
 # The controller transmits at its documented 19200 baud (see README "Actual
 # line rate"); matches the monitor and the RejsaCAN firmware.
@@ -253,15 +255,10 @@ class KellyConfigDumper:
         self.debug = debug
         self.ser = self._open()
 
-    def _open(self) -> "serial.Serial":
-        return serial.Serial(
-            port=self.port,
-            baudrate=self.baud,
-            bytesize=serial.EIGHTBITS,
-            parity=serial.PARITY_NONE,
-            stopbits=serial.STOPBITS_ONE,
-            timeout=0.15,
-        )
+    def _open(self):
+        # USB serial, or a Bluetooth RFCOMM channel if --port names a paired
+        # SPP dongle. See kelly_rfcomm for why /dev/cu.<name> isn't enough.
+        return kelly_rfcomm.open_port(self.port, self.baud, timeout=0.15)
 
     def reopen(self, retries: int = 5, delay: float = 1.0) -> None:
         """Close and reopen the port — used to recover a dropped Bluetooth link."""
