@@ -45,9 +45,11 @@ tractor.
 | Connected current | not yet measured | UNKNOWN |
 | TX idle level (dongle → Kelly Rx, blue) | **~4 V**, unloaded | CONFIRMED |
 | Internal UART rate | **19200** — measured, see below | CONFIRMED |
-| Frame format | 8N1 | TENTATIVE |
-| Byte transparency | no added framing or escaping | CONFIRMED |
+| Frame format | **8N1** — 10 bits/byte, from throughput | CONFIRMED |
+| Byte transparency | all 256 byte values, both directions | CONFIRMED |
 | Bridging | bidirectional, both directions verified at 19200 | CONFIRMED |
+| Latency, single byte | ~53 ms wire→host, ~27 ms host→wire (median) | CONFIRMED |
+| Throughput | 1691 B/s wire→host, 1914 B/s host→wire | CONFIRMED |
 | Session indicator | LED **steady** = SPP session up, **blinking** = none | CONFIRMED |
 | Module part | unidentified — no OUI, no teardown yet | UNKNOWN |
 
@@ -84,16 +86,20 @@ This supersedes the earlier deduction, which reasoned from the monitor pulling
 valid checksummed frames through the dongle: the Kelly's rate is fixed, so the
 dongle's UART had to match, and the bridge had to be byte-transparent or the
 19-byte checksum would break. That argument was sound and its conclusion held,
-but it could not rule out auto-bauding, and it could not distinguish 8N1 from
-other framings — which is why **frame format remains TENTATIVE**.
+but it could not rule out auto-bauding.
 
 **Byte transparency has since been swept — CONFIRMED.** Over a direct RFCOMM
-channel with a CH340 on the dongle's wire side, `00 01 02 03 11 13 1a 7f 80 81
-fe ff` was sent Bluetooth→wire and arrived byte-for-byte and in order, and
-`a1 a2 a3 a4 a5 a6` sent wire→Bluetooth likewise. That covers null, XON/XOFF,
-EOF, `0x7F`, and the high-bit range — the bytes that break a naive bridge. The
-dongle adds no framing, escaping, or flow-control interception in either
-direction.
+channel with a CH340 on the dongle's wire side, **all 256 byte values were sent
+in each direction and returned byte-for-byte identical**. Null, XON/XOFF,
+`0x1A`, `0x7F` and the entire high-bit range pass untouched; the dongle adds no
+framing, escaping, or flow-control interception in either direction.
+
+**Throughput settles the frame format.** Sustained transfer measured 1914 B/s
+host→wire and 1691 B/s wire→host. A 19200 link carries 1920 B/s at 10 bits per
+byte (8N1) but only 1745 B/s at 11 (8N2, or 8E1 with parity), so a measured rate
+above the 11-bit ceiling means the framing is 8N1 — and the wire, not the
+Bluetooth link, is the bottleneck. Single-byte latency is ~53 ms wire→host and
+~27 ms host→wire, worth knowing when tuning poll timeouts.
 
 Note that the *host* side tells you nothing about the wire. Over SPP the
 `/dev/cu.*` node is a virtual port on an RFCOMM channel, and the rate set on it
@@ -108,6 +114,11 @@ locally. At the 19200 this document specifies that ceiling is 1600 B/s, far
 above anything the Kelly protocol needs, so it has never been visible in
 practice — but setting the port to a low rate would throttle the link with no
 obvious cause. Do not treat it as a formality that can be set to anything.
+
+This pacing is a property of the **tty** path specifically. Reached through
+IOBluetooth RFCOMM (`kelly_rfcomm.py`), the same dongle sustains 1914 B/s at a
+nominal 19200 — above the tty path's 1600 B/s ceiling — because no tty layer is
+between the caller and the channel.
 
 ## Clone specification
 
