@@ -152,3 +152,66 @@ never be tied together.
 - C2, C3 — 100 nF ceramic, 2.54 mm pitch (5 V and 3.3 V rails).
 - R1 — 1 kΩ axial, D1 — 5 mm LED ("5V ON" / Kelly-awake indicator; square
   pad = cathode).
+
+## DigiKey shopping list
+
+One board's worth, single-order from DigiKey. Qty-1 prices and stock read off
+the DigiKey product pages 2026-08-30; re-check before ordering. Board parts
+total **$2.73**, so ~$8.49 ground shipping dominates — order spares of the
+sub-dollar parts.
+
+| Ref | Qty | Part | DigiKey | $ ea | stock |
+|-----|-----|------|---------|------|-------|
+| U1  | 1 | NSi8221N1-DSPR (NOVOSENSE, SOIC-8) | [22188706](https://www.digikey.com/en/products/detail/novosense/NSI8221N1-DSPR/22188706) | 1.08 | 108 |
+| U2  | 1 | MC78L05ACPG (onsemi, TO-92) | [921041](https://www.digikey.com/en/products/detail/onsemi/MC78L05ACPG/921041) | 0.34 | 10.7k |
+| C1  | 1 | 0.33 µF 50 V X7R radial, 2.50 mm pitch — TDK FA14X7R1H334KNU06 | [5865807](https://www.digikey.com/en/products/detail/tdk-corporation/FA14X7R1H334KNU06/5865807) | 0.40 | 3.2k |
+| C2,C3 | 2 | 0.1 µF 50 V X7R radial, 2.50 mm pitch — Vishay K104K15X7RF5TL2 | [286538](https://www.digikey.com/en/products/detail/vishay-beyschlag-draloric-bc-components/K104K15X7RF5TL2/286538) | 0.29 | 220k |
+| R1  | 1 | 1 kΩ 1/4 W axial — Stackpole CF14JT1K00 | [1741314](https://www.digikey.com/en/products/detail/stackpole-electronics-inc/CF14JT1K00/1741314) | 0.10 | 599k |
+| D1  | 1 | 5 mm green LED — Kingbright WP7113SGC | [1747672](https://www.digikey.com/en/products/detail/kingbright/WP7113SGC/1747672) | 0.23 | 54k |
+
+**U1 stock is thin** — 108 pieces, and DigiKey is not accepting backorders on
+it ("temporarily constrained supply"). Buy two while they are there.
+
+**U1 substitution:** `NSi8221N1` is the 1-fwd/1-rev, ADuM1201-pin-order part —
+the one this board needs. `NSi8220`/`NSi8222` are **not** drop-ins (see the
+channel-arrangement table in `../isolator.txt`). The genuine
+[ADuM1201ARZ](https://www.digikey.com/en/products/detail/analog-devices-inc/ADUM1201ARZ/964322)
+also fits at ~$4.82 if you want the part the docs are written around.
+
+**C1 traps, both of them:** most 0.33 µF radial ceramics are 5.08 mm lead
+spacing and will not sit in the 2.54 mm holes — filter DigiKey on *Lead
+Spacing = 0.098" (2.50mm)*. And of the parts that do fit, price varies 6x for
+no electrical reason: KEMET's X7R C320C334K5R5TA is **$2.26**, more than the
+isolator chip. The TDK part above is the same 0.33 µF/50 V/X7R at $0.40.
+(KEMET's Z5U C320C334M5U5TA is $0.58, but Z5U is a much worse dielectric —
+take the TDK.)
+
+### Kelly-side SM-4P connector
+
+The Kelly port is JST **SM series**, 2.5 mm pitch (sold aftermarket as
+"SM 2.5").
+
+**Buy these from Amazon, not DigiKey.** Genuine JST housings ship empty and
+the crimp contacts are separate line items — and the socket contact that goes
+into the plug housing, `SHF-001T-0.8BS`, is **tape-and-reel only at DigiKey,
+5000-piece minimum** (~$144). There is no cut-tape option, so the DigiKey
+route cannot supply a complete plug for a one-off build.
+
+[SM 2.5 male/female plugs with 22 AWG pre-crimped silicone leads, 2–6 pin
+kit](https://www.amazon.com/dp/B0CLV48D6V) is the part previously bought for
+this build and confirmed to fit the Kelly port. Solder its flying leads
+straight into the board's through-hole pads — no crimper, no housing
+assembly, and cheaper than the genuine parts even before shipping.
+
+For reference, the genuine parts if you ever do want them (prices/stock
+2026-08-30):
+
+| Part | DigiKey | $ | note |
+|------|---------|---|------|
+| SMP-04V-BC — 4-pos plug housing | [7230521](https://www.digikey.com/en/products/detail/jst-sales-america-inc/SMP-04V-BC/7230521) | 0.16 | takes SHF sockets |
+| SMR-04V-B — 4-pos receptacle housing | [2137107](https://www.digikey.com/en/products/detail/jst-sales-america-inc/SMR-04V-B/2137107) | 0.18 | takes SYM pins |
+| SYM-001T-P0.6(N) — pin contact, 22–28 AWG | [1465026](https://www.digikey.com/en/products/detail/jst-sales-america-inc/SYM-001T-P0-6-N/1465026) | 0.10 | → into SMR, cut tape, MOQ 1 |
+| SHF-001T-0.8BS — socket contact, 22–28 AWG | [527351](https://www.digikey.com/en/products/detail/jst-sales-america-inc/SHF-001T-0-8BS/527351) | 0.029 | → into SMP, **reel only, MOQ 5000** |
+
+Wire per `../isolator.txt` "Cabling": twist green+black and blue+red, keep the
+Kelly run short, label both ends.
