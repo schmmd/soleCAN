@@ -985,12 +985,12 @@ static void sdInit() {
     }
     if (attempt > SD_MOUNT_ATTEMPTS) {
         g_sd.state = "no_card";
-        logLine("SD: no card at boot after %d probes — the card is probed "
+        logLine("SD: no card at boot after %d probes - the card is probed "
                 "only at startup", SD_MOUNT_ATTEMPTS);
         return;
     }
     if (attempt > 1)
-        logLine("SD: mounted on probe %d at %u kHz — marginal card or reader",
+        logLine("SD: mounted on probe %d at %u kHz - marginal card or reader",
                 attempt, (unsigned)(hz / 1000));
     if (!sdStartSession()) {
         g_sd.fail_op = "start_session";
@@ -3613,6 +3613,16 @@ void setup() {
         if (err == ESP_OK) g_can_initialized = true;
     }
 
+#if defined(HAS_SD)
+    // Probe the microSD once. On success this arms g_sd_active and spawns the
+    // writer task; on no-card/failure it's a no-op and the firmware runs as a
+    // pure tap. Must precede loop(), which is where the producer is gated.
+    // Probed before the radios come up: card init is the most current-hungry
+    // thing on the 3.3 V rail, and WiFi/BLE bring-up is the noisiest, so this
+    // keeps the two off each other.
+    sdInit();
+#endif
+
 #if !defined(NO_WIFI)
     // Bring up the soft-AP first so the board is always reachable in the field
     // at 192.168.4.1 even if there's no home network in range. STA connect
@@ -3722,12 +3732,6 @@ void setup() {
     g_mcp_initialized = (g_mcp_init_err == 0);
 #endif
 
-#if defined(HAS_SD)
-    // Probe the microSD once. On success this arms g_sd_active and spawns the
-    // writer task; on no-card/failure it's a no-op and the firmware runs as a
-    // pure tap. Must precede loop(), which is where the producer is gated.
-    sdInit();
-#endif
 
 #if !defined(NO_BLE)
     bleInit();
