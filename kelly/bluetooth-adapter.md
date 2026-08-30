@@ -42,7 +42,7 @@ tractor.
 | Pairing PIN | **`1234`** | CONFIRMED |
 | Supply | SM-4P pin 1 (red, ~12 V out of the controller) | CONFIRMED |
 | Idle current | **~10 mA** at 12 V, powered but unpaired | CONFIRMED |
-| Connected current | not yet measured | UNKNOWN |
+| Connected current | **~10 mA** at 12 V — connected, idle or saturated | CONFIRMED |
 | TX idle level (dongle → Kelly Rx, blue) | **~4 V**, unloaded | CONFIRMED |
 | Internal UART rate | **19200** — measured, see below | CONFIRMED |
 | Frame format | **8N1** — 10 bits/byte, from throughput | CONFIRMED |
@@ -55,10 +55,19 @@ tractor.
 
 Two readings worth interpreting:
 
-**~10 mA idle** is low for an HC-05, which sits at 30–40 mA while discoverable
-with its LED blinking. That points at a lower-power module (a BK3231-class part
-such as a JDY-30/31) or one that idles more aggressively. It matters only for
-regulator sizing — see the note under Power below.
+**~10 mA, flat** is low for an HC-05, which sits at 30–40 mA while
+discoverable with its LED blinking. That points at a lower-power module (a
+BK3231-class part such as a JDY-30/31) or one that idles more aggressively.
+
+The figure does not move: 10 mA unpaired, 10 mA with an SPP session open, and
+10 mA with that session saturated in both directions. Radio traffic costs this
+module nothing measurable at meter resolution, so there is no separate "peak"
+number to design around — for the genuine dongle.
+
+**This does not license a smaller regulator in the clone.** The 10 mA belongs to
+whatever module Kelly used, not to an HC-05, which draws several times that
+while discoverable. Size the clone's supply for the module you actually fit —
+see the note under Power below.
 
 **~4 V unloaded TX idle** is about a diode drop under 5 V, the signature of a
 simple level-translation stage (a series diode or an NPN inverter) off a 5 V
@@ -369,9 +378,9 @@ Answering any of these would tighten this document:
 
 - **Module identity** — needs a teardown photo of the official dongle's PCB.
   The unregistered MAC rules out identification by OUI.
-- **Connected-state current draw** of the official dongle, which is the honest
-  number for regulator sizing — the one remaining number that a bench session
-  with the genuine unit would settle.
+- ~~**Connected-state current draw.**~~ **Answered** — ~10 mA at 12 V, with no
+  measurable rise between an idle SPP session and one saturated in both
+  directions. See the note under the characterization table.
 - ~~**Full byte transparency.**~~ **Answered** — the sweep was run over a direct
   RFCOMM channel and passes in both directions. See "The official adapter, as
   measured" above.
