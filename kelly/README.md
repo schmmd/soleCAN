@@ -250,6 +250,13 @@ mode is needed — on macOS it appears as a serial port named after the device
 (e.g. `/dev/cu.26061702`); just pass it as `--port`. Confirmed working
 end-to-end (a CH340 USB adapter and this SPP adapter decode identically).
 
+`bluetooth-adapter.md` characterizes the official dongle (SPP, name `26061702`,
+~10 mA off pin 1) and documents how to build an equivalent one from ~$10 of
+parts. A Bluetooth adapter has no ground wire to the host, so for a laptop or
+phone it sidesteps the grounding problem above for free. It does *not* replace
+`isolator.txt`, which covers the different case of the chassis-powered ESP32
+reading the Kelly over wired UART.
+
 Bluetooth links are less steady than USB, so the reader is built to cope:
 
 - **Warmup.** Opening the port brings the SPP link up, which takes a second or
