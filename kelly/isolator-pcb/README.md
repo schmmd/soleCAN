@@ -108,6 +108,28 @@ outline at 72 x 32 mm and holes at 65.0 x 25.0 mm (W and MOUNT_HOLES in
 `generate_board.py`, plus the four `P_*` right-column pads and right-side
 silk moved out by 22 mm) to match the Hammond 1591XXA's molded posts.
 
+A verified off-the-shelf combination, both DigiKey (prices/stock 2026-08-30):
+
+| Qty | Part | DigiKey | Mfr | $ ea | stock |
+|-----|------|---------|-----|------|-------|
+| 1 | BOX PC TRN CLEAR 3.94"L x 1.97"W | [HM957-ND](https://www.digikey.com/en/products/detail/hammond-manufacturing/1591ATCL/1090768) | Hammond 1591ATCL | 9.83 | 106 |
+| 2 | GROMMET 0.250" RUBBER BLACK | [36-740-ND](https://www.digikey.com/en/products/detail/keystone-electronics/740/631422) | Keystone 740 | 0.32 | 36.8k |
+
+The 1591ATCL is 100 x 50 x 24.8 mm outside, so the 50 x 32 mm board drops in
+with room to spare, and the clear lid means the D1 "5V ON" LED is readable
+without opening anything or drilling a bezel hole. It is the 1591**A**, not
+the 1591**XX**A named above — it has no molded posts anywhere near the
+43 x 25 mm hole pattern, so this is still a stick-on-standoff or VHB mount.
+
+One grommet per cable entry (Kelly side, RejsaCAN side), each in a 3/8"
+(9.53 mm) hole drilled in an end panel — the grommet's 0.250" bore passes a
+4-conductor cable comfortably. They are sized for 2.36 mm panel stock against
+the 1591's ~2 mm walls: they seat, just snugly.
+
+Note the enclosure costs **$10.47**, about 4x the $2.73 of board components.
+A drilled ABS box from the drawer works exactly as well electrically; the
+clear lid and the LED are the only argument for this one.
+
 **Kelly-side pad order (top to bottom) is RED, BLU, GRN, BLK** — blue and
 green are swapped relative to the SM-4P harness order in `../isolator.txt` so
 the two signal traces reach the ADuM1201 pins without crossing. Follow the
@@ -158,7 +180,8 @@ never be tied together.
 One board's worth, single-order from DigiKey. Qty-1 prices and stock read off
 the DigiKey product pages 2026-08-30; re-check before ordering. Board parts
 total **$2.73**, so ~$8.49 ground shipping dominates — order spares of the
-sub-dollar parts.
+sub-dollar parts. Adding the box and grommets from "Enclosure" below brings
+the order to **$13.20**.
 
 | Ref | Qty | Part | DigiKey | $ ea | stock |
 |-----|-----|------|---------|------|-------|
