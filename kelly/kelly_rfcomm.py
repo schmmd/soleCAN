@@ -50,6 +50,34 @@ def _iobluetooth():
     return IOBluetooth, NSObject, NSRunLoop, NSDate, objc
 
 
+# PyObjC registers Objective-C classes globally by name, so defining the delegate
+# per-instance makes the *second* RFCOMMPort in a process raise
+# "_Delegate is overriding existing Objective-C class" — which is exactly what a
+# reconnect does. Build it once, on first use.
+_DELEGATE_CLASS = None
+
+
+def _delegate_class(NSObject, objc):
+    """Return the shared RFCOMM delegate class, defining it on first call."""
+    global _DELEGATE_CLASS
+    if _DELEGATE_CLASS is None:
+        class _Delegate(NSObject):
+            def init(self):
+                self = objc.super(_Delegate, self).init()
+                self.buf = bytearray()
+                self.closed = False
+                return self
+
+            def rfcommChannelData_data_length_(self, chan, data, length):
+                self.buf += bytes(data[:length])
+
+            def rfcommChannelClosed_(self, chan):
+                self.closed = True
+
+        _DELEGATE_CLASS = _Delegate
+    return _DELEGATE_CLASS
+
+
 def resolve_bt_address(port: str):
     """Return the Bluetooth address `port` refers to, or None if it's a serial port.
 
@@ -87,18 +115,7 @@ class RFCOMMPort:
         IOBluetooth, NSObject, NSRunLoop, NSDate, objc = _iobluetooth()
         self._runloop, self._nsdate = NSRunLoop, NSDate
 
-        class _Delegate(NSObject):
-            def init(self):
-                self = objc.super(_Delegate, self).init()
-                self.buf = bytearray()
-                self.closed = False
-                return self
-
-            def rfcommChannelData_data_length_(self, chan, data, length):
-                self.buf += bytes(data[:length])
-
-            def rfcommChannelClosed_(self, chan):
-                self.closed = True
+        _Delegate = _delegate_class(NSObject, objc)
 
         dev = IOBluetooth.IOBluetoothDevice.deviceWithAddressString_(address)
         if dev is None:
@@ -211,6 +228,17 @@ def _demo() -> None:
     assert resolve_bt_address("/dev/ttyUSB0") is None
     assert resolve_bt_address("COM3") is None
     assert resolve_bt_address("/dev/cu.definitely-not-paired-xyz") is None
+
+    # The delegate class must be built exactly once per process. PyObjC
+    # registers Objective-C classes globally by name, so a second definition
+    # raises objc.error — invisible on a first connect, fatal on a reconnect.
+    try:
+        _, NSObject, _, _, objc = _iobluetooth()
+    except serial.SerialException:
+        pass  # no pyobjc on this host; the routing checks above still ran
+    else:
+        assert _delegate_class(NSObject, objc) is _delegate_class(NSObject, objc)
+
     print("kelly_rfcomm self-check OK")
 
 

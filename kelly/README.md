@@ -259,9 +259,14 @@ reading the Kelly over wired UART.
 
 Bluetooth links are less steady than USB, so the reader is built to cope:
 
-- **Warmup.** Opening the port brings the SPP link up, which takes a second or
-  two; the first few polls miss and are tolerated silently (a one-line "waiting
-  for controller…" note, not an error). `--once` waits through warmup.
+- **Warmup.** Opening the port brings the SPP link up. Measured at **4.5–5.4 s**
+  (SDP lookup plus RFCOMM association), consistently, over five consecutive
+  opens — not the "second or two" this once claimed. The cost is entirely
+  inside `open_port()`: once it returns, the channel carries bytes on the very
+  first probe, verified against a CH340 standing in for the controller. Any
+  polls that still miss after that are the Kelly waking up, not the link. They
+  are tolerated silently (a one-line "waiting for controller…" note, not an
+  error). `--once` waits through warmup.
 - **Auto-reconnect.** If the link drops mid-session, the reader reopens the port
   and continues rather than crashing.
 

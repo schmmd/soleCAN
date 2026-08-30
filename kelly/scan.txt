@@ -1,0 +1,116 @@
+Kelly KLS flash configuration  2026-07-04 17:59:49   code-version 01 01 01
+  version word 518  (KBLS_0109 parameter map)
+
+General
+  Module Name            KLS7218M  (read-only)
+  User Name                  bzbb  (read-only)
+  Serial Number          20236777  (read-only)
+  Software Version       02060001  (read-only)
+  Startup H-Pedel               0  << vendor sheet: 1
+  Brake H-Pedel                 0
+  NTL H-Pedel                   0
+  Joystick                      0
+  Three Gears Switch            0
+  Boost                         0
+  Foot Switch                   0
+  SW Level                      1  (read-only)
+  0,HIM;1,KIM                   1  (read-only)
+  Cruise                        0
+  Anti-theft                    0
+  Anti slip                     0
+  Change Dir                    0
+
+Protection
+  Controller Volt              72  (read-only)
+  Low Volt                     24
+  Over Volt                    85
+  Hall Galvan Rate            360  (read-only)
+  PhaseCurr Max AD            300  (read-only)
+  Motor_Current%               50
+  Batt_Current%                50
+  High Temp Cut C             110
+  High Temp Resume             90
+  High Temp Str C             100
+  High Temp Week %              0
+
+Throttle
+  TPS Low                       0
+  TPS High                     95
+  TPS Type                      1
+  TPS Dead Low                 20
+  TPS Dead High                80
+  TPS Forw MAP                 30
+  TPS Rev MAP                  20
+
+Braking
+  Brake SW Level                1  (read-only)
+  Brake Type                    0
+  Brake Dead Low               20
+  Brake Dead High              80
+  BRK_AD Brk %#                 0
+  Anti-theft Curr#             15
+  Brk_Speed Limit               0
+  RLS_TPS Brk Per%              0
+  NTL Brk Per%                  0
+  BRK_SW Brk Per%              10
+  Change Dir Brk%               0
+  Compensation Per%            20
+  IVT BRK Max                  50
+  IVT BRK Min                  50
+
+Speed
+  Max Output Fre             1000
+  Max Speed                  2800
+  Max Forw Speed%              85
+  Max Rev Speed%               85
+  MidSpeed Forw Speed          65  << vendor sheet: 55
+  MidSpeed Rev Speed           65  << vendor sheet: 55
+  LowSpeed Forw Speed          30
+  LowSpeed Rev Speed           20
+  Three Speed                   1
+  PWM frequency                16
+  Accel Time                  150
+  Accel Release Time            5
+  Brake Time                    5
+  Brake Release Time            1
+
+PID tuning
+  IQ Kp                       500
+  IQ Ki                        10
+  ID Kp                      1500
+  ID Ki                        30
+  ID Err                    32767
+  Torque Speed Kp            2000
+  Torque Speed Ki              60
+  Speed Err Limit            1000
+
+Advanced
+  HS_ACQR_Kp                 2000
+  HS_ACQR_Ki                   60
+  HS_ACDR_Kp                 5000
+  HS_ACDR_Ki                  100
+
+Motor
+  Identify Angle               85
+  Motor Nominal Curr           80
+  Motor Poles                  10
+  Speed Sensor Type             2
+  Resolver Poles                2
+  Min Excitation Curr           0
+  Motor Temp Sensor             1
+  Line Hall Zero              508
+  Line Hall amplitude         410
+  Line Hall High Err          972
+  Line Hall Low Err            50
+  Swap Motor Phase              0
+  Resolver init angle        8129
+  0 deg Hall                    4  << vendor sheet: 6
+  60 deg Hall                   5  << vendor sheet: 2
+  120 deg Hall                  1  << vendor sheet: 3
+  180 deg Hall                  3  << vendor sheet: 1
+  240 deg Hall                  2  << vendor sheet: 5
+  300 deg Hall                  6  << vendor sheet: 4
+  Forw A Rise Hall              6  << vendor sheet: 5
+  Forw A Fall Hall              1  << vendor sheet: 2
+  Rev A Rise Hall               5  << vendor sheet: 6
+  Rev A Fall Hall               2  << vendor sheet: 1

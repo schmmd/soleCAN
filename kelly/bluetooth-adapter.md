@@ -274,9 +274,10 @@ so the controller talks, and run the monitor:
 python3 solectrac-kelly-monitor.py --port /dev/cu.<name> --tui
 ```
 
-Expect the warmup behavior `README.md` describes — the first few polls miss
-while the SPP link comes up. Compare a full reading against the official dongle
-on the same controller before trusting the clone.
+Expect the warmup `README.md` describes: `open_port()` takes 4.5–5.4 s to
+associate. After it returns the link is immediately usable, so any polls that
+still miss are the controller, not the SPP channel. Compare a full reading
+against the official dongle on the same controller before trusting the clone.
 
 Remember: **one host at a time.** These adapters accept a single connection, so
 disconnect the phone before the Mac can use it.
