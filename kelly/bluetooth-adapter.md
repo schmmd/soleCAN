@@ -39,12 +39,16 @@ tractor.
 | Device name | `26061702` — a bare 8-digit serial, no vendor string | CONFIRMED |
 | MAC address | `20:24:06:19:06:77` | CONFIRMED |
 | MAC vendor | **None** — `20:24:06` is not a registered IEEE OUI | CONFIRMED |
+| Pairing PIN | **`1234`** | CONFIRMED |
 | Supply | SM-4P pin 1 (red, ~12 V out of the controller) | CONFIRMED |
 | Idle current | **~10 mA** at 12 V, powered but unpaired | CONFIRMED |
 | Connected current | not yet measured | UNKNOWN |
 | TX idle level (dongle → Kelly Rx, blue) | **~4 V**, unloaded | CONFIRMED |
-| Internal UART config | **19200 8N1** | CONFIRMED |
+| Internal UART rate | **19200** — measured, see below | CONFIRMED |
+| Frame format | 8N1 | TENTATIVE |
 | Byte transparency | no added framing or escaping | CONFIRMED |
+| Bridging | bidirectional, both directions verified at 19200 | CONFIRMED |
+| Session indicator | LED **steady** = SPP session up, **blinking** = none | CONFIRMED |
 | Module part | unidentified — no OUI, no teardown yet | UNKNOWN |
 
 Two readings worth interpreting:
@@ -63,19 +67,42 @@ the CH340 adapter and the `esp32-bridge` sketch.
 The unregistered MAC means no OUI lookup will ever name the module, and it also
 means there is no vendor identity for a clone to fail to match.
 
-**The UART config and transparency are settled by deduction, not measurement.**
-`solectrac-kelly-monitor.py` has pulled valid checksummed frames off the tractor
-through this dongle. The Kelly's wire rate is fixed at 19200 8N1, so the dongle's
-UART must match it — any other rate puts garbage on the wire — and the bridge
-must be byte-transparent, since added framing or escaping would break the 19-byte
-frame checksum. A successful decode is proof of both.
+**The 19200 rate is measured.** With a phone holding the SPP session, `U`
+(`0x55`, `0b01010101`) was sent repeatedly from a phone terminal while a CH340
+on the dongle's wire side listened at each candidate rate in turn. Only 19200
+decoded cleanly. The failures confirm the result rather than merely failing:
+`0x55` undersampled at half rate collapses to a constant `0xCC`, and at quarter
+rate to `0xFC`, which is exactly what 9600 and 4800 returned. A module that
+auto-bauds would not have produced a single clean rate.
 
-Note that the *host* side proves nothing here. Over SPP the `/dev/cu.*` node is a
-virtual port on an RFCOMM channel, and the baud rate set on it is inert — it does
-not reach the wire. Only the module's own UART setting matters. This is exactly
-why the clone's `AT+UART` value is the one that has to be right, and why setting
-19200 in the monitor is a formality on a Bluetooth link even though it is load-
-bearing on a CH340.
+Bidirectionality was checked the other way in the same rig — text sent from the
+CH340 into the dongle's Rx appeared in the phone terminal — so the bridge
+carries both directions at 19200 and tolerates the CH340's 5 V drive on its
+input.
+
+This supersedes the earlier deduction, which reasoned from the monitor pulling
+valid checksummed frames through the dongle: the Kelly's rate is fixed, so the
+dongle's UART had to match, and the bridge had to be byte-transparent or the
+19-byte checksum would break. That argument was sound and its conclusion held,
+but it could not rule out auto-bauding, and it could not distinguish 8N1 from
+other framings — which is why **frame format remains TENTATIVE**. Transparency
+is likewise only spot-checked so far (`0x55`, and printable text with CR/LF in
+both directions); the bytes most likely to break a naive bridge — `0x00`,
+`0x11`/`0x13`, `0x1A`, and the high-bit range — have not been swept.
+
+Note that the *host* side tells you nothing about the wire. Over SPP the
+`/dev/cu.*` node is a virtual port on an RFCOMM channel, and the rate set on it
+never reaches the wire; only the module's own UART setting does. This is why the
+clone's `AT+UART` value is the one that has to be right.
+
+**But the host-side rate is not inert, at least on macOS.** Measured on this
+dongle, write throughput to the RFCOMM port tracks the tty setting at exactly
+`baud/12` — 800 B/s at 9600, 1600 at 19200, 3197 at 38400, 9560 at 115200. The
+setting does not reach the wire, but it does throttle the host→dongle direction
+locally. At the 19200 this document specifies that ceiling is 1600 B/s, far
+above anything the Kelly protocol needs, so it has never been visible in
+practice — but setting the port to a low rate would throttle the link with no
+obvious cause. Do not treat it as a formality that can be set to anything.
 
 ## Clone specification
 
@@ -175,13 +202,15 @@ AT+PSWD="1234"          -> whatever pairing PIN you prefer
 `AT+UART` sets the rate used for *data* once connected — this is the one that
 must be 19200 to match the Kelly.
 
-**On the name:** any name works for `solectrac-kelly-monitor.py`, which just
-takes whatever `/dev/cu.*` you point `--port` at. Whether the **Kelly Android
-app** filters its device list by name is UNKNOWN. If it does, an 8-digit
-numeric name in the official dongle's style is the thing to mimic. Setting the
-name to exactly `26061702` while the real dongle is also powered will make the
-two indistinguishable during pairing — pick a different serial if both are in
-service.
+**On the name:** any name works. `solectrac-kelly-monitor.py` just takes
+whatever `/dev/cu.*` you point `--port` at, and the **Kelly Android app**
+presents a device picker rather than binding to a particular name, so a clone
+does not need to imitate `26061702`. Prefer a distinct name: setting it to
+exactly `26061702` while the real dongle is also powered makes the two
+indistinguishable during pairing.
+
+The official dongle's own PIN is `1234`, so that is a reasonable default to
+match, but nothing requires it.
 
 ### Assembly
 
@@ -236,6 +265,53 @@ on the same controller before trusting the clone.
 Remember: **one host at a time.** These adapters accept a single connection, so
 disconnect the phone before the Mac can use it.
 
+### "Connected" does not mean the link carries data
+
+Budget for this before blaming your wiring. On a bench session with the genuine
+dongle, a Mac associated at the Bluetooth level and passed **zero bytes** across
+15 acquisition attempts. Everything the host offered as a status signal was
+wrong:
+
+- `blueutil --is-connected` returned `1`
+- System Settings → Bluetooth showed **Connected**
+- opening `/dev/cu.<name>` succeeded, and writes were accepted
+
+Writes are accepted because macOS buffers and paces them locally at `baud/12`
+(above), so even write timing looks plausible on a dead channel. The symptom is
+indistinguishable from a broken harness, and it cost most of a session chasing
+reseated wires, a swapped pair, and grounding — none of which were ever at
+fault. Unpairing and re-pairing did not fix it; the same dongle worked
+immediately with a phone.
+
+**The LED is the only honest indicator.** Steady = SPP session established.
+Blinking = no session, whatever the host claims. Check it before debugging
+anything else.
+
+The general rule: **gate on a data probe, not on connection status.** Send a
+byte and require it to arrive.
+
+### Phone-in-the-loop, when the host's SPP stack won't cooperate
+
+A host that cannot open an SPP session can still characterize the dongle
+completely, because the two ends are independently reachable. Let a **phone**
+own the Bluetooth side with any SPP terminal app, and let the computer watch the
+**wire** side through a CH340. Nothing needs RFCOMM on the computer.
+
+- **Phone → wire.** Send `U` (`0x55`) repeatedly from the phone while the CH340
+  listens at each candidate rate. The rate that decodes cleanly is the module's
+  UART rate. This is how the 19200 above was measured.
+- **Wire → phone.** Send text from the CH340 and watch it appear in the phone
+  terminal. Confirms the opposite direction and that the module's Rx tolerates
+  the CH340's 5 V drive.
+- **Transparency.** Use the terminal's hex-send mode for the bytes that break
+  naive bridges: `00 01 02 03 11 13 1A 7F 80 81 FE FF` — null, XON/XOFF, EOF,
+  and the high-bit range.
+
+Two gotchas. Terminal apps append CR/LF by default, so expect `0d`/`0a`
+alongside your payload or set the line ending to None. And `0x55` is the right
+probe byte precisely because it is `0b01010101`: a wrong rate decodes it to a
+visibly different value instead of aliasing into something plausible.
+
 ## Open questions
 
 Answering any of these would tighten this document:
@@ -245,8 +321,14 @@ Answering any of these would tighten this document:
 - **Connected-state current draw** of the official dongle, which is the honest
   number for regulator sizing — the one remaining number that a bench session
   with the genuine unit would settle.
-- **Whether the Kelly app filters on device name**, which decides how closely a
-  clone must imitate `26061702`.
+- **Full byte transparency.** Only `0x55` and printable text have been passed in
+  anger. The sweep that matters — `0x00`, `0x11`/`0x13`, `0x1A`, `0x80`–`0xFF` —
+  is described under "Phone-in-the-loop" and has not been run.
+- **The frame format.** 19200 is measured; 8N1 is assumed from the Kelly side
+  and has never been distinguished from 8N2 or a parity setting.
+- **Why macOS associates but passes no data**, and whether it affects all Macs
+  or one machine. A working host would also finally settle latency and
+  throughput, which the phone rig cannot measure.
 - **Whether SM-4P pin 1 is live with the tractor off** — the dongle pairs long
   before the controller talks, but it is not recorded whether pin 1 is always
   hot or comes up with the key.
