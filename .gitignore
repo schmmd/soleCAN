@@ -17,3 +17,9 @@ worktrees/
 # Scratch workspace for subagent-driven plan execution (ledger, briefs,
 # review packages) — the git history is the durable record, not this.
 .superpowers/
+
+# Kelly bench artifacts: controller config dumps written by
+# solectrac-kelly-dump-config.py, and ad-hoc scan output. Session data, not
+# reference material — the decoded field map in kelly/README.md is the record.
+kelly/kelly-config-*.bin
+kelly/scan.txt
