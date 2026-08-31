@@ -250,11 +250,23 @@ mode is needed — on macOS it appears as a serial port named after the device
 (e.g. `/dev/cu.26061702`); just pass it as `--port`. Confirmed working
 end-to-end (a CH340 USB adapter and this SPP adapter decode identically).
 
+`bluetooth-adapter.md` characterizes the official dongle (SPP, name `26061702`,
+~10 mA off pin 1) and documents how to build an equivalent one from ~$10 of
+parts. A Bluetooth adapter has no ground wire to the host, so for a laptop or
+phone it sidesteps the grounding problem above for free. It does *not* replace
+`isolator.txt`, which covers the different case of the chassis-powered ESP32
+reading the Kelly over wired UART.
+
 Bluetooth links are less steady than USB, so the reader is built to cope:
 
-- **Warmup.** Opening the port brings the SPP link up, which takes a second or
-  two; the first few polls miss and are tolerated silently (a one-line "waiting
-  for controller…" note, not an error). `--once` waits through warmup.
+- **Warmup.** Opening the port brings the SPP link up. Measured at **4.5–5.4 s**
+  (SDP lookup plus RFCOMM association), consistently, over five consecutive
+  opens — not the "second or two" this once claimed. The cost is entirely
+  inside `open_port()`: once it returns, the channel carries bytes on the very
+  first probe, verified against a CH340 standing in for the controller. Any
+  polls that still miss after that are the Kelly waking up, not the link. They
+  are tolerated silently (a one-line "waiting for controller…" note, not an
+  error). `--once` waits through warmup.
 - **Auto-reconnect.** If the link drops mid-session, the reader reopens the port
   and continues rather than crashing.
 
@@ -262,6 +274,11 @@ macOS gotchas, learned the hard way:
 
 - **Find the right port.** The adapter's port is named after its device name
   (e.g. `/dev/cu.26061702`, from `ls /dev/cu.*`).
+- **A CH340's port name changes on every replug** — `usbserial-1430`,
+  `-1420`, `-1440` — because the chip has no burned-in serial number, so macOS
+  names it by USB port location instead. Never hardcode it in a script: a stale
+  name fails exactly like dead hardware. FTDI parts carry a serial and keep a
+  stable name.
 - **The dashboard's "Connected → Not Connected" flicker is normal.** A macOS SPP
   link is only held while an app has the port open, so clicking Connect in
   Bluetooth Settings shows Connected for a second and then drops. Don't fight it
@@ -270,6 +287,58 @@ macOS gotchas, learned the hard way:
 - **One host at a time.** These adapters accept a single connection, so
   disconnect the phone / Kelly app (turn the phone's Bluetooth off) before the
   Mac can use it.
+- **On some Macs `/dev/cu.<name>` is inert** — it opens, accepts writes, and
+  passes zero bytes forever, while Bluetooth Settings still says Connected. The
+  tools now work around this automatically (below); if you are debugging by
+  hand with `screen` or `pyserial`, this is what you are hitting, and the
+  dongle's blinking LED is the giveaway.
+
+#### The Kelly app has a second, wired transport
+
+The official app offers **FT232** alongside the Bluetooth dongle — a wired
+USB-OTG path straight to this port, no dongle involved. It identifies candidate
+adapters by USB vendor ID and accepts **only FTDI's `0x0403`**, so a CH340
+(`0x1A86`) is invisible to it and selecting FT232 fails instantly with one
+attached. Use a genuine FT232RL if you want that path.
+
+Two consequences worth knowing. A phone is battery-powered and floats, so a
+wired FTDI link does not hit the chassis-vs-traction grounding problem that
+makes the wired path awkward from a laptop. And the ESP32-S3 has no Classic
+Bluetooth radio, so emulating an FT232 over USB is the *only* way a SoleCAN
+device could ever serve this app.
+
+#### Bluetooth needs the `bluetooth` extra
+
+Because of that inert-node bug, the tools do not go through `/dev/cu.*` for
+Bluetooth at all. `kelly_rfcomm.py` opens the Classic RFCOMM channel directly
+through the macOS IOBluetooth framework, which works on Macs where the serial
+node does not. Install it once:
+
+```bash
+pip install '.[bluetooth]'      # or: uv sync --extra bluetooth
+```
+
+Then pass the dongle either way — both reach the same RFCOMM path:
+
+```bash
+# the serial node macOS names after the device (recognised, not opened as a tty)
+python3 solectrac-kelly-monitor.py --port /dev/cu.26061702 --tui
+
+# or the Bluetooth address directly, if the node does not exist
+python3 solectrac-kelly-monitor.py --port 20-24-06-19-06-77 --tui
+```
+
+`--port` still takes a normal USB adapter (`/dev/cu.usbserial-XXXX`) and behaves
+exactly as before; the Bluetooth path is chosen only when the port names a
+paired device. `--baud` is ignored over Bluetooth — the wire rate is fixed by
+the dongle's own UART setting and nothing the host sets ever reaches the wire.
+The same applies to `solectrac-kelly-dump-config.py`.
+
+Without the extra installed, a Bluetooth port falls back to the old pyserial
+behaviour, which on an affected Mac means reading nothing.
+
+`kelly_rfcomm.py` transports bytes only — it has no notion of a Kelly frame, so
+the read-only command guard in each tool's `_transmit()` is unchanged.
 
 ### Validate before trusting the decode
 

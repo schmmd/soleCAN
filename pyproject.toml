@@ -13,7 +13,15 @@ dependencies = [
 [project.optional-dependencies]
 ble = ["bless>=0.3"]
 canalyst = ["canalystii>=0.1"]
-all = ["bless>=0.3", "canalystii>=0.1"]
+# Classic-Bluetooth SPP transport for the Kelly tools (kelly/kelly_rfcomm.py).
+# macOS only: it drives the system IOBluetooth framework directly, because the
+# /dev/cu.<name> SPP node is inert on some Macs. See kelly/bluetooth-adapter.md.
+bluetooth = ["pyobjc-framework-IOBluetooth>=10.0; sys_platform == 'darwin'"]
+all = [
+    "bless>=0.3",
+    "canalystii>=0.1",
+    "pyobjc-framework-IOBluetooth>=10.0; sys_platform == 'darwin'",
+]
 
 # bless pulls Windows-only pre-release winrt-* packages. We don't run on
 # Windows, so restrict the universal lockfile to macOS + Linux to avoid
