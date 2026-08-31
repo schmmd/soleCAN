@@ -274,6 +274,11 @@ macOS gotchas, learned the hard way:
 
 - **Find the right port.** The adapter's port is named after its device name
   (e.g. `/dev/cu.26061702`, from `ls /dev/cu.*`).
+- **A CH340's port name changes on every replug** — `usbserial-1430`,
+  `-1420`, `-1440` — because the chip has no burned-in serial number, so macOS
+  names it by USB port location instead. Never hardcode it in a script: a stale
+  name fails exactly like dead hardware. FTDI parts carry a serial and keep a
+  stable name.
 - **The dashboard's "Connected → Not Connected" flicker is normal.** A macOS SPP
   link is only held while an app has the port open, so clicking Connect in
   Bluetooth Settings shows Connected for a second and then drops. Don't fight it
@@ -287,6 +292,20 @@ macOS gotchas, learned the hard way:
   tools now work around this automatically (below); if you are debugging by
   hand with `screen` or `pyserial`, this is what you are hitting, and the
   dongle's blinking LED is the giveaway.
+
+#### The Kelly app has a second, wired transport
+
+The official app offers **FT232** alongside the Bluetooth dongle — a wired
+USB-OTG path straight to this port, no dongle involved. It identifies candidate
+adapters by USB vendor ID and accepts **only FTDI's `0x0403`**, so a CH340
+(`0x1A86`) is invisible to it and selecting FT232 fails instantly with one
+attached. Use a genuine FT232RL if you want that path.
+
+Two consequences worth knowing. A phone is battery-powered and floats, so a
+wired FTDI link does not hit the chassis-vs-traction grounding problem that
+makes the wired path awkward from a laptop. And the ESP32-S3 has no Classic
+Bluetooth radio, so emulating an FT232 over USB is the *only* way a SoleCAN
+device could ever serve this app.
 
 #### Bluetooth needs the `bluetooth` extra
 
