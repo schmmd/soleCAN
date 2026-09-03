@@ -2628,7 +2628,7 @@ void handleRoot() {
 
 #if defined(HAS_SD)
 // ── SD file access API ────────────────────────────────────────────────────────
-// See docs/superpowers/specs/2026-07-18-sd-file-api-design.md. /sd/status is
+// See "Pulling files over WiFi" in esp32-s3/README.md. /sd/status is
 // in-RAM only (poll freely); /sd/sessions, /sd/sessions/{id} GET (tar) and DELETE
 // touch the card under g_sd_mutex and answer 503 unless a session is logging.
 

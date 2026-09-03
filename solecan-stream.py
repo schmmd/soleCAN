@@ -166,11 +166,6 @@ MC_FAULT_DESCRIPTIONS: dict = {
 }
 
 
-def describe_bms_code(code: int) -> str:
-    """Return the operator-manual description for a BMS code, or 'unknown'."""
-    return BMS_FAULT_DESCRIPTIONS.get(int(code), f"unknown code {int(code)}")
-
-
 def describe_mc_code(code: int) -> str:
     """Return a slash-joined description for a motor-controller code."""
     entries = MC_FAULT_DESCRIPTIONS.get(int(code))
@@ -366,11 +361,6 @@ class State:
     chgr_cmd_v_v: Channel = field(default_factory=Channel)
     chgr_cmd_i_a: Channel = field(default_factory=Channel)
     chgr_cmd_enable: Channel = field(default_factory=Channel)
-    # 0x18FF2112: dashboard / instrument-cluster heartbeat at 10 Hz.
-    # byte 0 = alive flag (0 during ~700 ms boot, 1 thereafter); other
-    # bytes always zero. Useful as a liveness check: if this Channel
-    # goes stale the dashboard ECU has likely dropped off the bus.
-    dash_alive: Channel = field(default_factory=Channel)
     # per-cell / per-temp arrays (indexed 0-based; display is 1-based)
     cells: List[Channel] = field(
         default_factory=lambda: [Channel() for _ in range(NUM_CELLS)]
@@ -459,7 +449,6 @@ _NAME_TO_ATTR = {
     "motor.controller_temp_c": "controller_temp_c",
     "motor.motor_temp_c": "motor_temp_c",
     # FF21 dashboard heartbeat
-    "dash.alive": "dash_alive",
     # FECA DM1
     "dm1.lamp.byte0": "dm1_lamp_byte",
     "dm1.lamp.byte1": "dm1_flash_byte",
@@ -585,7 +574,7 @@ def active_bms_faults(state: State) -> List[Tuple[int, str]]:
         for bit, code in BMS_FAULT_CODES_BYTE7:
             if (b7 >> bit) & 1:
                 active.add(code)
-    return [(code, describe_bms_code(code)) for code in sorted(active)]
+    return [(code, BMS_FAULT_DESCRIPTIONS.get(code, f"unknown code {code}")) for code in sorted(active)]
 
 
 # --- alerts -----------------------------------------------------------------
@@ -912,7 +901,7 @@ def render_pack(state: State, now: float) -> Panel:
     # with zero load would otherwise show a "(rough)" never-ending ETA.
     if (state.bms_soc_pct.value is not None
             and pi is not None and pi > PACK_DRAW_CURRENT_A):
-        eta = estimate_drain_eta_s(state)
+        eta = _estimate_soc_eta_s(state, target=0.0, rising=False)
         if eta is None:
             t.add_row("ETA to 0%", Text("estimating...", style="dim"))
         elif count_soc_transitions(state) < SOC_ETA_STABLE_TRANSITIONS:
@@ -980,24 +969,6 @@ def _estimate_soc_eta_s(state: State, target: float,
             break
     return _slope_eta(samples[0][0], samples[0][1])
 
-
-def estimate_charge_eta_s(state: State) -> Optional[float]:
-    """Seconds until BMS SOC reaches 100%, or None if not rising.
-
-    Linear extrapolation is optimistic in the last ~10% because charge
-    current tapers in CV.
-    """
-    return _estimate_soc_eta_s(state, target=100.0, rising=True)
-
-
-def estimate_drain_eta_s(state: State) -> Optional[float]:
-    """Seconds until BMS SOC reaches 0%, or None if not falling.
-
-    Linear extrapolation; real packs hit a BMS cutoff above 0% and the
-    cutback regions distort the slope, so this is "remaining at current
-    pace" rather than a hard runtime.
-    """
-    return _estimate_soc_eta_s(state, target=0.0, rising=False)
 
 
 def format_eta(secs: float) -> str:
@@ -1075,7 +1046,7 @@ def render_charger(state: State, now: float) -> Panel:
         if soc_now is not None and soc_now >= 99.5:
             t.add_row("ETA to 100%", Text("complete", style="green"))
         else:
-            eta = estimate_charge_eta_s(state)
+            eta = _estimate_soc_eta_s(state, target=100.0, rising=True)
             if eta is None:
                 t.add_row("ETA to 100%",
                           Text("estimating...", style="dim"))
@@ -1516,12 +1487,6 @@ def open_source(args):
 # state_to_json mirrors the firmware's buildJson(minimal=false) shape closely
 # enough that the dashboard reads the same fields.
 
-def _ch(c: Channel, ndigits: Optional[int] = None):
-    if c.value is None:
-        return None
-    return round(c.value, ndigits) if ndigits is not None else c.value
-
-
 def state_to_json(state: State, now: float, mode: str) -> dict:
     """Snapshot in the same shape the firmware serves at /json."""
     out: dict = {"uptime": now - state.started_at}
@@ -1595,8 +1560,8 @@ def state_to_json(state: State, now: float, mode: str) -> dict:
     if state.bms_soc_pct.value is not None:
         remaining = state.bms_soc_pct.value * PACK_CAPACITY_WH / 100.0
         sess["wh_remaining"] = round(remaining, 1)
-        eta_full = estimate_charge_eta_s(state)
-        eta_zero = estimate_drain_eta_s(state)
+        eta_full = _estimate_soc_eta_s(state, target=100.0, rising=True)
+        eta_zero = _estimate_soc_eta_s(state, target=0.0, rising=False)
         if eta_full and eta_full > 0:
             sess["eta_to_full_s"] = int(eta_full)
         if eta_zero and eta_zero > 0:
