@@ -17,3 +17,8 @@ worktrees/
 # Scratch workspace for subagent-driven plan execution (ledger, briefs,
 # review packages) — the git history is the durable record, not this.
 .superpowers/
+
+# KiCad local state and autosave history repo
+*.kicad_prl
+.history/
+*.lck

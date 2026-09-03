@@ -154,6 +154,12 @@ the 3.3 V input:
 - Kelly **Rx** (blue) → **GPIO48** (TX)
 - Kelly **V−** (black) → **GND**; Kelly **V+** (red, 12 V) → leave unconnected
 
+That direct wiring only works reliably with the board floating (USB power).
+When the board runs on OBD power its ground is chassis-referenced while the
+Kelly's is traction-pack-referenced, and the link degrades. The fix is the
+galvanic isolator dongle documented in [`../kelly/ISOLATOR.md`](../kelly/ISOLATOR.md);
+it lands on the same GPIO47/48 pins and needs no series resistor.
+
 The monitor is **read-only by construction** — only the three zero-data monitor
 queries (`0x3A/0x3B/0x3C`) are ever transmitted, and no flash session is opened,
 so the firmware cannot reconfigure the controller. Polling is non-blocking and
