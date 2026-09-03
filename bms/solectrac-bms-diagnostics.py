@@ -1318,11 +1318,6 @@ function beU16(hex, off) {
   if (!hex || hex.length < (off + 2) * 2) return null;
   return parseInt(hex.slice(off * 2, off * 2 + 4), 16);
 }
-function beI16(hex, off) {
-  const v = beU16(hex, off);
-  if (v == null) return null;
-  return v & 0x8000 ? v - 0x10000 : v;
-}
 function leU16Bytes(bytes, off) {
   if (!bytes || bytes.length < off + 2) return null;
   return bytes[off] | (bytes[off + 1] << 8);
@@ -1534,26 +1529,24 @@ function renderCharging(c) {
 
 function renderBmu(b) {
   // 0x1600 BMU rail
-  if (b.power && b.power.length >= 4) {
-    const mv = beU16(b.power, 0);
-    $('bmu-power').innerHTML = `<div class="bignum">${(mv / 1000).toFixed(3)}<span class="unit">V</span></div>
+  if (b.rail_v != null) {
+    $('bmu-power').innerHTML = `<div class="bignum">${b.rail_v.toFixed(3)}<span class="unit">V</span></div>
       <div class="sub">raw u16 [0:2] ÷ 1000 — expected ~12.75 V per BMS.md</div>
       <div class="hex" style="margin-top:8px;">${hexSpaced(b.power)}</div>`;
   } else {
     $('bmu-power').innerHTML = `<div class="sub">${dash}</div>`;
   }
   // 0x0E00 HV detection
-  if (b.hv_detect && b.hv_detect.length >= 8) {
-    const hv1 = (beU16(b.hv_detect, 0) / 10).toFixed(1);
-    const hv2 = (beU16(b.hv_detect, 2) / 10).toFixed(1);
-    $('bmu-hv').innerHTML = `<table>${row('HV1', hv1 + ' V')}${row('HV2', hv2 + ' V')}</table>
+  if (b.hv_detect_pack_v != null) {
+    $('bmu-hv').innerHTML = `<div class="bignum">${b.hv_detect_pack_v.toFixed(1)}<span class="unit">V</span></div>
+      <div class="sub">HV1 — u16 [0:2] ÷ 10; bytes [2:4] repeat it (HV2)</div>
       <div class="hex" style="margin-top:8px;">${hexSpaced(b.hv_detect)}</div>`;
   } else {
     $('bmu-hv').innerHTML = `<div class="sub">${dash}</div>`;
   }
   // 0x0E40 Hall current sensor (bytes 0..1 BE i16 ÷ 10 A/bit)
-  if (b.shunt_state && b.shunt_state.length >= 4) {
-    const hall = (beI16(b.shunt_state, 0) / 10).toFixed(1);
+  if (b.hall_current_a != null) {
+    const hall = b.hall_current_a.toFixed(1);
     $('bmu-shunt').innerHTML = `<div class="bignum">${hall >= 0 ? '+' : ''}${hall}<span class="unit">A</span></div>
       <div class="sub">Hall current — i16 BE ÷ 10. Reads +1.4 A higher than 0x2800 shunt (BMS self-draw).</div>
       <div class="hex" style="margin-top:8px;">${hexSpaced(b.shunt_state)}</div>`;
