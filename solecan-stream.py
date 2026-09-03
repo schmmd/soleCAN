@@ -1658,7 +1658,7 @@ def serve_web(state: State, mode: str, host: str, port: int,
 # When run with --ui ble, we impersonate the firmware's Nordic UART Service
 # peripheral so the Android app (which scans by service UUID, not name) can
 # connect to the laptop instead of the tractor. Same UUIDs, same on-wire
-# framing as embedded/esp32-s3/src/main.cpp:925-1010:
+# framing as esp32-s3/src/main.cpp:
 #
 #     [u16 big-endian length] [length bytes of JSON]
 #
