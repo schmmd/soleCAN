@@ -1419,53 +1419,6 @@ def build_layout(state: State, now: float, mode: str = "live") -> Layout:
 
 # --- frame source -----------------------------------------------------------
 
-def iter_asc_messages_from(path: str, byte_offset: int):
-    """Yield can.Message from a Vector .asc file starting at byte_offset
-    (advanced past any partial first line). Backs --start P%, which seeks
-    by file position rather than scanning timestamps — line lengths are
-    roughly uniform so byte-% closely tracks time-%. Header lines and the
-    'Start of measurement' marker before the first data line are skipped
-    by the per-line shape check."""
-    f = open(path, "r", errors="replace")
-    try:
-        f.seek(byte_offset)
-        if byte_offset > 0:
-            f.readline()  # discard the partial line at the seek point
-        for line in f:
-            parts = line.split()
-            # Data line: "<ts> <bus> <hex_id[x]> Rx|Tx d <dlc> <byte>..."
-            if len(parts) < 7 or parts[4].lower() != "d":
-                continue
-            try:
-                ts = float(parts[0])
-                dlc = int(parts[5])
-            except ValueError:
-                continue
-            id_str = parts[2]
-            ext = id_str.endswith(("x", "X"))
-            if ext:
-                id_str = id_str[:-1]
-            try:
-                arb_id = int(id_str, 16)
-            except ValueError:
-                continue
-            data_tokens = parts[6:6 + dlc]
-            if len(data_tokens) < dlc:
-                continue
-            try:
-                data = bytes(int(b, 16) for b in data_tokens)
-            except ValueError:
-                continue
-            yield can.Message(
-                timestamp=ts,
-                arbitration_id=arb_id,
-                is_extended_id=ext,
-                data=data,
-            )
-    finally:
-        f.close()
-
-
 def open_source(args):
     """Return either a python-can Bus (live) or LogReader (replay)."""
     if args.replay:
@@ -1815,11 +1768,6 @@ def main() -> int:
                    help="write a python-can log of all received frames")
     p.add_argument("--refresh-hz", type=float, default=5.0,
                    help="TUI refresh rate (default 5)")
-    p.add_argument("--start", type=float, default=0.0,
-                   help="for --replay (.asc only), seek to this percentage "
-                        "of the file size and start realtime playback from "
-                        "there (0..100, default 0). Cheap O(1) seek; the "
-                        "TUI starts cold and populates as frames arrive.")
     p.add_argument("--timescale", type=float, default=1.0,
                    help="for --replay, multiplier on realtime playback "
                         "(1.0 = recorded speed, 2.0 = 2x faster, "
@@ -1860,24 +1808,10 @@ def main() -> int:
                         raw_logger(msg)
                     decode(msg, state, time.monotonic())
             else:
-                start_pct = max(0.0, min(100.0, args.start))
-                replay_iter = source
-                if start_pct > 0 and args.replay:
-                    if args.replay.lower().endswith(".asc"):
-                        import os
-                        size = os.path.getsize(args.replay)
-                        offset = int(size * start_pct / 100.0)
-                        replay_iter = iter_asc_messages_from(
-                            args.replay, offset)
-                    else:
-                        sys.stderr.write(
-                            "--start: only supported for .asc replays; "
-                            "ignoring\n")
-
                 first_msg_ts: Optional[float] = None
                 replay_start: Optional[float] = None
                 timescale = args.timescale if args.timescale > 0 else 1.0
-                for msg in replay_iter:
+                for msg in source:
                     if stop_evt.is_set():
                         break
                     if raw_logger is not None:
