@@ -28,6 +28,20 @@ barrier instead of sharing a reference.
 | — | SM 2.5 4-pin plug ([Amazon kit](https://www.amazon.com/dp/B0CLV48D6V)) | Mates with the Kelly's SM-4P port. |
 | — | 4 hookup wires to the RejsaCAN | 3V3, GPIO48, GPIO47, GND. |
 
+Alternatives, all DigiKey:
+
+- **U1**: [ADuM1201ARZ](https://www.digikey.com/en/products/detail/analog-devices-inc/ADUM1201ARZ/964322)
+  (the original the board is drawn around, ~$4.82) or
+  [NVE IL721-3E](https://www.digikey.com/en/products/detail/nve-corp-isolation-products/IL-721-3E/2217532)
+  (US-made, ~$8). Any SOIC-8 isolator with pins 1..8 =
+  VDD1/VOA/VIB/GND1/GND2/VOB/VIA/VDD2 fits; the sibling part numbers
+  (NSi8220/NSi8222, ADuM1200, IL711/IL712) do **not**.
+- **U2**: [TI LM78L05ACZ/NOPB](https://www.digikey.com/en/products/detail/texas-instruments/LM78L05ACZ-NOPB/6333)
+  is the same TO-92 pinout as the onsemi part. A TO-220
+  [ST L7805CV](https://www.digikey.com/en/products/detail/stmicroelectronics/L7805CV/585964)
+  also fits the holes but its IN and OUT are mirrored; see the regulator
+  step.
+
 Tools: fine-tip soldering iron, thin solder, flux, tweezers, multimeter with
 continuity beep, wire strippers. Solder wick is nice for the SOIC.
 
@@ -132,10 +146,17 @@ and `GND2`.
 
 ### Box
 
-Drill two 3/8" holes in the end panels of a box such as the Hammond 1591ATCL,
-fit grommets, pass the cables through **before** soldering if you want a clean
-job (or split the grommets). Mount the board on stick-on standoffs or VHB tape;
-the corner holes are zip-tie points, not post holes.
+A [Hammond 1591ATCL](https://www.digikey.com/en/products/detail/hammond-manufacturing/1591ATCL/1090768)
+(100 x 50 x 24.8 mm, clear lid so the `5V ON` LED is readable) and two
+[Keystone 740](https://www.digikey.com/en/products/detail/keystone-electronics/740/631422)
+0.250" rubber grommets, all from DigiKey, about $10.50 together. Any drilled
+ABS box works as well electrically.
+
+Drill a 3/8" (9.53 mm) hole in each end panel, one per cable, and fit a
+grommet; the 0.250" bore passes a 4-conductor cable comfortably. Pass the
+cables through **before** soldering if you want a clean job (or split the
+grommets). Mount the board on stick-on standoffs or VHB tape; the corner
+holes are zip-tie points, not post holes.
 
 ## Done when
 
