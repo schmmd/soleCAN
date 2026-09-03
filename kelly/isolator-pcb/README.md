@@ -1,9 +1,9 @@
 # Kelly UART isolator PCB
 
-PCB realization of `../isolator.txt` — a galvanic isolator dongle between the
+PCB realization of `../ISOLATOR.md` — a galvanic isolator dongle between the
 Kelly KLS7218M SM-4P port (floating, traction-pack referenced) and the
 OBD-powered RejsaCAN. Electrical design rationale, part choices, and behavior
-notes live in `../isolator.txt`; this directory only adds the board.
+notes live in `../ISOLATOR.md`; this directory only adds the board.
 
 ## Files
 
@@ -32,19 +32,6 @@ $KICLI pcb export drill --format excellon --excellon-units mm --generate-map --m
 $KICLI pcb render --side top    --zoom 1.0 --width 1400 --height 950 --quality high -o render_top.png    isolator.kicad_pcb
 $KICLI pcb render --side bottom --zoom 1.0 --width 1400 --height 950 --quality high -o render_bottom.png isolator.kicad_pcb
 ```
-
-## Rev A erratum
-
-**Rev A has U1 side 1 mis-pinned — GND1 on pin 2, VOA on 3, VIB on 4. Do not
-populate it.** The pin table assumed side 1 mirrored side 2; the ADuM1201 puts
-GND1 on **pin 4**, at the bottom. Side 2 was correct. No chip orientation
-recovers it, and populating shorts V<sub>OA</sub> (an output) to GND1 on
-power-up. Scrap the board.
-
-DRC passed rev A because the same wrong table generated both the pads and the
-netlist, so there was nothing to compare against. Rev B adds an assert in
-`generate_board.py` checking every pad's net against `ADUM1201`, a literal
-transcription of the datasheet pinout — the check that was missing.
 
 ## Generate-time checks
 
@@ -131,7 +118,7 @@ A drilled ABS box from the drawer works exactly as well electrically; the
 clear lid and the LED are the only argument for this one.
 
 **Kelly-side pad order (top to bottom) is RED, BLU, GRN, BLK** — blue and
-green are swapped relative to the SM-4P harness order in `../isolator.txt` so
+green are swapped relative to the SM-4P harness order in `../ISOLATOR.md` so
 the two signal traces reach the ADuM1201 pins without crossing. Follow the
 silk labels, not the harness order:
 
@@ -153,10 +140,10 @@ ESP32 (RejsaCAN) side — silk header `ESP32` — top to bottom: `3V3`,
 matches the ADuM1201 pins: the two grounds are separate domains and must
 never be tied together.
 
-## BOM (matches ../isolator.txt except the breakout)
+## BOM (matches ../ISOLATOR.md except the breakout)
 
 - U1 — ADuM1201 (any speed grade), **SOIC-8 soldered directly**. Cheaper verified drop-ins are under "Isolator options" in
-  `../isolator.txt`; **2Pai Semi π122U31** (~$0.26) is the current pick.
+  `../ISOLATOR.md`; **2Pai Semi π122U31** (~$0.26) is the current pick.
   Check that table before substituting — the sibling part numbers
   (π121U31, NSi8222, CA-IS3721) are mirrored rather than drop-in, and TI
   ISO7721 has a different pinout again.
@@ -197,7 +184,7 @@ it ("temporarily constrained supply"). Buy two while they are there.
 
 **U1 substitution:** `NSi8221N1` is the 1-fwd/1-rev, ADuM1201-pin-order part —
 the one this board needs. `NSi8220`/`NSi8222` are **not** drop-ins (see the
-channel-arrangement table in `../isolator.txt`). The genuine
+channel-arrangement table in `../ISOLATOR.md`). The genuine
 [ADuM1201ARZ](https://www.digikey.com/en/products/detail/analog-devices-inc/ADUM1201ARZ/964322)
 also fits at ~$4.82 if you want the part the docs are written around.
 
@@ -236,5 +223,5 @@ For reference, the genuine parts if you ever do want them (prices/stock
 | SYM-001T-P0.6(N) — pin contact, 22–28 AWG | [1465026](https://www.digikey.com/en/products/detail/jst-sales-america-inc/SYM-001T-P0-6-N/1465026) | 0.10 | → into SMR, cut tape, MOQ 1 |
 | SHF-001T-0.8BS — socket contact, 22–28 AWG | [527351](https://www.digikey.com/en/products/detail/jst-sales-america-inc/SHF-001T-0-8BS/527351) | 0.029 | → into SMP, **reel only, MOQ 5000** |
 
-Wire per `../isolator.txt` "Cabling": twist green+black and blue+red, keep the
+Wire per `../ISOLATOR.md` "Cabling": twist green+black and blue+red, keep the
 Kelly run short, label both ends.

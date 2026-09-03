@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Generate the Kelly UART galvanic-isolator PCB (see ../isolator.txt).
+"""Generate the Kelly UART galvanic-isolator PCB (see ../ISOLATOR.md).
 
 Emits isolator.kicad_pcb (KiCad s-expression, v7 format — KiCad 8/9/10 open
 and upgrade it transparently). Fab outputs are produced from it with
 kicad-cli; see README.md in this directory.
 
-Topology (from isolator.txt). Rows are in physical pin order,
+Topology (from ISOLATOR.md). Rows are in physical pin order,
 per ADuM1201 datasheet Rev. L Figure 5 -- note GND1 is pin 4, at the BOTTOM
 of side 1, not pin 2. Side 1 is NOT the mirror of side 2:
 

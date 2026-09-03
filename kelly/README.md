@@ -69,7 +69,7 @@ still open:
    boot ROM also prints on TXD0 at every reset. The Kelly UART now uses plain
    GPIOs 47/48 — fixed, CONFIRMED.
 3. **Chassis-vs-traction grounding** (below) still degrades the link when the
-   board runs on OBD power; `isolator.txt` documents the fix.
+   board runs on OBD power; `ISOLATOR.md` documents the fix.
 
 The ~19,900 edge-timing figure was measured through problems 1 and 2 together
 and is void; the auto-baud sweep has been removed and all tooling pins 19200.
@@ -83,7 +83,7 @@ floating (battery laptop, no chassis contact) reads cleanly. Always connect
 V− as the signal return, and keep the receiver otherwise floating — or
 galvanically isolate the UART when the host must share chassis ground. The
 build plan for that isolator (ADuM1201 dongle powered from SM-4P pin 1) is in
-`isolator.txt`.
+`ISOLATOR.md`.
 
 **Signal level is logic-level (TTL) UART, not bipolar RS-232 — CONFIRMED.** A
 full bidirectional monitor session succeeded through a bare CH340 (TTL)
