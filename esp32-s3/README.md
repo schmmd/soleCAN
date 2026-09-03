@@ -598,7 +598,6 @@ Bench notes:
 ```
 esp32-s3/
 ├── platformio.ini          # board envs + build configuration
-├── boards/                 # custom board JSONs (LilyGo T-2CAN)
 ├── copy_dashboard.py       # pre-build: copies repo-root dashboard.html → src/
 ├── inject_build_overrides.py # pre-build: injects AP_SSID / AP_PASS / MDNS_NAME
 ├── device-test.py          # bench acceptance suite for a flashed device
