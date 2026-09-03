@@ -415,7 +415,7 @@ ChargerState g_charger;
 ChgrCmdState g_chgr_cmd;
 #if defined(ENABLE_KELLY)
 KellyState  g_kelly;   // updated by kellyPoll() in loop(), read when building JSON
-// Debug counters, always exposed in /json under "kelly_dbg" so we can see the
+// Link-health counters, always exposed in /json under "kelly_link" so we can see the
 // serial path even when no valid frame decodes: how many polls fired, how many
 // bytes came back, and the raw hex of the last chunk received.
 uint32_t    g_kelly_polls    = 0;   // query cycles started
@@ -1584,7 +1584,7 @@ void kellyPoll() {
         rxbuf[rxlen++] = (uint8_t)kelly.read();
         g_kelly_rx_total++;
     }
-    if (rxlen > 0) {   // snapshot for /json kelly_dbg
+    if (rxlen > 0) {   // snapshot for /json kelly_link
         g_kelly_last_rx_len = rxlen < 32 ? rxlen : 32;
         memcpy(g_kelly_last_rx, rxbuf, g_kelly_last_rx_len);
     }
@@ -2016,15 +2016,14 @@ String buildJson(bool pretty = true, bool minimal = false) {
             if (g_kelly.error_status & (1 << b)) errs.add(KELLY_ERROR_NAMES[b]);
         }
     }
-#if defined(KELLY_DEBUG)
-    // Serial-path diagnostics (build with -DKELLY_DEBUG). polls should climb
+    // Serial-path diagnostics. polls should climb
     // (board is querying); rx_total > 0 means the Kelly is answering; frames_ok
     // vs frames_bad is the per-attempt success rate on a live link; timeouts
     // counts attempts with zero bytes back (controller unpowered, e.g. key-off);
     // block_gap_max_ms is the worst flicker; last_rx shows raw bytes for
     // framing/baud checks.
     if (!minimal) {
-        auto kd = doc["kelly_dbg"].to<JsonObject>();
+        auto kd = doc["kelly_link"].to<JsonObject>();
         kd["polls"]       = g_kelly_polls;
         kd["rx_total"]    = g_kelly_rx_total;
         kd["baud"]        = KELLY_BAUD;
@@ -2041,7 +2040,6 @@ String buildJson(bool pretty = true, bool minimal = false) {
         hex[n * 2] = '\0';
         kd["last_rx"] = hex;
     }
-#endif  // KELLY_DEBUG
 #endif  // ENABLE_KELLY
 
     if (!minimal) {
