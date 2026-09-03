@@ -28,7 +28,7 @@ On the dual-LED RejsaCAN board the three LEDs are:
 The Kelly e-hydraulic pump monitor is opt-in (`-DENABLE_KELLY`) and RejsaCAN-only
 (`ENABLE_KELLY` `#error`s on any other board). It polls the Kelly KLS controller
 on UART1 and folds telemetry into `/json`. Its liveness is currently observable
-only by reading `kelly_dbg` counters in `/json` — there is no at-a-glance signal
+only by reading `kelly_link` counters in `/json` — there is no at-a-glance signal
 that the serial link is up and streaming.
 
 Yellow is the natural home for that signal: Kelly is RejsaCAN-only, and RejsaCAN

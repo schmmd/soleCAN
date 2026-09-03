@@ -152,7 +152,7 @@ holes are zip-tie points, not post holes.
 ## Done when
 
 Flash the dashboard firmware with `-DENABLE_KELLY -DKELLY_DEBUG`, plug the
-SoleCAN into the OBD port, and watch `kelly_dbg` at `http://tractor.local/json`
+SoleCAN into the OBD port, and watch `kelly_link` at `http://tractor.local/json`
 with the pump running. `frames_ok` should climb at roughly 99% of polls. Stuck
 at zero means a wiring or U1 problem; climbing slowly with many errors means
 the isolation is not doing its job, so recheck that GND1 and GND2 are open.
