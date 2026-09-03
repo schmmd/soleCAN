@@ -7,8 +7,9 @@ interface of the firmware against real hardware:
   - HTTP: /json schema + health counters, / dashboard, captive-portal 302
   - mDNS: <name>.local resolves and serves the same device
   - socketcand (port 28600): handshake, busy-slot refusal, invalid channel
-  - SLCAN over USB CDC: version query, channel open, TX-rejection (confirms
-    the shipping build is a listen-only passive tap)
+  - SLCAN over USB CDC: `mode slcan` switch (the port boots in `logging`),
+    version query, channel open, TX-rejection (confirms the shipping build is
+    a listen-only passive tap). The port is put back in `logging` afterwards.
   - CAN receive + decode, end to end: injects synthetic J1939 frames from a
     bench CAN adapter and checks the decoded engineering values in /json,
     plus the raw-frame taps (socketcand and SLCAN)
@@ -44,12 +45,12 @@ mDNS name.
 Examples (from the repo root, where the uv project lives):
 
   # WiFi-only smoke test, Mac joined to the device's `tractor` AP
-  uv run python embedded/esp32-s3/device-test.py
+  uv run python esp32-s3/device-test.py
 
   # Full pre-ship run: USB serial + bench injector + ACK adapter + BLE +
   # LED prompts. Pass --expect-vin only when the board is powered from a
   # 12 V supply — on USB power the rail sense reads ~4.6 V.
-  uv run python embedded/esp32-s3/device-test.py \
+  uv run python esp32-s3/device-test.py \
       --serial /dev/cu.usbmodem101 \
       --inject-interface slcan --inject-channel /dev/cu.usbserial-A50 \
       --ack-interface canalystii --ack-channel 0 \
@@ -300,10 +301,15 @@ def stage_http(args) -> dict | None:
         report("WARN", f"firmware version is {version!r} — build was made "
                        "without GIT_SHA; flashed image is not identifiable")
     else:
-        report("INFO", f"firmware version {version}")
+        release = j.get("release")
+        report("INFO", f"firmware version {version}"
+                       + (f" ({release})" if release else ""))
     if args.expect_version:
-        check(version == args.expect_version, "firmware version matches",
-              f"expected {args.expect_version}, got {version}")
+        release = j.get("release")
+        check(args.expect_version in (version, release),
+              "firmware version matches",
+              f"expected {args.expect_version}, got {version}"
+              + (f" ({release})" if release else ""))
 
     state = jget(j, "can.state")
     check(state == "running", "CAN controller running", f"state={state}")
@@ -344,13 +350,19 @@ def stage_http(args) -> dict | None:
 
     # The captive-portal redirect is AP-only: on the soft-AP an unknown path
     # must 302 so phones auto-open the dashboard, but over the bench network
-    # (station interface) a mistyped path is a plain 404.
+    # (station interface) a mistyped path is a plain 404. The firmware decides
+    # by the interface the request arrived on, not by the host we typed — so
+    # reaching the AP by mDNS name (or any alias) still redirects. Key off the
+    # redirect target instead of comparing --host to the AP address: a 302 is
+    # only correct when it points at the AP's own IP.
     status, headers, _ = http_get(args.host, "/definitely-not-a-page")
     loc = headers.get("Location", "")
-    if args.host.split(":")[0] == AP_IP:
-        check(status == 302 and loc.startswith("http://"),
+    if status == 302:
+        loc_host = urllib.parse.urlparse(loc).hostname
+        check(loc_host == AP_IP,
               "unknown path 302-redirects on the AP (captive portal)",
-              f"status={status}, Location={loc!r}")
+              f"Location={loc!r} is not the AP address {AP_IP} — a station "
+              "-interface request must 404, not redirect")
     else:
         check(status == 404,
               "unknown path 404s on the station interface",
@@ -733,6 +745,24 @@ def open_serial(port: str):
     return serial.Serial(port, 115200, timeout=0.2)
 
 
+def set_usb_mode(ser, name: str) -> bool:
+    """Switch the device's USB port role via the console `mode` command.
+
+    SLCAN is no longer the default role (the port boots in `logging`), so every
+    SLCAN check has to ask for it first. The firmware answers `usb mode -> X`;
+    in slcan mode it also stops emitting log lines, so callers should clear the
+    input buffer afterwards.
+    """
+    ser.reset_input_buffer()
+    ser.write(f"mode {name}\r\n".encode())
+    deadline = time.monotonic() + 2
+    reply = b""
+    while time.monotonic() < deadline and b"->" not in reply:
+        reply += ser.read(256)
+    ser.reset_input_buffer()
+    return f"-> {name}".encode() in reply
+
+
 def stage_slcan(args) -> None:
     section("SLCAN (USB serial)")
     if not args.serial:
@@ -744,7 +774,11 @@ def stage_slcan(args) -> None:
         check(False, f"open {args.serial}", str(e))
         return
     with ser:
-        ser.reset_input_buffer()
+        if not set_usb_mode(ser, "slcan"):
+            check(False, "`mode slcan` switches the USB port to SLCAN",
+                  "no 'usb mode -> slcan' acknowledgement")
+            return
+        check(True, "`mode slcan` switches the USB port to SLCAN")
         # Version query before opening the channel, so no frame lines can
         # interleave with the reply.
         ser.write(b"V\r")
@@ -773,6 +807,7 @@ def stage_slcan(args) -> None:
 
         ser.write(b"C\r")
         time.sleep(0.2)
+        set_usb_mode(ser, "logging")  # leave the port in its boot role
     check(True, "'C' closes the channel and port released")
 
 
@@ -881,7 +916,8 @@ def stage_inject(args) -> None:
     if args.serial:
         try:
             ser_tap = open_serial(args.serial)
-            ser_tap.reset_input_buffer()
+            if not set_usb_mode(ser_tap, "slcan"):
+                report("WARN", "SLCAN tap: `mode slcan` not acknowledged")
             ser_tap.write(b"O\r")
             # Wait for the CR ack so the channel is confirmed open before
             # anything is injected — otherwise the first frame can race the
@@ -1170,6 +1206,7 @@ def stage_inject(args) -> None:
         if ser_tap:
             try:
                 ser_tap.write(b"C\r")
+                set_usb_mode(ser_tap, "logging")  # leave the port as it boots
                 ser_tap.close()
             except Exception:  # noqa: BLE001
                 pass
@@ -1347,8 +1384,9 @@ def main() -> int:
     ap.add_argument("--expect-mode", choices=["listen_only", "normal"],
                     default="listen_only",
                     help="CAN bus mode the flashed build should report")
-    ap.add_argument("--expect-version", metavar="SHA",
-                    help="git short SHA the flashed build should report")
+    ap.add_argument("--expect-version", metavar="SHA|TAG",
+                    help="git short SHA or release tag the flashed build "
+                         "should report")
     ap.add_argument("--expect-vin", type=float, metavar="VOLTS",
                     help="expected 12 V rail reading (RejsaCAN VIN sense)")
     ap.add_argument("--expect-sd", action="store_true",

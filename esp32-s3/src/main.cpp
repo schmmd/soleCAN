@@ -415,7 +415,7 @@ ChargerState g_charger;
 ChgrCmdState g_chgr_cmd;
 #if defined(ENABLE_KELLY)
 KellyState  g_kelly;   // updated by kellyPoll() in loop(), read when building JSON
-// Debug counters, always exposed in /json under "kelly_dbg" so we can see the
+// Link-health counters, always exposed in /json under "kelly_link" so we can see the
 // serial path even when no valid frame decodes: how many polls fired, how many
 // bytes came back, and the raw hex of the last chunk received.
 uint32_t    g_kelly_polls    = 0;   // query cycles started
@@ -1584,7 +1584,7 @@ void kellyPoll() {
         rxbuf[rxlen++] = (uint8_t)kelly.read();
         g_kelly_rx_total++;
     }
-    if (rxlen > 0) {   // snapshot for /json kelly_dbg
+    if (rxlen > 0) {   // snapshot for /json kelly_link
         g_kelly_last_rx_len = rxlen < 32 ? rxlen : 32;
         memcpy(g_kelly_last_rx, rxbuf, g_kelly_last_rx_len);
     }
@@ -1647,13 +1647,10 @@ void kellyPoll() {
 
 // Read exactly n bytes from the Kelly, or false on timeout at `deadline`.
 static bool kellyReadExact(uint8_t* buf, size_t n, uint32_t deadline) {
-    size_t got = 0;
-    while (got < n) {
-        if ((int32_t)(millis() - deadline) >= 0) return false;   // wrap-safe
-        if (kelly.available()) buf[got++] = (uint8_t)kelly.read();
-        else delay(1);   // yields to WiFi/other tasks while we wait
-    }
-    return true;
+    int32_t left = (int32_t)(deadline - millis());   // wrap-safe
+    if (left <= 0) return false;
+    kelly.setTimeout((uint32_t)left);
+    return kelly.readBytes(buf, n) == n;
 }
 
 // Read one checksum-valid ETS reply for `cmd`, resyncing on the echoed command
@@ -2018,15 +2015,14 @@ String buildJson(bool pretty = true, bool minimal = false) {
             if (g_kelly.error_status & (1 << b)) errs.add(KELLY_ERROR_NAMES[b]);
         }
     }
-#if defined(KELLY_DEBUG)
-    // Serial-path diagnostics (build with -DKELLY_DEBUG). polls should climb
+    // Serial-path diagnostics. polls should climb
     // (board is querying); rx_total > 0 means the Kelly is answering; frames_ok
     // vs frames_bad is the per-attempt success rate on a live link; timeouts
     // counts attempts with zero bytes back (controller unpowered, e.g. key-off);
     // block_gap_max_ms is the worst flicker; last_rx shows raw bytes for
     // framing/baud checks.
     if (!minimal) {
-        auto kd = doc["kelly_dbg"].to<JsonObject>();
+        auto kd = doc["kelly_link"].to<JsonObject>();
         kd["polls"]       = g_kelly_polls;
         kd["rx_total"]    = g_kelly_rx_total;
         kd["baud"]        = KELLY_BAUD;
@@ -2043,7 +2039,6 @@ String buildJson(bool pretty = true, bool minimal = false) {
         hex[n * 2] = '\0';
         kd["last_rx"] = hex;
     }
-#endif  // KELLY_DEBUG
 #endif  // ENABLE_KELLY
 
     if (!minimal) {
@@ -2381,42 +2376,34 @@ static bool kellyTrimByte(uint8_t c) {
            c == '\r' || c == '\v' || c == '\f';
 }
 
-// Append `p`'s decoded value to `out` as a JSON value: a bare number for KP_U
-// and KP_BIT, or a quoted string for KP_HEX and KP_ASCII. Mirrors read_param()
-// in the Python dumper.
-static void kellyAppendParamValue(String& out, const uint8_t* f, const KellyParam& p) {
-    static const char hexd[] = "0123456789abcdef";
-    if (p.size == KP_BIT) {
-        out += (int)((f[p.offset] >> p.pos) & 1);
-        return;
-    }
+static String hexString(const uint8_t* b, size_t n) {
+    static const char hexd[] = "0123456789abcdef";   // not HEX: that's an Arduino macro
+    String out; out.reserve(n * 2);
+    for (size_t i = 0; i < n; i++) { out += hexd[b[i] >> 4]; out += hexd[b[i] & 0x0F]; }
+    return out;
+}
+
+// Store `p`'s decoded value under its name: a bare number for KP_U and KP_BIT,
+// a hex or trimmed-ASCII string otherwise. Mirrors read_param() in the Python
+// dumper (non-ASCII bytes become U+FFFD, like decode("ascii", "replace")).
+static void kellySetParam(JsonObject o, const uint8_t* f, const KellyParam& p) {
+    if (p.size == KP_BIT) { o[p.name] = (f[p.offset] >> p.pos) & 1; return; }
     uint8_t n = (p.size == KP_BYTE) ? 1 : (uint8_t)(p.pos + 1);
     if (p.fmt == KP_HEX) {
-        out += '"';
-        for (uint8_t i = 0; i < n; i++) {
-            uint8_t b = f[p.offset + i];
-            out += hexd[b >> 4];
-            out += hexd[b & 0x0F];
-        }
-        out += '"';
+        o[p.name] = hexString(f + p.offset, n);
     } else if (p.fmt == KP_ASCII) {
         int lo = p.offset, hi = p.offset + n;                 // half-open [lo, hi)
         while (lo < hi && kellyTrimByte(f[lo])) lo++;
         while (hi > lo && kellyTrimByte(f[hi - 1])) hi--;
-        out += '"';
+        String v;
         for (int i = lo; i < hi; i++) {
-            uint8_t c = f[i];
-            if (c >= 0x80)      out += "\\uFFFD";              // decode("ascii","replace")
-            else if (c == '"')  out += "\\\"";
-            else if (c == '\\') out += "\\\\";
-            else if (c < 0x20) { out += "\\u00"; out += hexd[c >> 4]; out += hexd[c & 0x0F]; }
-            else                out += (char)c;
+            if (f[i] >= 0x80) v += "\xEF\xBF\xBD"; else v += (char)f[i];
         }
-        out += '"';
+        o[p.name] = v;
     } else {                                                  // KP_U: big-endian unsigned
         uint32_t v = 0;
         for (uint8_t i = 0; i < n; i++) v = (v << 8) | f[p.offset + i];
-        out += v;
+        o[p.name] = v;
     }
 }
 
@@ -2439,29 +2426,15 @@ void handleKellyConfig() {
                     "{\"error\":\"no flash session (Kelly unpowered or absent)\"}");
         return;
     }
-    uint16_t ver = (uint16_t(flash[16]) << 8) | flash[17];
+    JsonDocument doc;
+    doc["blocks_read"]  = ok;
+    doc["blocks_total"] = 32;
+    doc["version_word"] = (uint16_t(flash[16]) << 8) | flash[17];
+    JsonObject params = doc["parameters"].to<JsonObject>();
+    for (const KellyParam& p : KELLY_PARAMS) kellySetParam(params, flash, p);
+    doc["raw"] = hexString(flash, sizeof(flash));
     String out;
-    out.reserve(3584);                       // 512*2 hex + decoded params + envelope
-    out = "{\"blocks_read\":";      out += ok;
-    out += ",\"blocks_total\":32";
-    out += ",\"version_word\":";    out += (int)ver;
-    out += ",\"parameters\":{";
-    const size_t nparams = sizeof(KELLY_PARAMS) / sizeof(KELLY_PARAMS[0]);
-    for (size_t i = 0; i < nparams; i++) {
-        if (i) out += ',';
-        out += '"';
-        out += KELLY_PARAMS[i].name;         // fixed table, all JSON-safe keys
-        out += "\":";
-        kellyAppendParamValue(out, flash, KELLY_PARAMS[i]);
-    }
-    out += '}';
-    out += ",\"raw\":\"";
-    static const char hexd[] = "0123456789abcdef";   // not HEX: that's an Arduino macro
-    for (int i = 0; i < 512; i++) {
-        out += hexd[flash[i] >> 4];
-        out += hexd[flash[i] & 0x0F];
-    }
-    out += "\"}";
+    serializeJson(doc, out);
     server.send(200, "application/json", out);
 }
 #endif  // ENABLE_KELLY
@@ -2481,7 +2454,8 @@ void handleWifiForm() {
               "<p>SSID (blank = AP only):<br><input name=ssid maxlength=32></p>"
               "<p>Password:<br><input name=pass type=password maxlength=63></p>"
               "<p>AP password (required):<br><input name=ap_pass type=password></p>"
-              "<button type=submit>Save &amp; re-join</button></form>");
+              "<button type=submit>Save &amp; re-join</button></form>"
+              "<p><a href=/>&lsaquo; Dashboard</a></p>");
     server.send(200, "text/html", body);
 }
 
@@ -2631,7 +2605,7 @@ void handleRoot() {
 
 #if defined(HAS_SD)
 // ── SD file access API ────────────────────────────────────────────────────────
-// See docs/superpowers/specs/2026-07-18-sd-file-api-design.md. /sd/status is
+// See "Pulling files over WiFi" in esp32-s3/README.md. /sd/status is
 // in-RAM only (poll freely); /sd/sessions, /sd/sessions/{id} GET (tar) and DELETE
 // touch the card under g_sd_mutex and answer 503 unless a session is logging.
 
@@ -2658,6 +2632,7 @@ static const char SD_INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
   th,td{border-color:#333}a{color:#6bf}}
 </style>
 <h1>SD sessions</h1>
+<p><a href=/>&lsaquo; Dashboard</a></p>
 <div id=status class=muted>Loading&hellip;</div>
 <p><button onclick=load()>Refresh</button> <span id=err class=muted></span></p>
 <table><thead><tr><th>Session<th class=num>Files<th class=num>Size<th>Download</thead>

@@ -11,7 +11,7 @@ J1939 CAN-bus tooling for a Solectrac electric tractor.
 | `solecan_proto.py` | Shared J1939 decode core (SA/PGN map, scalings) — single source of truth for both tools. |
 | `dashboard.html` | The canonical HTML dashboard; used by solecan-stream.py, the firmware, and Android app. |
 | `bms/` | UDS diagnostics for the BMS port (separate bus). |
-| `embedded/esp32-s3/` | ESP32-S3 firmware: WiFi dashboard, JSON, BLE, USB SLCAN, socketcand. |
+| `esp32-s3/` | ESP32-S3 firmware: WiFi dashboard, JSON, BLE, USB SLCAN, socketcand. |
 | `android/` | Android app that mirrors the ESP32 dashboard over BLE. |
 | `DOCUMENTATION.md` | Main-bus J1939 decode, CAN topology, OBD-II pinout, cluster hardware, vendor error-code tables. |
 
@@ -135,41 +135,17 @@ main-bus tools and `solecan_proto.py`; its DID map lives in
 python3 bms/solectrac-bms-diagnostics.py
 ```
 
-## Embedded firmware — `embedded/esp32-s3/`
+## Embedded firmware — `esp32-s3/`
 
 ESP32-S3 firmware that re-implements the main-bus J1939 decode in C++ and
-exposes it five ways: WiFi HTML dashboard, JSON endpoint, BLE (Nordic UART
-Service), USB SLCAN, and socketcand. Supports the Adafruit Feather S3 and the
-LilyGo T-2CAN; board pin maps are `#ifdef`-selected. The shared
-`dashboard.html` from the repo root is baked into the firmware binary at build
-time.
-
-The reproducible path is Docker (context = repo root, so the canonical
-dashboard is included):
-
-```sh
-docker build -f embedded/esp32-s3/Dockerfile \
-    --build-arg WIFI_SSID="..." --build-arg WIFI_PASS="..." -t solectrac-fw .
-docker run --rm -v "$PWD/out:/out" solectrac-fw   # extracts bins to out/
-```
-
-Native PlatformIO also works (`pio run -e lilygo_t2can` /
-`-e adafruit_feather_s3`). See [`embedded/esp32-s3/README.md`](embedded/esp32-s3/README.md)
-for the full build, wiring, and flashing guide.
+exposes it as a WiFi dashboard, JSON endpoint, BLE, USB SLCAN, and socketcand.
+Supports the RejsaCAN, LilyGo T-2CAN, and Adafruit Feather S3. Build, wiring,
+and flashing are in [`esp32-s3/README.md`](esp32-s3/README.md).
 
 ## Android app — `android/`
 
-Mirrors the ESP32 web dashboard over BLE so the phone doesn't need to join
-the tractor's WiFi. Loads the shared `dashboard.html` in a WebView and pipes
-JSON snapshots from the NUS characteristic. Docker build:
-
-```sh
-docker build -f android/Dockerfile -t solectrac-android .
-docker run --rm -v "$PWD/out:/out" solectrac-android   # APK -> out/
-```
-
-Native Gradle build is also supported. See
-[`android/README.md`](android/README.md) for details.
+Mirrors the ESP32 dashboard over BLE so the phone doesn't need to join the
+tractor's WiFi. See [`android/README.md`](android/README.md).
 
 ## Disclaimer
 

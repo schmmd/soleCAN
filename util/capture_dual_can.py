@@ -71,10 +71,6 @@ class TaggedForwarder(can.Listener):
         self.unique_ids.add(msg.arbitration_id)
         self.target.on_message_received(msg)
 
-    def stop(self) -> None:
-        # Downstream target is stopped by main(); nothing to release here.
-        pass
-
 
 class ChannelDispatcher(can.Listener):
     """Route incoming frames from a multi-channel bus to per-channel listeners."""
@@ -88,9 +84,6 @@ class ChannelDispatcher(can.Listener):
             return
         for listener in listeners:
             listener.on_message_received(msg)
-
-    def stop(self) -> None:
-        pass
 
 
 class ChannelBus:
@@ -108,11 +101,6 @@ class ChannelBus:
     def send(self, msg: can.Message, timeout: float | None = None) -> None:
         msg.channel = self._channel
         self._bus.send(msg, timeout=timeout)
-
-    def recv(self, timeout: float | None = None) -> can.Message | None:
-        # IsoTp only falls back to bus.recv when no BufferedReader is given;
-        # we always pass one, so this path is unused.  Implemented for parity.
-        return self._bus.recv(timeout=timeout)
 
 
 def status_thread(diag_fwd: TaggedForwarder, obd_fwd: TaggedForwarder,

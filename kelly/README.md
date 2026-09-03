@@ -8,13 +8,23 @@ topology and why the hydraulics don't appear there live in
 `../DOCUMENTATION.md` §"What is NOT on this bus".
 
 This directory documents the Kelly's **4-pin serial diagnostic port** and
-provides `solectrac-kelly-monitor.py`, a read-only live monitor for it.
+provides two read-only tools for it: `solectrac-kelly-monitor.py` (live
+telemetry) and `solectrac-kelly-dump-config.py` (the stored flash
+configuration). Neither can write to the controller.
 
-The RejsaCAN firmware can also read this port directly and add the pump
-telemetry to the tractor dashboard — build with `-DENABLE_KELLY`, wiring the
-controller's Tx/Rx to the board's **GPIO47 (RX) / GPIO48 (TX)** (with the 5 V-TTL
-series resistor below). See `../embedded/esp32-s3/README.md` §"Kelly e-hydraulic
-pump monitor".
+## Ways to reach the port
+
+- **USB TTL adapter** (CH340 or similar) on a floating laptop — the simplest
+  path; see "Connector and wire protocol" for the wiring.
+- **Kelly Bluetooth SPP adapter** — appears as a serial port; see "Bluetooth
+  (SPP)" under the monitor tool.
+- **RejsaCAN firmware** built with `-DENABLE_KELLY` polls the port itself on
+  **GPIO47 (RX) / GPIO48 (TX)** and adds the pump telemetry to the tractor
+  dashboard. When the board runs on OBD power it needs the isolator dongle
+  (see "Grounding and isolation"). See `../esp32-s3/README.md` §"Kelly
+  e-hydraulic pump monitor".
+- **RejsaCAN USB bridge mode** (`mode kelly`) passes the port through to USB
+  so the Python tools here can reach the controller via the board.
 
 ## Connector and wire protocol
 
@@ -36,43 +46,38 @@ metered (the supply pair) and sit at pins 1 and 4, the two ends. **Green = Tx
 driving the host's RX (through the series resistor) and blue on the host's TX,
 the controller returns valid checksummed telemetry.
 
-Pin 1's supply measures **~12 V** across V+/V− on this tractor — CONFIRMED by
-meter, not the ~5 V the pin was previously assumed to carry. Leave it
+Pin 1 is a **~12 V** supply rail (metered across V+/V−, CONFIRMED). Leave it
 unconnected, and in particular never wire it to a TTL adapter's VCC or a
-level-shifter's HV reference: 12 V there will destroy the part. This is a
-low-voltage supply rail and is unrelated to the Tx/Rx logic swing (5 V TTL —
-see below).
+level-shifter's HV reference: 12 V there will destroy the part. It is
+unrelated to the Tx/Rx logic swing (5 V TTL — see below). The isolator dongle
+is the one thing that uses it, as its isolated power source.
 
-Wire protocol is **8N1, documented at 19200 baud** (but see the actual line
-rate below), framed as
-`[CMD][LEN][DATA 0..16][CHECKSUM]` in 19-byte frames, checksum
-`(CMD + LEN + sum(DATA)) & 0xFF`. Live monitor uses commands `0x3A`/`0x3B`/`0x3C`
-(each a zero-data query returning 16 bytes); concatenated they form a 48-byte
-telemetry block. Flash config is a separate 512-byte read/write command set.
-The community `kelly-connect-oss` project reimplements this protocol and
-documents the field offsets.
+Wire protocol is **8N1 at 19200 baud — CONFIRMED** (sustained ~99 % frame
+success), framed as `[CMD][LEN][DATA 0..16][CHECKSUM]`, up to 19 bytes,
+checksum `(CMD + LEN + sum(DATA)) & 0xFF`. Live monitor uses commands
+`0x3A`/`0x3B`/`0x3C` (each a zero-data query returning 16 bytes);
+concatenated they form a 48-byte telemetry block. Flash config is a separate
+512-byte read/write command set. The community `kelly-connect-oss` project
+reimplements this protocol and documents the field offsets.
 
-**Line rate is the documented 19200 baud — CONFIRMED** (sustained ~99 % frame
-success once the receive path was fixed). What earlier looked like a baud
-mismatch was two independent receive-path problems, both since fixed, plus one
-still open:
+**Signal level is 5 V TTL UART, not bipolar RS-232 — CONFIRMED.** A full
+bidirectional monitor session succeeded through a bare CH340 (TTL) USB-serial
+adapter, which could not have happened against an RS-232 port, so no MAX3232
+is needed. The logic swing measures **~5 V** on Tx and Rx (to V−) under active
+traffic: the line idles high near 5 V and pulses to 0 V. That's fine for a
+5 V-friendly CH340, but it matters when driving a 3.3 V ESP32 GPIO, which is
+not 5 V-tolerant: put a **~1–2.2 kΩ resistor in series** on the Kelly-Tx →
+ESP32-RX line (or a BSS138 level-shifter on that line). The resistor is not a
+divider — the ESP32's internal clamp diode holds the pin at 3.3 V and the
+series resistor limits clamp current to <1 mA. The other direction
+(ESP32-TX → Kelly-Rx) is a plain wire; 3.3 V clears the Kelly's input-high
+threshold.
 
-1. **Arduino core 2.0.x broke Kelly reception in the RejsaCAN firmware.**
-   Builds on Arduino core 2.0.17 (the last version PlatformIO's official
-   `espressif32` platform carries) read only mangled frames on a wire that
-   core-3 builds decode 100 %; an A/B bench with otherwise-identical code
-   isolated the core version as the cause (the mechanism inside the core was
-   not identified). The firmware now builds on Arduino core 3.x via the
-   pioarduino platform — fixed, CONFIRMED.
-2. **The board's rear RXD0/TXD0 pads (GPIO44/43) corrupt the link** even with
-   a known-good core — they are the ESP32-S3's UART0 console pins, and the
-   boot ROM also prints on TXD0 at every reset. The Kelly UART now uses plain
-   GPIOs 47/48 — fixed, CONFIRMED.
-3. **Chassis-vs-traction grounding** (below) still degrades the link when the
-   board runs on OBD power; `isolator.txt` documents the planned fix.
+The protocol is single-master request/response — sniff passively or be the only
+talker. The flash-write command set can misconfigure the controller; capture
+those frames for reference, never replay them.
 
-The ~19,900 edge-timing figure was measured through problems 1 and 2 together
-and is void; the auto-baud sweep has been removed and all tooling pins 19200.
+## Grounding and isolation
 
 **Grounding dominates reliability on this port.** The Kelly is powered from
 the traction pack, so its V− is not at chassis potential. A receiver
@@ -82,34 +87,36 @@ signal reference and the link degrades or dies outright; the same adapter
 floating (battery laptop, no chassis contact) reads cleanly. Always connect
 V− as the signal return, and keep the receiver otherwise floating — or
 galvanically isolate the UART when the host must share chassis ground. The
-build plan for that isolator (ADuM1201 dongle powered from SM-4P pin 1) is in
-`isolator.txt`.
+build guide for that isolator (a small dongle powered from SM-4P pin 1) is in
+`ISOLATOR.md`, and the KiCad board and gerbers are in `isolator-pcb/`.
 
-**Signal level is logic-level (TTL) UART, not bipolar RS-232 — CONFIRMED.** A
-full bidirectional monitor session succeeded through a bare CH340 (TTL)
-USB-serial adapter: the controller received the query commands and returned
-valid checksummed frames, which a TTL adapter could not do against an RS-232
-port. So a plain TTL USB-UART works directly and no MAX3232 is needed.
+## How the link facts were established
 
-The logic swing measures **~5 V** on Tx and Rx (to V−) under active traffic —
-CONFIRMED, so this is **5 V TTL**. The line idles high near 5 V and pulses to
-0 V. That's fine for a 5 V-friendly CH340, but it matters when driving a 3.3 V
-ESP32 GPIO, which is not 5 V-tolerant: put a **~1–2.2 kΩ resistor in series** on
-the Kelly-Tx → ESP32-RX line (or a BSS138 level-shifter on that line). The
-resistor is not a divider — the ESP32's internal clamp diode holds the pin at
-3.3 V and the series resistor limits clamp current to <1 mA. The other direction
-(ESP32-TX → Kelly-Rx) is a plain wire; 3.3 V clears the Kelly's input-high
-threshold. The controller only talks with PWR above ~18 V, so telemetry is
-available only when the tractor is powered.
+What at first looked like a baud mismatch (an edge-timing measurement near
+19,900) was two independent receive-path problems in the RejsaCAN firmware,
+both since fixed:
 
-The protocol is single-master request/response — sniff passively or be the only
-talker. The flash-write command set can misconfigure the controller; capture
-those frames for reference, never replay them.
+1. **Arduino core 2.0.x broke Kelly reception.** Builds on Arduino core 2.0.17
+   (the last version PlatformIO's official `espressif32` platform carries)
+   read only mangled frames on a wire that core-3 builds decode 100 %; an A/B
+   bench with otherwise-identical code isolated the core version as the cause
+   (the mechanism inside the core was not identified). The firmware now
+   builds on Arduino core 3.x via the pioarduino platform.
+2. **The board's rear RXD0/TXD0 pads (GPIO44/43) corrupt the link** even with
+   a known-good core — they are the ESP32-S3's UART0 console pins, and the
+   boot ROM also prints on TXD0 at every reset. The Kelly UART now uses plain
+   GPIOs 47/48.
+
+With both fixed, the line rate is the documented 19200 baud. The auto-baud
+sweep has been removed and all tooling pins 19200. The remaining failure
+mode, chassis-vs-traction grounding, is covered above.
 
 ## Live findings (CONFIRMED)
 
 - **Powered from the traction pack.** B+ reads pack voltage (77 V observed
   mid-SOC), consistent with the F100F3 pack-voltage decode on the main bus.
+  The controller only talks with PWR above ~18 V, so telemetry is available
+  only when the tractor is powered.
 - **Two-setpoint speed control, not throttle-modulated.** The dash hydraulic
   on/off switch works through the throttle-pot input (TPS): it reads 0 with the
   switch off (pump stopped) and a fixed ~253/255 full-scale command with it on.

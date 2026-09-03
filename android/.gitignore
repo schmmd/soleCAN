@@ -8,7 +8,9 @@ captures/
 .externalNativeBuild/
 .cxx/
 local.properties
-gradle/wrapper/gradle-wrapper.jar
+gradle/wrapper/
+gradlew
+gradlew.bat
 
 # Copied in at build time from the repo-root dashboard.html
 # (see app/build.gradle.kts -> copyDashboardAsset).

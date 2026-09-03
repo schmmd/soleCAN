@@ -15,7 +15,7 @@
 # Pinned: JDK 17 + Gradle 8.7 + Android SDK platform 34 / build-tools 34.0.0
 # (matches compileSdk / targetSdk in app/build.gradle.kts and the wrapper
 # version called out in CLAUDE.md).
-FROM eclipse-temurin:17-jdk-noble
+FROM gradle:8.7-jdk17
 
 # sdkmanager prerequisites.
 RUN apt-get update \
@@ -37,13 +37,6 @@ RUN mkdir -p "$ANDROID_HOME/cmdline-tools" \
 # compileSdk / targetSdk = 34 in app/build.gradle.kts.
 RUN yes | sdkmanager --licenses > /dev/null \
     && sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0"
-
-# Pin Gradle to the same version the wrapper would use natively.
-ARG GRADLE_VERSION=8.7
-RUN curl -fsSL https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip -o /tmp/gradle.zip \
-    && unzip -q /tmp/gradle.zip -d /opt \
-    && rm /tmp/gradle.zip
-ENV PATH=$PATH:/opt/gradle-${GRADLE_VERSION}/bin
 
 WORKDIR /project
 

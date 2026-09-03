@@ -2,8 +2,9 @@
 """Generate Android launcher icons from a source PNG with a black background.
 
 Removes the (near-)black background by alpha-keying, crops to the tractor's
-bounding box, pads to square, and emits one PNG per density plus a 432x432
-foreground for the adaptive icon. Run once after replacing the source image.
+bounding box, pads to square, and emits the 432x432 adaptive-icon foreground
+(minSdk 26, so the adaptive icon is the only launcher asset). Run once after
+replacing the source image.
 """
 import sys
 from pathlib import Path
@@ -16,13 +17,6 @@ OUT_RES  = Path(__file__).parent / "app" / "src" / "main" / "res"
 # Pixels within this distance of the corner color are keyed to transparent.
 BG_TOLERANCE = 25
 
-LAUNCHER_SIZES = {
-    "mipmap-mdpi":    48,
-    "mipmap-hdpi":    72,
-    "mipmap-xhdpi":   96,
-    "mipmap-xxhdpi": 144,
-    "mipmap-xxxhdpi":192,
-}
 # Adaptive-icon foreground: 108dp canvas at xxxhdpi = 432px. The visible
 # "safe" zone is the inner 66dp (264px) — anything outside may be masked.
 ADAPTIVE_FG_SIZE = 432
@@ -75,16 +69,9 @@ def main() -> None:
     cropped = crop_to_subject(keyed)
     square  = pad_square(cropped)
 
-    for dirname, size in LAUNCHER_SIZES.items():
-        out_dir = OUT_RES / dirname
-        out_dir.mkdir(parents=True, exist_ok=True)
-        resized = square.resize((size, size), Image.LANCZOS)
-        resized.save(out_dir / "ic_launcher.png")
-        resized.save(out_dir / "ic_launcher_round.png")
-        print(f"  wrote {dirname}/ic_launcher.png  ({size}x{size})")
-
     fg = make_adaptive_fg(square)
     fg_dir = OUT_RES / "mipmap-xxxhdpi"
+    fg_dir.mkdir(parents=True, exist_ok=True)
     fg.save(fg_dir / "ic_launcher_foreground.png")
     print(f"  wrote mipmap-xxxhdpi/ic_launcher_foreground.png  ({ADAPTIVE_FG_SIZE}x{ADAPTIVE_FG_SIZE})")
 

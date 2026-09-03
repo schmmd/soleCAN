@@ -20,6 +20,7 @@ import android.os.Looper
 import android.os.ParcelUuid
 import android.util.Log
 import org.json.JSONObject
+import java.nio.ByteBuffer
 import java.util.UUID
 
 /**
@@ -58,7 +59,7 @@ class BleClient(
     private var scanCallback: ScanCallback? = null
     private var gatt: BluetoothGatt? = null
 
-    private val rxBuffer = ByteArrayBuilder()
+    private val rxBuffer = FrameBuffer()
     private var reconnectAttempts = 0
     private var wantConnected = false
 
@@ -279,10 +280,8 @@ class BleClient(
         while (true) {
             val frame = rxBuffer.takeFrame() ?: return
             val s = String(frame, Charsets.UTF_8)
-            // Bookend check inside takeFrame is necessary but not sufficient — a
-            // dropped chunk can leave us with a frame that happens to end in '}'
-            // from inside the JSON. Parse here so a corrupt frame triggers a
-            // buffer reset and we resync on the next 200ms push.
+            // A dropped chunk desyncs the length prefix; a failed parse is the
+            // signal to drop the buffer and resync on the next 200ms push.
             try {
                 JSONObject(s)
             } catch (_: Throwable) {
@@ -329,55 +328,39 @@ class BleClient(
  * Notifications may carry any byte boundary, so we buffer and emit whole frames.
  * Not thread-safe: confined to the main thread by BleClient.
  */
-private class ByteArrayBuilder {
-    private var buf = ByteArray(4096)
-    private var size = 0
+private class FrameBuffer {
+    private val buf: ByteBuffer = ByteBuffer.allocate(MAX_BUFFER)   // always in write mode
 
     fun append(data: ByteArray) {
         // If a dropped notification has left us with garbage that keeps growing
         // without ever yielding a valid frame, cut our losses and resync on the
         // next push instead of buffering unboundedly.
-        if (size + data.size > MAX_BUFFER) {
+        if (buf.remaining() < data.size) {
             android.util.Log.w("BleClient", "rxBuffer overflow — resyncing")
-            size = 0
-            if (data.size > MAX_BUFFER) return
+            buf.clear()
+            if (data.size > buf.capacity()) return
         }
-        ensure(size + data.size)
-        System.arraycopy(data, 0, buf, size, data.size)
-        size += data.size
+        buf.put(data)
     }
 
-    fun reset() { size = 0 }
+    fun reset() { buf.clear() }
 
     /** Returns the next complete payload, or null if not enough bytes buffered. */
     fun takeFrame(): ByteArray? {
-        if (size < 2) return null
-        val len = ((buf[0].toInt() and 0xFF) shl 8) or (buf[1].toInt() and 0xFF)
+        if (buf.position() < 2) return null
+        val len = buf.getShort(0).toInt() and 0xFFFF
         if (len == 0 || len > MAX_FRAME_LEN) {
             android.util.Log.w("BleClient", "implausible frame len=$len — resyncing")
-            size = 0
+            buf.clear()
             return null
         }
-        if (size < 2 + len) return null
-        // Payload is always a JSON object; mismatched bookends mean a dropped
-        // chunk has desynced our byte count. Reset and wait for the next push.
-        if (buf[2] != '{'.code.toByte() || buf[2 + len - 1] != '}'.code.toByte()) {
-            android.util.Log.w("BleClient", "frame not JSON-bracketed — resyncing")
-            size = 0
-            return null
-        }
-        val out = buf.copyOfRange(2, 2 + len)
-        val remaining = size - (2 + len)
-        if (remaining > 0) System.arraycopy(buf, 2 + len, buf, 0, remaining)
-        size = remaining
+        if (buf.position() < 2 + len) return null
+        val out = ByteArray(len)
+        buf.flip()
+        buf.position(2)
+        buf.get(out)
+        buf.compact()
         return out
-    }
-
-    private fun ensure(needed: Int) {
-        if (needed <= buf.size) return
-        var n = buf.size
-        while (n < needed) n *= 2
-        buf = buf.copyOf(n)
     }
 
     companion object {

@@ -65,7 +65,7 @@ presentation in the consumer.
 
 ### Embedded firmware (`esp32-s3/`)
 ESP32-S3 firmware that re-implements the main-bus J1939 decode in C++ and
-exposes it four ways: WiFi HTML dashboard, JSON endpoint, BLE (Nordic UART
+exposes it five ways: WiFi HTML dashboard, JSON endpoint, BLE (Nordic UART
 Service), USB SLCAN, and socketcand. The USB port's role is runtime-switchable
 (`logging` default / `slcan` / `kelly` bridge) via the `/usb` page or a `mode`
 console command, and recent device logs are viewable at `/logs`. All logic is in `src/main.cpp`; the board
@@ -153,8 +153,10 @@ gradle wrapper --gradle-version 8.7   # one-time; wrapper JAR is not checked in
 ```
 
 ## Testing
-There are no unit tests and nothing runs in CI — the tools are validated
-against real captures and live injection on the tractor. The one test suite is `esp32-s3/device-test.py`, a
+There are no unit tests. CI (`.github/workflows/docker-builds.yml`) only
+builds the three Docker images; the Python one runs `py_compile` and `--help`
+as a smoke check. The tools are validated against real captures and live
+injection on the tractor. The one test suite is `esp32-s3/device-test.py`, a
 hardware-in-the-loop acceptance suite run against a flashed, powered device
 before it ships. It needs bench hardware: the device itself, and for the CAN
 decode stage a bench injector adapter plus an ACK node (the device under test

@@ -1,0 +1,159 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
+     width="1200" height="575" viewBox="0 0 1200 575">
+  <defs>
+    <!-- ground symbol: origin is where the wire arrives -->
+    <g id="gnd" stroke="#212121" stroke-width="2" stroke-linecap="round">
+      <line x1="-11" y1="0" x2="11" y2="0"/>
+      <line x1="-7"  y1="5" x2="7"  y2="5"/>
+      <line x1="-3"  y1="10" x2="3" y2="10"/>
+    </g>
+    <!-- non-polarised capacitor, vertical: origin is centre between plates -->
+    <g id="cap" stroke="#212121" stroke-width="2" stroke-linecap="round">
+      <line x1="-11" y1="-3" x2="11" y2="-3"/>
+      <line x1="-11" y1="3"  x2="11" y2="3"/>
+    </g>
+  </defs>
+
+  <rect width="1200" height="575" fill="#ffffff"/>
+
+  <g font-family="Helvetica, Arial, sans-serif">
+
+    <text x="600" y="34" text-anchor="middle" font-size="21" font-weight="bold" fill="#212121">Kelly UART galvanic isolator — wiring</text>
+    <text x="600" y="56" text-anchor="middle" font-size="12.5" fill="#607d8b">One channel each direction across the barrier. The two grounds are separate domains and never meet.</text>
+
+    <!-- ============ isolation barrier ============ -->
+    <line x1="600" y1="112" x2="600" y2="540" stroke="#c62828" stroke-width="2.5" stroke-dasharray="11 7"/>
+    <text x="600" y="104" text-anchor="middle" font-size="12" font-weight="bold" fill="#c62828" letter-spacing="2">ISOLATION BARRIER</text>
+
+    <text x="300" y="98" text-anchor="middle" font-size="14" font-weight="bold" fill="#455a64">KELLY SIDE — floats with the traction pack</text>
+    <text x="900" y="98" text-anchor="middle" font-size="14" font-weight="bold" fill="#455a64">BOARD SIDE — chassis reference</text>
+
+    <!-- ============ U1 ============ -->
+    <rect x="546" y="199" width="108" height="19" fill="#ffffff"/>
+    <text x="600" y="212" text-anchor="middle" font-size="13" font-weight="bold" fill="#212121">U1 — SOIC-8</text>
+    <rect x="515" y="225" width="170" height="200" rx="6" fill="#37474f"/>
+
+    <g font-family="Menlo, DejaVu Sans Mono, monospace" font-size="13" fill="#ffffff">
+      <text x="527" y="265">1  VDD1</text>
+      <text x="527" y="310">2  VOA</text>
+      <text x="527" y="355">3  VIB</text>
+      <text x="527" y="400">4  GND1</text>
+      <text x="673" y="265" text-anchor="end">VDD2  8</text>
+      <text x="673" y="310" text-anchor="end">VIA  7</text>
+      <text x="673" y="355" text-anchor="end">VOB  6</text>
+      <text x="673" y="400" text-anchor="end">GND2  5</text>
+    </g>
+    <rect x="476" y="434" width="248" height="36" fill="#ffffff"/>
+    <text x="600" y="447" text-anchor="middle" font-size="11" fill="#607d8b">ADuM1201 / pi122U31 / NSi8221 / CA-IS3722</text>
+    <text x="600" y="463" text-anchor="middle" font-size="11" fill="#607d8b">(default-output-HIGH variant)</text>
+
+    <!-- pin stubs -->
+    <g stroke="#37474f" stroke-width="2.5">
+      <line x1="475" y1="260" x2="515" y2="260"/>
+      <line x1="475" y1="305" x2="515" y2="305"/>
+      <line x1="475" y1="350" x2="515" y2="350"/>
+      <line x1="475" y1="395" x2="515" y2="395"/>
+      <line x1="685" y1="260" x2="725" y2="260"/>
+      <line x1="685" y1="305" x2="725" y2="305"/>
+      <line x1="685" y1="350" x2="725" y2="350"/>
+      <line x1="685" y1="395" x2="725" y2="395"/>
+    </g>
+
+    <!-- ============ Kelly connector ============ -->
+    <rect x="60" y="230" width="100" height="195" rx="5" fill="#fafafa" stroke="#78909c" stroke-width="1.5"/>
+    <text x="110" y="220" text-anchor="middle" font-size="13" font-weight="bold" fill="#212121">Kelly SM-4P</text>
+    <rect x="148" y="254" width="12" height="12" fill="#d32f2f"/>
+    <rect x="148" y="299" width="12" height="12" fill="#1565c0"/>
+    <rect x="148" y="344" width="12" height="12" fill="#2e7d32"/>
+    <rect x="148" y="389" width="12" height="12" fill="#212121"/>
+
+    <!-- ============ Kelly-side power ============ -->
+    <polyline points="160,260 205,260 205,140 265,140" fill="none" stroke="#d32f2f" stroke-width="3"/>
+    <text x="214" y="252" font-size="11" fill="#455a64">red  12 V in</text>
+
+    <!-- C1 across the regulator input -->
+    <circle cx="232" cy="140" r="4" fill="#212121"/>
+    <line x1="232" y1="140" x2="232" y2="172" stroke="#212121" stroke-width="2"/>
+    <use xlink:href="#cap" href="#cap" x="232" y="175"/>
+    <line x1="232" y1="178" x2="232" y2="202" stroke="#212121" stroke-width="2"/>
+    <use xlink:href="#gnd" href="#gnd" x="232" y="202"/>
+    <text x="247" y="179" font-size="10.5" fill="#455a64">C1  0.33 uF</text>
+
+    <!-- regulator -->
+    <rect x="265" y="115" width="100" height="50" rx="4" fill="#fafafa" stroke="#455a64" stroke-width="1.5"/>
+    <text x="315" y="136" text-anchor="middle" font-size="13" font-weight="bold" fill="#212121">78L05</text>
+    <text x="315" y="152" text-anchor="middle" font-size="10" fill="#607d8b">or LM7805</text>
+    <line x1="315" y1="165" x2="315" y2="200" stroke="#212121" stroke-width="2"/>
+    <use xlink:href="#gnd" href="#gnd" x="315" y="200"/>
+    <text x="315" y="228" text-anchor="middle" font-size="10.5" font-weight="bold" fill="#455a64">GND1</text>
+
+    <!-- +5 V rail -->
+    <polyline points="365,140 500,140" fill="none" stroke="#e65100" stroke-width="3"/>
+    <polyline points="445,140 445,260 475,260" fill="none" stroke="#e65100" stroke-width="3"/>
+    <circle cx="445" cy="140" r="4" fill="#e65100"/>
+    <text x="410" y="132" text-anchor="middle" font-size="11" font-weight="bold" fill="#e65100">+5 V</text>
+
+    <!-- C2 across the 5 V rail -->
+    <circle cx="395" cy="140" r="4" fill="#212121"/>
+    <line x1="395" y1="140" x2="395" y2="172" stroke="#212121" stroke-width="2"/>
+    <use xlink:href="#cap" href="#cap" x="395" y="175"/>
+    <line x1="395" y1="178" x2="395" y2="202" stroke="#212121" stroke-width="2"/>
+    <use xlink:href="#gnd" href="#gnd" x="395" y="202"/>
+    <text x="383" y="179" text-anchor="end" font-size="10.5" fill="#455a64">C2  0.1 uF</text>
+
+    <!-- D1 + R1: "Kelly is awake" indicator -->
+    <text x="500" y="126" text-anchor="middle" font-size="10.5" fill="#455a64">D1  5V ON</text>
+    <line x1="500" y1="140" x2="500" y2="158" stroke="#212121" stroke-width="2"/>
+    <rect x="493" y="158" width="14" height="30" fill="#ffffff" stroke="#212121" stroke-width="2"/>
+    <line x1="500" y1="188" x2="500" y2="212" stroke="#212121" stroke-width="2"/>
+    <polygon points="489,212 511,212 500,232" fill="#ffffff" stroke="#212121" stroke-width="2"/>
+    <line x1="489" y1="232" x2="511" y2="232" stroke="#212121" stroke-width="2.5"/>
+    <line x1="500" y1="232" x2="500" y2="250" stroke="#212121" stroke-width="2"/>
+    <use xlink:href="#gnd" href="#gnd" x="500" y="250"/>
+    <text x="486" y="178" text-anchor="end" font-size="10.5" fill="#455a64">R1 1k</text>
+
+    <!-- ============ Kelly-side signals ============ -->
+    <line x1="160" y1="305" x2="475" y2="305" stroke="#1565c0" stroke-width="3"/>
+    <polygon points="300,300 289,305 300,310" fill="#1565c0"/>
+    <text x="172" y="296" font-size="11" fill="#455a64">blue  Kelly Rx  (driven at 5 V)</text>
+
+    <line x1="160" y1="350" x2="475" y2="350" stroke="#2e7d32" stroke-width="3"/>
+    <polygon points="289,345 300,350 289,355" fill="#2e7d32"/>
+    <text x="172" y="341" font-size="11" fill="#455a64">green  Kelly Tx  (5 V TTL)</text>
+
+    <line x1="160" y1="395" x2="475" y2="395" stroke="#212121" stroke-width="3"/>
+    <text x="172" y="386" font-size="11" fill="#455a64">black  Kelly V-  (floating)</text>
+
+    <!-- ============ board-side wiring ============ -->
+    <polyline points="725,260 745,260 745,200 1030,200" fill="none" stroke="#e65100" stroke-width="3"/>
+    <text x="1020" y="192" text-anchor="end" font-size="11" fill="#455a64">3V3</text>
+
+    <circle cx="850" cy="200" r="4" fill="#212121"/>
+    <line x1="850" y1="200" x2="850" y2="229" stroke="#212121" stroke-width="2"/>
+    <use xlink:href="#cap" href="#cap" x="850" y="232"/>
+    <line x1="850" y1="235" x2="850" y2="258" stroke="#212121" stroke-width="2"/>
+    <use xlink:href="#gnd" href="#gnd" x="850" y="258"/>
+    <text x="865" y="236" font-size="10.5" fill="#455a64">C3  0.1 uF</text>
+    <text x="865" y="268" font-size="10.5" font-weight="bold" fill="#455a64">GND2</text>
+
+    <polyline points="725,305 760,305 760,290 1030,290" fill="none" stroke="#1565c0" stroke-width="3"/>
+    <polygon points="880,285 869,290 880,295" fill="#1565c0"/>
+    <text x="1020" y="282" text-anchor="end" font-size="11" fill="#455a64">GPIO48  ESP32 TX</text>
+
+    <polyline points="725,350 775,350 775,375 1030,375" fill="none" stroke="#2e7d32" stroke-width="3"/>
+    <polygon points="869,370 880,375 869,380" fill="#2e7d32"/>
+    <text x="1020" y="367" text-anchor="end" font-size="11" fill="#455a64">GPIO47  ESP32 RX</text>
+
+    <polyline points="725,395 790,395 790,465 1030,465" fill="none" stroke="#212121" stroke-width="3"/>
+    <text x="1020" y="457" text-anchor="end" font-size="11" fill="#455a64">GND  chassis</text>
+
+    <!-- ============ RejsaCAN connector ============ -->
+    <rect x="1030" y="175" width="100" height="315" rx="5" fill="#fafafa" stroke="#78909c" stroke-width="1.5"/>
+    <text x="1080" y="165" text-anchor="middle" font-size="13" font-weight="bold" fill="#212121">RejsaCAN</text>
+    <rect x="1030" y="194" width="12" height="12" fill="#e65100"/>
+    <rect x="1030" y="284" width="12" height="12" fill="#1565c0"/>
+    <rect x="1030" y="369" width="12" height="12" fill="#2e7d32"/>
+    <rect x="1030" y="459" width="12" height="12" fill="#212121"/>
+
+  </g>
+</svg>

@@ -147,31 +147,21 @@ def describe_pgn(pgn: int) -> str:
     return ""
 
 
+_ID_FIELDS = ("priority", "r", "dp", "pf", "ps", "sa", "pgn", "pdu", "ps_role")
+
+
 def decode_can_id(can_id: int, is_extended: bool) -> dict:
     """Decode a CAN ID (11- or 29-bit) into J1939 fields."""
     if not is_extended:
-        return {
-            "can_id": f"{can_id:03X}",
-            "ext": False,
-            "priority": "",
-            "r": "",
-            "dp": "",
-            "pf": "",
-            "ps": "",
-            "sa": "",
-            "pgn": "",
-            "pdu": "",
-            "ps_role": "",
-            "name": "non-J1939 (11-bit)",
-        }
-    priority = (can_id >> 26) & 0x7
+        return {"can_id": f"{can_id:03X}", "ext": False,
+                **dict.fromkeys(_ID_FIELDS, ""), "name": "non-J1939 (11-bit)"}
+    priority, pgn, sa = parse_id(can_id)
     r = (can_id >> 25) & 0x1
     dp = (can_id >> 24) & 0x1
     pf = (can_id >> 16) & 0xFF
     ps = (can_id >> 8) & 0xFF
-    sa = can_id & 0xFF
     pdu2 = pf >= 0xF0
-    pgn = (dp << 16) | (pf << 8) | (ps if pdu2 else 0)
+    pgn |= dp << 16
     return {
         "can_id": f"{can_id:08X}",
         "ext": True,

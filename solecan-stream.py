@@ -65,8 +65,9 @@ except ImportError:
 from solecan_proto import (
     DM1_LAMP_NAMES, VC_STATE_NAMES,
     NUM_CELLS, NUM_TEMPS, PACK_CAPACITY_WH,
-    CHGR_FLAG_NAMES,
-    BMS_FAULT_CODES_BYTE7, BMS_FAULT_CODES_BYTES_0_TO_6,
+    CHGR_FLAG_NAMES, CHGR_FLAGS_DELIVERING,
+    TORQUE_DEAD_LOW, TORQUE_PCT_PER_BIT,
+    derive_bms_fault_codes,
     c_to_f,
     decode as proto_decode,
 )
@@ -166,11 +167,6 @@ MC_FAULT_DESCRIPTIONS: dict = {
 }
 
 
-def describe_bms_code(code: int) -> str:
-    """Return the operator-manual description for a BMS code, or 'unknown'."""
-    return BMS_FAULT_DESCRIPTIONS.get(int(code), f"unknown code {int(code)}")
-
-
 def describe_mc_code(code: int) -> str:
     """Return a slash-joined description for a motor-controller code."""
     entries = MC_FAULT_DESCRIPTIONS.get(int(code))
@@ -189,29 +185,6 @@ def describe_mc_code(code: int) -> str:
 #
 # Descriptions are looked up from BMS_FAULT_DESCRIPTIONS at render time
 # so the operator-manual text remains the single source of truth.
-# Torque (effort) scaling for FF21CA bytes 0-1 (little-endian u16; the
-# value is the controller's commanded motor-effort magnitude (torque /
-# current command), NOT pedal position — see DOCUMENTATION.md §FF21CA.
-# Maxima observed in the corpus:
-#   - asc/full-throttle-*.asc (pedal floored, no load): raw 0x69 = 105
-#   - real-world-on-driving-mowing-off.asc (forward, real load): 0xCC = 204
-#   - real-world-on-driving-mowing-off.asc (reverse, real load): 0x96 = 150
-#   - driving-2800rpm-highgear-loader.asc (forward, hard acceleration,
-#     real load): 262 — peak load runs past the 8-bit boundary, so the
-#     u16 decode matters; 255 is kept as the 100% reference point
-# The forward/reverse asymmetry (262 vs 0x96) points to a
-# controller-side reverse-effort limiter applied before the byte goes
-# on the wire. Idle offset ~3 (sensor noise with foot off); controller
-# dead-low ~14 (below this, motor RPM stays at 0; matches the Kelly
-# TPS_dead_low concept from the hydraulic pump doc).
-TORQUE_DEAD_LOW = 3                          # idle resting offset (subtracted from raw)
-TORQUE_PCT_PER_BIT = 100.0 / (0xFF - TORQUE_DEAD_LOW)  # raw 0xFF = 100%
-
-# Charger fault flags (FF50E5 byte 4, Elcon/TC protocol). 0x00 means the
-# OBC is actively delivering charge; any set bit names why it isn't.
-# Per-bit names live in solecan_proto.CHGR_FLAG_NAMES.
-CHGR_FLAGS_DELIVERING = 0x00
-
 STALE_S = 2.0  # mark a channel stale if no update for this long
 
 # Current threshold above which the pack is considered actively drawn (gates
@@ -340,9 +313,9 @@ class State:
     soc_history: Deque[Tuple[float, float]] = field(default_factory=deque)
     # F108 fault bitmap bytes. Bytes 0..6 carry vendor codes 100..127 at
     # 2 bits per code (4 codes per byte; code = 100 + 4*byte + pair_index
-    # over bit pairs (0,1)(2,3)(4,5)(6,7)); see active_bms_faults. Byte 7
+    # over bit pairs (0,1)(2,3)(4,5)(6,7)). Byte 7
     # is the system/maintenance code bitmap (1 bit per code, decoded
-    # against BMS_FAULT_CODES_BYTE7). All 8 bytes are tracked so the TUI
+    # in solecan_proto). All 8 bytes are tracked so the TUI
     # can show raw bitmap state alongside decoded codes.
     fault_bytes: List[Channel] = field(
         default_factory=lambda: [Channel() for _ in range(8)]
@@ -366,11 +339,6 @@ class State:
     chgr_cmd_v_v: Channel = field(default_factory=Channel)
     chgr_cmd_i_a: Channel = field(default_factory=Channel)
     chgr_cmd_enable: Channel = field(default_factory=Channel)
-    # 0x18FF2112: dashboard / instrument-cluster heartbeat at 10 Hz.
-    # byte 0 = alive flag (0 during ~700 ms boot, 1 thereafter); other
-    # bytes always zero. Useful as a liveness check: if this Channel
-    # goes stale the dashboard ECU has likely dropped off the bus.
-    dash_alive: Channel = field(default_factory=Channel)
     # per-cell / per-temp arrays (indexed 0-based; display is 1-based)
     cells: List[Channel] = field(
         default_factory=lambda: [Channel() for _ in range(NUM_CELLS)]
@@ -459,7 +427,6 @@ _NAME_TO_ATTR = {
     "motor.controller_temp_c": "controller_temp_c",
     "motor.motor_temp_c": "motor_temp_c",
     # FF21 dashboard heartbeat
-    "dash.alive": "dash_alive",
     # FECA DM1
     "dm1.lamp.byte0": "dm1_lamp_byte",
     "dm1.lamp.byte1": "dm1_flash_byte",
@@ -559,33 +526,10 @@ def decode(msg: "can.Message", state: State, now: float) -> None:
 # --- BMS faults -------------------------------------------------------------
 
 def active_bms_faults(state: State) -> List[Tuple[int, str]]:
-    """Return [(code_number, description), ...] for currently active codes
-    in F108. Bytes 0..6 are decoded per BMS_FAULT_CODES_BYTES_0_TO_6
-    (mixed 2-bit/1-bit encoding by byte); byte 7 is decoded per
-    BMS_FAULT_CODES_BYTE7 (1 bit per code with gaps; bits 5 and 6 both
-    = 144).
-
-    Descriptions come from the operator-manual BMS_FAULT_DESCRIPTIONS
-    table.
-    """
-    active: set = set()
-    for byte_idx, codes in BMS_FAULT_CODES_BYTES_0_TO_6.items():
-        b = state.fault_bytes[byte_idx].value
-        if b is None:
-            continue
-        b = int(b)
-        for bit_idx, code in enumerate(codes):
-            if code is None:
-                continue
-            if (b >> bit_idx) & 1:
-                active.add(code)
-    b7 = state.fault_bytes[7].value
-    if b7 is not None:
-        b7 = int(b7)
-        for bit, code in BMS_FAULT_CODES_BYTE7:
-            if (b7 >> bit) & 1:
-                active.add(code)
-    return [(code, describe_bms_code(code)) for code in sorted(active)]
+    """[(code, operator-manual description), ...] for the codes currently
+    asserted in F108. Bytes not yet seen are treated as zero."""
+    codes = derive_bms_fault_codes([int(c.value or 0) for c in state.fault_bytes])
+    return [(code, BMS_FAULT_DESCRIPTIONS.get(code, f"unknown code {code}")) for code in codes]
 
 
 # --- alerts -----------------------------------------------------------------
@@ -912,7 +856,7 @@ def render_pack(state: State, now: float) -> Panel:
     # with zero load would otherwise show a "(rough)" never-ending ETA.
     if (state.bms_soc_pct.value is not None
             and pi is not None and pi > PACK_DRAW_CURRENT_A):
-        eta = estimate_drain_eta_s(state)
+        eta = _estimate_soc_eta_s(state, target=0.0, rising=False)
         if eta is None:
             t.add_row("ETA to 0%", Text("estimating...", style="dim"))
         elif count_soc_transitions(state) < SOC_ETA_STABLE_TRANSITIONS:
@@ -980,24 +924,6 @@ def _estimate_soc_eta_s(state: State, target: float,
             break
     return _slope_eta(samples[0][0], samples[0][1])
 
-
-def estimate_charge_eta_s(state: State) -> Optional[float]:
-    """Seconds until BMS SOC reaches 100%, or None if not rising.
-
-    Linear extrapolation is optimistic in the last ~10% because charge
-    current tapers in CV.
-    """
-    return _estimate_soc_eta_s(state, target=100.0, rising=True)
-
-
-def estimate_drain_eta_s(state: State) -> Optional[float]:
-    """Seconds until BMS SOC reaches 0%, or None if not falling.
-
-    Linear extrapolation; real packs hit a BMS cutoff above 0% and the
-    cutback regions distort the slope, so this is "remaining at current
-    pace" rather than a hard runtime.
-    """
-    return _estimate_soc_eta_s(state, target=0.0, rising=False)
 
 
 def format_eta(secs: float) -> str:
@@ -1075,7 +1001,7 @@ def render_charger(state: State, now: float) -> Panel:
         if soc_now is not None and soc_now >= 99.5:
             t.add_row("ETA to 100%", Text("complete", style="green"))
         else:
-            eta = estimate_charge_eta_s(state)
+            eta = _estimate_soc_eta_s(state, target=100.0, rising=True)
             if eta is None:
                 t.add_row("ETA to 100%",
                           Text("estimating...", style="dim"))
@@ -1448,53 +1374,6 @@ def build_layout(state: State, now: float, mode: str = "live") -> Layout:
 
 # --- frame source -----------------------------------------------------------
 
-def iter_asc_messages_from(path: str, byte_offset: int):
-    """Yield can.Message from a Vector .asc file starting at byte_offset
-    (advanced past any partial first line). Backs --start P%, which seeks
-    by file position rather than scanning timestamps — line lengths are
-    roughly uniform so byte-% closely tracks time-%. Header lines and the
-    'Start of measurement' marker before the first data line are skipped
-    by the per-line shape check."""
-    f = open(path, "r", errors="replace")
-    try:
-        f.seek(byte_offset)
-        if byte_offset > 0:
-            f.readline()  # discard the partial line at the seek point
-        for line in f:
-            parts = line.split()
-            # Data line: "<ts> <bus> <hex_id[x]> Rx|Tx d <dlc> <byte>..."
-            if len(parts) < 7 or parts[4].lower() != "d":
-                continue
-            try:
-                ts = float(parts[0])
-                dlc = int(parts[5])
-            except ValueError:
-                continue
-            id_str = parts[2]
-            ext = id_str.endswith(("x", "X"))
-            if ext:
-                id_str = id_str[:-1]
-            try:
-                arb_id = int(id_str, 16)
-            except ValueError:
-                continue
-            data_tokens = parts[6:6 + dlc]
-            if len(data_tokens) < dlc:
-                continue
-            try:
-                data = bytes(int(b, 16) for b in data_tokens)
-            except ValueError:
-                continue
-            yield can.Message(
-                timestamp=ts,
-                arbitration_id=arb_id,
-                is_extended_id=ext,
-                data=data,
-            )
-    finally:
-        f.close()
-
-
 def open_source(args):
     """Return either a python-can Bus (live) or LogReader (replay)."""
     if args.replay:
@@ -1515,12 +1394,6 @@ def open_source(args):
 # at the repo root) can render against replayed or live data.
 # state_to_json mirrors the firmware's buildJson(minimal=false) shape closely
 # enough that the dashboard reads the same fields.
-
-def _ch(c: Channel, ndigits: Optional[int] = None):
-    if c.value is None:
-        return None
-    return round(c.value, ndigits) if ndigits is not None else c.value
-
 
 def state_to_json(state: State, now: float, mode: str) -> dict:
     """Snapshot in the same shape the firmware serves at /json."""
@@ -1595,8 +1468,8 @@ def state_to_json(state: State, now: float, mode: str) -> dict:
     if state.bms_soc_pct.value is not None:
         remaining = state.bms_soc_pct.value * PACK_CAPACITY_WH / 100.0
         sess["wh_remaining"] = round(remaining, 1)
-        eta_full = estimate_charge_eta_s(state)
-        eta_zero = estimate_drain_eta_s(state)
+        eta_full = _estimate_soc_eta_s(state, target=100.0, rising=True)
+        eta_zero = _estimate_soc_eta_s(state, target=0.0, rising=False)
         if eta_full and eta_full > 0:
             sess["eta_to_full_s"] = int(eta_full)
         if eta_zero and eta_zero > 0:
@@ -1740,7 +1613,7 @@ def serve_web(state: State, mode: str, host: str, port: int,
 # When run with --ui ble, we impersonate the firmware's Nordic UART Service
 # peripheral so the Android app (which scans by service UUID, not name) can
 # connect to the laptop instead of the tractor. Same UUIDs, same on-wire
-# framing as embedded/esp32-s3/src/main.cpp:925-1010:
+# framing as esp32-s3/src/main.cpp:
 #
 #     [u16 big-endian length] [length bytes of JSON]
 #
@@ -1850,11 +1723,6 @@ def main() -> int:
                    help="write a python-can log of all received frames")
     p.add_argument("--refresh-hz", type=float, default=5.0,
                    help="TUI refresh rate (default 5)")
-    p.add_argument("--start", type=float, default=0.0,
-                   help="for --replay (.asc only), seek to this percentage "
-                        "of the file size and start realtime playback from "
-                        "there (0..100, default 0). Cheap O(1) seek; the "
-                        "TUI starts cold and populates as frames arrive.")
     p.add_argument("--timescale", type=float, default=1.0,
                    help="for --replay, multiplier on realtime playback "
                         "(1.0 = recorded speed, 2.0 = 2x faster, "
@@ -1895,24 +1763,10 @@ def main() -> int:
                         raw_logger(msg)
                     decode(msg, state, time.monotonic())
             else:
-                start_pct = max(0.0, min(100.0, args.start))
-                replay_iter = source
-                if start_pct > 0 and args.replay:
-                    if args.replay.lower().endswith(".asc"):
-                        import os
-                        size = os.path.getsize(args.replay)
-                        offset = int(size * start_pct / 100.0)
-                        replay_iter = iter_asc_messages_from(
-                            args.replay, offset)
-                    else:
-                        sys.stderr.write(
-                            "--start: only supported for .asc replays; "
-                            "ignoring\n")
-
                 first_msg_ts: Optional[float] = None
                 replay_start: Optional[float] = None
                 timescale = args.timescale if args.timescale > 0 else 1.0
-                for msg in replay_iter:
+                for msg in source:
                     if stop_evt.is_set():
                         break
                     if raw_logger is not None:
