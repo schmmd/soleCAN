@@ -66,7 +66,7 @@ from solecan_proto import (
     DM1_LAMP_NAMES, VC_STATE_NAMES,
     NUM_CELLS, NUM_TEMPS, PACK_CAPACITY_WH,
     CHGR_FLAG_NAMES,
-    BMS_FAULT_CODES_BYTE7, BMS_FAULT_CODES_BYTES_0_TO_6,
+    derive_bms_fault_codes,
     c_to_f,
     decode as proto_decode,
 )
@@ -335,9 +335,9 @@ class State:
     soc_history: Deque[Tuple[float, float]] = field(default_factory=deque)
     # F108 fault bitmap bytes. Bytes 0..6 carry vendor codes 100..127 at
     # 2 bits per code (4 codes per byte; code = 100 + 4*byte + pair_index
-    # over bit pairs (0,1)(2,3)(4,5)(6,7)); see active_bms_faults. Byte 7
+    # over bit pairs (0,1)(2,3)(4,5)(6,7)). Byte 7
     # is the system/maintenance code bitmap (1 bit per code, decoded
-    # against BMS_FAULT_CODES_BYTE7). All 8 bytes are tracked so the TUI
+    # in solecan_proto). All 8 bytes are tracked so the TUI
     # can show raw bitmap state alongside decoded codes.
     fault_bytes: List[Channel] = field(
         default_factory=lambda: [Channel() for _ in range(8)]
@@ -548,33 +548,10 @@ def decode(msg: "can.Message", state: State, now: float) -> None:
 # --- BMS faults -------------------------------------------------------------
 
 def active_bms_faults(state: State) -> List[Tuple[int, str]]:
-    """Return [(code_number, description), ...] for currently active codes
-    in F108. Bytes 0..6 are decoded per BMS_FAULT_CODES_BYTES_0_TO_6
-    (mixed 2-bit/1-bit encoding by byte); byte 7 is decoded per
-    BMS_FAULT_CODES_BYTE7 (1 bit per code with gaps; bits 5 and 6 both
-    = 144).
-
-    Descriptions come from the operator-manual BMS_FAULT_DESCRIPTIONS
-    table.
-    """
-    active: set = set()
-    for byte_idx, codes in BMS_FAULT_CODES_BYTES_0_TO_6.items():
-        b = state.fault_bytes[byte_idx].value
-        if b is None:
-            continue
-        b = int(b)
-        for bit_idx, code in enumerate(codes):
-            if code is None:
-                continue
-            if (b >> bit_idx) & 1:
-                active.add(code)
-    b7 = state.fault_bytes[7].value
-    if b7 is not None:
-        b7 = int(b7)
-        for bit, code in BMS_FAULT_CODES_BYTE7:
-            if (b7 >> bit) & 1:
-                active.add(code)
-    return [(code, BMS_FAULT_DESCRIPTIONS.get(code, f"unknown code {code}")) for code in sorted(active)]
+    """[(code, operator-manual description), ...] for the codes currently
+    asserted in F108. Bytes not yet seen are treated as zero."""
+    codes = derive_bms_fault_codes([int(c.value or 0) for c in state.fault_bytes])
+    return [(code, BMS_FAULT_DESCRIPTIONS.get(code, f"unknown code {code}")) for code in codes]
 
 
 # --- alerts -----------------------------------------------------------------
