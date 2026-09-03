@@ -243,7 +243,6 @@ def version_word(flash: bytes) -> int:
 
 
 class KellyConfigDumper:
-    debug = False  # class default so instances built with __new__ stay valid
 
     def __init__(self, port: str, baud: int = BAUD, read_timeout: float = 0.6,
                  debug: bool = False):
@@ -263,30 +262,8 @@ class KellyConfigDumper:
             timeout=0.15,
         )
 
-    def reopen(self, retries: int = 5, delay: float = 1.0) -> None:
-        """Close and reopen the port — used to recover a dropped Bluetooth link."""
-        try:
-            self.ser.close()
-        except Exception:
-            pass
-        last = None
-        for _ in range(retries):
-            try:
-                self.ser = self._open()
-                return
-            except serial.SerialException as e:
-                last = e
-                time.sleep(delay)
-        raise KellyError(f"could not reopen {self.port}: {last}")
-
     def close(self) -> None:
         self.ser.close()
-
-    def __enter__(self) -> "KellyConfigDumper":
-        return self
-
-    def __exit__(self, *exc) -> None:
-        self.close()
 
     def _transmit(self, cmd: int, data: bytes = b"") -> None:
         # The one place bytes leave for the controller. This guard is what

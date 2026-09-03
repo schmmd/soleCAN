@@ -45,12 +45,12 @@ mDNS name.
 Examples (from the repo root, where the uv project lives):
 
   # WiFi-only smoke test, Mac joined to the device's `tractor` AP
-  uv run python embedded/esp32-s3/device-test.py
+  uv run python esp32-s3/device-test.py
 
   # Full pre-ship run: USB serial + bench injector + ACK adapter + BLE +
   # LED prompts. Pass --expect-vin only when the board is powered from a
   # 12 V supply — on USB power the rail sense reads ~4.6 V.
-  uv run python embedded/esp32-s3/device-test.py \
+  uv run python esp32-s3/device-test.py \
       --serial /dev/cu.usbmodem101 \
       --inject-interface slcan --inject-channel /dev/cu.usbserial-A50 \
       --ack-interface canalystii --ack-channel 0 \

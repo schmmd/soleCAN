@@ -54,17 +54,8 @@ Notes:
 ### Wiring to the tractor
 
 The Solectrac OBD-II diagnostic port is a passive tap on the single 250 kbit/s
-J1939 bus. Only four cavities are populated (see `DOCUMENTATION.md` →
-"CAN bus topology" for the full pinout):
-
-| OBD-II (J1962) pin | Signal |
-|---|---|
-| 6 | CAN_H |
-| 14 | CAN_L |
-| 4 | chassis ground |
-| 16 | +12 V battery |
-
-On the T-2CAN, use the **CAN B** 4-pin screw terminal (`P1`, the one wired to
+J1939 bus; only pins 4, 6, 14, and 16 are populated (see `DOCUMENTATION.md` →
+"CAN bus topology"). On the T-2CAN, use the **CAN B** 4-pin screw terminal (`P1`, the one wired to
 the native TWAI transceiver). Match the silkscreen labels:
 
 | OBD-II pin | → | T-2CAN CAN B terminal |
@@ -144,11 +135,9 @@ plain RejsaCAN build is unchanged.
 PLATFORMIO_BUILD_FLAGS=-DENABLE_KELLY pio run -e rejsacan
 ```
 
-Wiring uses **GPIO47 (RX)** and **GPIO48 (TX)** — plain GPIOs, deliberately NOT
-the board's rear RXD/TXD pads (GPIO44/43, the ESP32-S3 UART0 console pins), which
-corrupted the receive waveform. The Kelly port is **5 V TTL**, so the
-controller's Tx needs a **~1–2.2 kΩ series resistor** into the RX pin to protect
-the 3.3 V input:
+Wiring uses **GPIO47 (RX)** and **GPIO48 (TX)**, not the board's rear RXD/TXD
+pads (see [`../kelly/README.md`](../kelly/README.md) for why, and for the
+series-resistor rationale):
 
 - Kelly **Tx** (green) →\[~1–2.2 kΩ]→ **GPIO47** (RX)
 - Kelly **Rx** (blue) → **GPIO48** (TX)
@@ -164,8 +153,8 @@ The monitor is **read-only by construction** — only the three zero-data monito
 queries (`0x3A/0x3B/0x3C`) are ever transmitted, and no flash session is opened,
 so the firmware cannot reconfigure the controller. Polling is non-blocking and
 the `kelly` object appears only while the controller is powered and answering.
-Connector pinout, wire protocol, field map, and the series-resistor rationale
-are in [`../../kelly/README.md`](../../kelly/README.md).
+Connector pinout, wire protocol, and field map are in
+[`../kelly/README.md`](../kelly/README.md).
 
 To reach the controller with the Python tools *through* the board, switch the USB
 port to the `kelly` bridge mode (see [USB port mode](#usb-port-mode)) — a
@@ -285,19 +274,17 @@ docker run --rm -v "$PWD/out:/out" solectrac-fw
 # -> out/firmware-merged.bin   (all four combined, write at 0x0)
 ```
 
-Then flash from the host with `esptool` (from a Python 3.13 venv). These are the
-standard Arduino-ESP32 offsets — the same four images, at the same offsets, that
-`pio run -t upload` writes:
+Then flash from the host with `esptool` (from a Python 3.13 venv):
 
 ```bash
 ~/.venvs/pio/bin/pip install esptool
 ~/.venvs/pio/bin/esptool --chip esp32s3 --port /dev/cu.usbmodemXXXX \
-    --baud 921600 write_flash \
-    0x0     out/bootloader.bin \
-    0x8000  out/partitions.bin \
-    0xe000  out/boot_app0.bin \
-    0x10000 out/firmware.bin
+    --baud 921600 write_flash 0x0 out/firmware-merged.bin
 ```
+
+The individual images are also exported at the standard Arduino-ESP32 offsets
+(`0x0` bootloader, `0x8000` partitions, `0xe000` boot_app0, `0x10000`
+firmware), the same layout `pio run -t upload` writes.
 
 > If `write_flash` can't connect, hold **BOOT-0**, tap **RST**, release
 > **BOOT-0** to force the board into download mode, then retry.
@@ -332,14 +319,6 @@ flasher wants — no toolchain install, just a USB cable:
 
 If the browser can't connect, hold **BOOT-0**, tap **RST**, release **BOOT-0**
 to force download mode, then retry.
-
-The merged image also works from the command line, and is simpler than the
-four-image invocation above:
-
-```bash
-~/.venvs/pio/bin/esptool --chip esp32s3 --port /dev/cu.usbmodemXXXX \
-    --baud 921600 write_flash 0x0 out/firmware-merged.bin
-```
 
 Pre-built merged images are attached to every
 [GitHub Release](https://github.com/schmmd/soleCAN/releases) (as
@@ -619,7 +598,6 @@ Bench notes:
 ```
 esp32-s3/
 ├── platformio.ini          # board envs + build configuration
-├── boards/                 # custom board JSONs (LilyGo T-2CAN)
 ├── copy_dashboard.py       # pre-build: copies repo-root dashboard.html → src/
 ├── inject_build_overrides.py # pre-build: injects AP_SSID / AP_PASS / MDNS_NAME
 ├── device-test.py          # bench acceptance suite for a flashed device

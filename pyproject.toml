@@ -1,7 +1,7 @@
 [project]
 name = "solectrac"
 version = "0.1.0"
-description = "Add your description here"
+description = "CAN-bus decode and monitoring tooling for the Solectrac e25G tractor"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [

@@ -15,8 +15,8 @@ directory only adds the board.
   file and a real edit shows up in the diff as itself, not as 187 churned
   UUIDs.
 - `isolator.kicad_pcb` — generated KiCad board (opens in KiCad 7+).
-- `gerbers/`, `isolator-gerbers.zip` — fab outputs (RS-274X + Excellon),
-  exported with KiCad 10 `kicad-cli`. Upload the zip as-is to JLCPCB/PCBWay/
+- `gerbers/` — fab outputs (RS-274X + Excellon), exported with KiCad 10
+  `kicad-cli`. Zip the directory (command below) and upload to JLCPCB/PCBWay/
   OSH Park. 2-layer, 50 x 32 mm, 1.6 mm, any finish; no special options.
 - `render_top.png` / `render_bottom.png` — 3D renders for a quick look.
 
