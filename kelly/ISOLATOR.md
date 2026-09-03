@@ -23,12 +23,12 @@ and stock are in `isolator-pcb/README.md`.
 | Ref | Part | Purpose |
 |-----|------|---------|
 | U1 | [NSi8221N1-DSPR](https://www.digikey.com/en/products/detail/novosense/NSI8221N1-DSPR/22188706) digital isolator, SOIC-8 | Two UART channels, one each way, across the barrier. Fail-safe high: with the tractor off, GPIO47 sees a clean idle line and the firmware's stale-out handles key-off unchanged. |
-| U2 | 78L05 regulator, TO-92 ([MC78L05ACPG](https://www.digikey.com/en/products/detail/onsemi/MC78L05ACPG/921041)) or LM7805, TO-220 | Makes the isolated 5 V rail from the ~12 V the Kelly puts out on SM-4P pin 1 (how Kelly's own Bluetooth dongle powers itself). Load is a few mA, no heat sink. Not a buck module: no efficiency case at 5 mA, and it would put switching hash next to the UART. |
+| U2 | 78L05 regulator, TO-92 ([MC78L05ACPG](https://www.digikey.com/en/products/detail/onsemi/MC78L05ACPG/921041)) or LM7805, TO-220 | Makes the isolated 5 V rail from the ~12 V the Kelly puts out on SM-4P pin 1. |
 | C1 | 0.33 µF 50 V X7R, 2.5 mm pitch ([TDK FA14X7R1H334KNU06](https://www.digikey.com/en/products/detail/tdk-corporation/FA14X7R1H334KNU06/5865807)) | Regulator input cap, right at U2. |
 | C2, C3 | 0.1 µF 50 V X7R, 2.5 mm pitch ([Vishay K104K15X7RF5TL2](https://www.digikey.com/en/products/detail/vishay-beyschlag-draloric-bc-components/K104K15X7RF5TL2/286538)) | C2 is the regulator output cap; C3 decouples the 3.3 V board side of U1. |
 | R1 | 1 kΩ 1/4 W axial ([Stackpole CF14JT1K00](https://www.digikey.com/en/products/detail/stackpole-electronics-inc/CF14JT1K00/1741314)) | LED current limit. |
-| D1 | 5 mm green LED ([Kingbright WP7113SGC](https://www.digikey.com/en/products/detail/kingbright/WP7113SGC/1747672)) | Across the 5 V rail; lights only when the Kelly is powering pin 1, so it is a "Kelly is awake" indicator. |
-| — | SM 2.5 4-pin plug with flying leads ([Amazon kit](https://www.amazon.com/dp/B0CLV48D6V)) | Mates with the Kelly's SM-4P port. |
+| D1 | 5 mm green LED ([Kingbright WP7113SGC](https://www.digikey.com/en/products/detail/kingbright/WP7113SGC/1747672)) | Lights only when the Kelly is powering pin 1, so it is a "Kelly is awake" indicator. |
+| — | SM 2.5 4-pin plug ([Amazon kit](https://www.amazon.com/dp/B0CLV48D6V)) | Mates with the Kelly's SM-4P port. |
 | — | 4 hookup wires to the RejsaCAN | 3V3, GPIO48, GPIO47, GND. |
 
 Tools: fine-tip soldering iron, thin solder, flux, tweezers, multimeter with
@@ -116,26 +116,12 @@ the finished dongle looks symmetric.
 
 The controller's SM-4P port is a male JST SM series, 2.5 mm pitch.
 
-The kit's lead colours are **not** guaranteed to match the tractor harness,
-so identify the pins by position, not colour. Looking into the controller's
-port, the harness runs red, green, blue, black in pin order 1 to 4:
-
 | SM-4P pin | Kelly signal | tractor colour | board pad |
 |-----------|--------------|----------------|-----------|
 | 1 | V+ (~12 V) | red | `12V (RED)` |
 | 2 | Tx (controller out) | green | `VIB (GRN)` |
 | 3 | Rx (controller in) | blue | `VOA (BLU)` |
 | 4 | V− | black | `GND1 (BLK)` |
-
-If in doubt, plug the pigtail into the controller with the key on and meter
-it: pin 1 to pin 4 reads ~12 V, and that fixes the orientation of the other
-two. Then recolour the leads with tape or heat-shrink to match the board
-silk before soldering.
-
-Note the board's pad order is **not** the harness order: blue and green are
-swapped on the silk so the traces do not cross. Follow the silk. Twist
-green+black and blue+red together, keep this cable under ~30 cm, and route
-it away from the pump phase leads.
 
 #### ESP32 side: the RejsaCAN
 
@@ -149,8 +135,6 @@ the SoleCAN for easy removal.
 | `(47) VOB` | GPIO47 | Kelly Tx → ESP32 RX |
 | `GND2` | GND | chassis ground |
 
-**Never tie GND1 to GND2.** Joining them defeats the whole board.
-
 ### Power-up check
 
 Before plugging into the tractor, bench-test the Kelly side with 9–15 V DC
@@ -158,7 +142,7 @@ from a bench supply on the red/black leads (current limit 50 mA if you have
 it):
 
 - D1 lights.
-- Meter `U2` pin `O` to `GND1 (BLK)`: **5.0 V** ± 0.25. If it reads ~9–10 V,
+- Meter `U2` pin `O` to `GND1 (BLK)`: **5.0 V**. If it reads ~9–10 V,
   U2 is in backwards.
 - `GND1 (BLK)` to `GND2` is open.
 
