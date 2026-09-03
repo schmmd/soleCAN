@@ -65,7 +65,8 @@ except ImportError:
 from solecan_proto import (
     DM1_LAMP_NAMES, VC_STATE_NAMES,
     NUM_CELLS, NUM_TEMPS, PACK_CAPACITY_WH,
-    CHGR_FLAG_NAMES,
+    CHGR_FLAG_NAMES, CHGR_FLAGS_DELIVERING,
+    TORQUE_DEAD_LOW, TORQUE_PCT_PER_BIT,
     derive_bms_fault_codes,
     c_to_f,
     decode as proto_decode,
@@ -184,29 +185,6 @@ def describe_mc_code(code: int) -> str:
 #
 # Descriptions are looked up from BMS_FAULT_DESCRIPTIONS at render time
 # so the operator-manual text remains the single source of truth.
-# Torque (effort) scaling for FF21CA bytes 0-1 (little-endian u16; the
-# value is the controller's commanded motor-effort magnitude (torque /
-# current command), NOT pedal position — see DOCUMENTATION.md §FF21CA.
-# Maxima observed in the corpus:
-#   - asc/full-throttle-*.asc (pedal floored, no load): raw 0x69 = 105
-#   - real-world-on-driving-mowing-off.asc (forward, real load): 0xCC = 204
-#   - real-world-on-driving-mowing-off.asc (reverse, real load): 0x96 = 150
-#   - driving-2800rpm-highgear-loader.asc (forward, hard acceleration,
-#     real load): 262 — peak load runs past the 8-bit boundary, so the
-#     u16 decode matters; 255 is kept as the 100% reference point
-# The forward/reverse asymmetry (262 vs 0x96) points to a
-# controller-side reverse-effort limiter applied before the byte goes
-# on the wire. Idle offset ~3 (sensor noise with foot off); controller
-# dead-low ~14 (below this, motor RPM stays at 0; matches the Kelly
-# TPS_dead_low concept from the hydraulic pump doc).
-TORQUE_DEAD_LOW = 3                          # idle resting offset (subtracted from raw)
-TORQUE_PCT_PER_BIT = 100.0 / (0xFF - TORQUE_DEAD_LOW)  # raw 0xFF = 100%
-
-# Charger fault flags (FF50E5 byte 4, Elcon/TC protocol). 0x00 means the
-# OBC is actively delivering charge; any set bit names why it isn't.
-# Per-bit names live in solecan_proto.CHGR_FLAG_NAMES.
-CHGR_FLAGS_DELIVERING = 0x00
-
 STALE_S = 2.0  # mark a channel stale if no update for this long
 
 # Current threshold above which the pack is considered actively drawn (gates
