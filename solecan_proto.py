@@ -182,10 +182,7 @@ def le16(lo: int, hi: int) -> int:
 
 def data_bytes(msg_data) -> list:
     """Return 8 ints, padding with 0 for short payloads, truncated to 8."""
-    out = list(msg_data)
-    while len(out) < 8:
-        out.append(0)
-    return out[:8]
+    return (list(msg_data) + [0] * 8)[:8]
 
 
 def c_to_f(c):

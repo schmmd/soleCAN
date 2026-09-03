@@ -626,16 +626,15 @@ class BmsState:
 
 
 def _be_u16(data: bytes, off: int) -> int:
-    return (data[off] << 8) | data[off + 1]
+    return int.from_bytes(data[off:off + 2], "big")
 
 
 def _be_i16(data: bytes, off: int) -> int:
-    v = _be_u16(data, off)
-    return v - 0x10000 if v & 0x8000 else v
+    return int.from_bytes(data[off:off + 2], "big", signed=True)
 
 
 def _be_u32(data: bytes, off: int) -> int:
-    return (data[off] << 24) | (data[off + 1] << 16) | (data[off + 2] << 8) | data[off + 3]
+    return int.from_bytes(data[off:off + 4], "big")
 
 
 def _delta(current, base, ndigits):
