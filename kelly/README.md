@@ -13,8 +13,8 @@ provides `solectrac-kelly-monitor.py`, a read-only live monitor for it.
 The RejsaCAN firmware can also read this port directly and add the pump
 telemetry to the tractor dashboard — build with `-DENABLE_KELLY`, wiring the
 controller's Tx/Rx to the board's **GPIO47 (RX) / GPIO48 (TX)** (with the 5 V-TTL
-series resistor below). See `../embedded/esp32-s3/README.md` §"Kelly e-hydraulic
-pump monitor".
+series resistor below), or through the `ISOLATOR.md` dongle when the board runs
+on OBD power. See `../esp32-s3/README.md` §"Kelly e-hydraulic pump monitor".
 
 ## Connector and wire protocol
 
@@ -82,8 +82,8 @@ signal reference and the link degrades or dies outright; the same adapter
 floating (battery laptop, no chassis contact) reads cleanly. Always connect
 V− as the signal return, and keep the receiver otherwise floating — or
 galvanically isolate the UART when the host must share chassis ground. The
-build plan for that isolator (ADuM1201 dongle powered from SM-4P pin 1) is in
-`ISOLATOR.md`.
+build guide for that isolator (a small dongle powered from SM-4P pin 1) is in
+`ISOLATOR.md`, and the KiCad board and gerbers are in `isolator-pcb/`.
 
 **Signal level is logic-level (TTL) UART, not bipolar RS-232 — CONFIRMED.** A
 full bidirectional monitor session succeeded through a bare CH340 (TTL)

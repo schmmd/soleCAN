@@ -1,7 +1,9 @@
 # Kelly UART isolator
 
-A small dongle that lets an OBD-powered SoleCAN (RejsaCAN) read the Kelly
-e-hydraulic controller's serial port reliably.
+This file documents how to build a small dongle that lets an OBD-powered
+SoleCAN (RejsaCAN) read the Kelly e-hydraulic controller's serial port
+reliably.  The assembly instructions assume you have built an isolator PCB as
+specified in `isolator-pcb/`.
 
 ## Why
 
@@ -44,7 +46,7 @@ Alternatives, all DigiKey:
   also fits the holes but its IN and OUT are mirrored; see the regulator
   step.
 
-## Wiring
+## Wiring diagram
 
 ![Isolator wiring diagram](isolator.svg)
 
