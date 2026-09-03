@@ -15,31 +15,21 @@ the ground connection entirely: the Kelly side floats with the pack, the
 board side stays on chassis, and the two UART signals cross an isolation
 barrier instead of sharing a reference.
 
-### What each part does
-
-| Ref | Part | Purpose |
-|-----|------|---------|
-| U1 | Digital isolator, SOIC-8 | Two UART channels, one each way, across the barrier. Fail-safe high: with the tractor off, GPIO47 sees a clean idle line and the firmware's stale-out handles key-off unchanged. |
-| U2 | 78L05 regulator | Makes the isolated 5 V rail from the ~12 V the Kelly puts out on SM-4P pin 1 (how Kelly's own Bluetooth dongle powers itself). Load is a few mA, no heat sink. Not a buck module: no efficiency case at 5 mA, and it would put switching hash next to the UART. |
-| C1, C2 | 0.33 µF, 0.1 µF | Regulator input and output caps, right at U2. |
-| C3 | 0.1 µF | Decoupling on the 3.3 V board side of U1. |
-| R1, D1 | 1 kΩ + LED | Across the 5 V rail. Lights only when the Kelly is powering pin 1, so it is a "Kelly is awake" indicator. |
-
 ## Parts
 
 Board parts are about $3; ground shipping dominates, so buy spares. Prices
 and stock are in `isolator-pcb/README.md`.
 
-| Ref | Part | DigiKey | Silk marking |
-|-----|------|---------|--------------|
-| U1 | NSi8221N1-DSPR, SOIC-8 | [22188706](https://www.digikey.com/en/products/detail/novosense/NSI8221N1-DSPR/22188706) | `U1`, chamfer at top-left |
-| U2 | MC78L05ACPG, TO-92 (or LM7805, TO-220) | [921041](https://www.digikey.com/en/products/detail/onsemi/MC78L05ACPG/921041) | `O G I` |
-| C1 | 0.33 µF 50 V X7R, 2.5 mm pitch — TDK FA14X7R1H334KNU06 | [5865807](https://www.digikey.com/en/products/detail/tdk-corporation/FA14X7R1H334KNU06/5865807) | `330n` |
-| C2, C3 | 0.1 µF 50 V X7R, 2.5 mm pitch — Vishay K104K15X7RF5TL2 | [286538](https://www.digikey.com/en/products/detail/vishay-beyschlag-draloric-bc-components/K104K15X7RF5TL2/286538) | `100n` |
-| R1 | 1 kΩ 1/4 W axial — Stackpole CF14JT1K00 | [1741314](https://www.digikey.com/en/products/detail/stackpole-electronics-inc/CF14JT1K00/1741314) | `1k` |
-| D1 | 5 mm green LED — Kingbright WP7113SGC | [1747672](https://www.digikey.com/en/products/detail/kingbright/WP7113SGC/1747672) | `5V ON`, square pad |
-| — | SM 2.5 4-pin plug with flying leads | [Amazon](https://www.amazon.com/dp/B0CLV48D6V) | Kelly-side pads |
-| — | 4 hookup wires to the RejsaCAN | — | ESP32-side pads |
+| Ref | Part | Purpose |
+|-----|------|---------|
+| U1 | [NSi8221N1-DSPR](https://www.digikey.com/en/products/detail/novosense/NSI8221N1-DSPR/22188706) digital isolator, SOIC-8 | Two UART channels, one each way, across the barrier. Fail-safe high: with the tractor off, GPIO47 sees a clean idle line and the firmware's stale-out handles key-off unchanged. |
+| U2 | 78L05 regulator, TO-92 ([MC78L05ACPG](https://www.digikey.com/en/products/detail/onsemi/MC78L05ACPG/921041)) or LM7805, TO-220 | Makes the isolated 5 V rail from the ~12 V the Kelly puts out on SM-4P pin 1 (how Kelly's own Bluetooth dongle powers itself). Load is a few mA, no heat sink. Not a buck module: no efficiency case at 5 mA, and it would put switching hash next to the UART. |
+| C1 | 0.33 µF 50 V X7R, 2.5 mm pitch ([TDK FA14X7R1H334KNU06](https://www.digikey.com/en/products/detail/tdk-corporation/FA14X7R1H334KNU06/5865807)) | Regulator input cap, right at U2. |
+| C2, C3 | 0.1 µF 50 V X7R, 2.5 mm pitch ([Vishay K104K15X7RF5TL2](https://www.digikey.com/en/products/detail/vishay-beyschlag-draloric-bc-components/K104K15X7RF5TL2/286538)) | C2 is the regulator output cap; C3 decouples the 3.3 V board side of U1. |
+| R1 | 1 kΩ 1/4 W axial ([Stackpole CF14JT1K00](https://www.digikey.com/en/products/detail/stackpole-electronics-inc/CF14JT1K00/1741314)) | LED current limit. |
+| D1 | 5 mm green LED ([Kingbright WP7113SGC](https://www.digikey.com/en/products/detail/kingbright/WP7113SGC/1747672)) | Across the 5 V rail; lights only when the Kelly is powering pin 1, so it is a "Kelly is awake" indicator. |
+| — | SM 2.5 4-pin plug with flying leads ([Amazon kit](https://www.amazon.com/dp/B0CLV48D6V)) | Mates with the Kelly's SM-4P port. |
+| — | 4 hookup wires to the RejsaCAN | 3V3, GPIO48, GPIO47, GND. |
 
 Tools: fine-tip soldering iron, thin solder, flux, tweezers, multimeter with
 continuity beep, wire strippers. Solder wick is nice for the SOIC.
@@ -73,7 +63,9 @@ Assuming otherwise put the wrong pinout on the rev A PCB.
 
 ## Assembly
 
-Have `isolator-pcb/render_top.png` open; every name below is a silk label.
+Every name below is a silk label on the top side of the board:
+
+![Board top](isolator-pcb/render_top.png)
 
 ### The isolator (U1)
 
