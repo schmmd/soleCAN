@@ -417,6 +417,8 @@ class BmsState:
     fw_version: Optional[str] = None
     hw_string: Optional[str] = None
     discovery: Optional[int] = None
+    # --probe raw hex by DID (one-shot)
+    probe: dict = field(default_factory=dict)
     # Pack topology, static (one-shot)
     cell_index_map: list = field(default_factory=list)   # 0x0202 — 20 phys cell idx
     probe_channel_map: list = field(default_factory=list)  # 0x0205 — 7 channel idx
@@ -615,6 +617,7 @@ class BmsState:
                 "cell_extremum": self.cell_extremum.hex(),
                 "cell_index": self.cell_index.hex(),
             },
+            "probe": dict(self.probe),
             "comms": {
                 "transport": self.transport_desc,
                 "polls_ok": self.polls_ok,
@@ -913,6 +916,34 @@ ALL_POLLS = [
 ]
 
 
+# Documented in bms/README.md but not in ALL_POLLS: mostly static blocks
+# (calibration tables, X700 IoT config, unmapped ranges). --probe reads each
+# once at startup and stores the raw hex so two packs can be diffed without
+# a decode. Silent DIDs cost RESPONSE_TIMEOUT each, so this can take a
+# couple of minutes on a live bus.
+PROBE_DIDS = sorted({
+    *range(0x0103, 0x0106), *(d for d in range(0x0200, 0x020C) if d not in (0x0202, 0x0205)),
+    0x0620, 0x0621, *range(0x0641, 0x0649), 0x064E, 0x0670, 0x0671,
+    0x0905, 0x0960, 0x0961, 0x0962,
+    0x0E11, 0x0E21, 0x0E61, *range(0x0E70, 0x0E73), 0x0EF0,
+    0x2832, 0x283A, 0x2850,
+    0x3010, *range(0x3030, 0x3094), *range(0x30A0, 0x30E7), *range(0x3140, 0x3154),
+    0x4011, 0x4012, 0x4019, 0x401A,
+    0xA501, 0xA502, 0xA506, 0xA507, 0xA50E,
+})
+
+
+def probe_once(transport, st: BmsState, lock: threading.Lock):
+    """Read every PROBE_DID once; store hex (or the error text) in st.probe."""
+    for did in PROBE_DIDS:
+        try:
+            val = transport.read_did(did).hex()
+        except (IsoTpError, UdsError) as e:
+            val = f"ERR {e}"
+        with lock:
+            st.probe[f"0x{did:04X}"] = val
+
+
 def read_identity(transport, st: BmsState):
     try:
         st.fw_version = transport.read_did(0xF195).decode("ascii", errors="replace").rstrip("\x00")
@@ -980,13 +1011,16 @@ def poll_once(transport, st: BmsState, lock: threading.Lock, jsonl=None):
 
 
 def poller_thread(transport, st: BmsState, lock: threading.Lock,
-                  period: float, stop_event: threading.Event, jsonl=None):
+                  period: float, stop_event: threading.Event, jsonl=None,
+                  probe: bool = False):
     """Background polling loop. Exits when ``stop_event`` is set."""
     try:
         transport.drain()
         with lock:
             pass  # let any startup race settle
         read_identity(transport, st)
+        if probe:
+            probe_once(transport, st, lock)
         next_t = time.monotonic()
         while not stop_event.is_set():
             poll_once(transport, st, lock, jsonl)
@@ -1798,6 +1832,11 @@ def main():
                         "a wall-clock 'ts') per poll cycle to FILE. Works "
                         "with live buses and --replay. Diff two tractors "
                         "with: diff <(jq -S . a.jsonl) <(jq -S . b.jsonl)")
+    p.add_argument("--probe", action="store_true",
+                   help="also read every documented-but-unpolled DID once at "
+                        "startup (calibration tables, X700, unmapped ranges) "
+                        "and expose the raw hex under 'probe' in /state and "
+                        "--jsonl. Takes up to a few minutes on a live bus.")
     # Replay
     p.add_argument("--replay", metavar="FILE",
                    help="replay UDS responses from a captured CAN log "
@@ -1826,7 +1865,7 @@ def main():
     jsonl = open(args.jsonl, "a") if args.jsonl else None
     poller = threading.Thread(
         target=poller_thread,
-        args=(transport, state, lock, period, stop_event, jsonl),
+        args=(transport, state, lock, period, stop_event, jsonl, args.probe),
         name="bms-poller",
         daemon=True,
     )
