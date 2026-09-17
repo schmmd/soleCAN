@@ -525,7 +525,7 @@ tractor can be turned into the same format offline.
 ```bash
 python3 bms/solectrac-bms-diagnostics.py --replay other-tractor.asc --jsonl other.jsonl
 python3 bms/solectrac-bms-diagnostics.py --interface slcan --channel /dev/tty.usbmodem1101 --jsonl mine.jsonl
-diff <(tail -1 mine.jsonl | jq -S 'del(.ts, .poll)') <(tail -1 other.jsonl | jq -S 'del(.ts, .poll)')
+diff <(tail -1 mine.jsonl | jq -S 'del(.ts, .comms)') <(tail -1 other.jsonl | jq -S 'del(.ts, .comms)')
 ```
 
 Identity, alarm state, SOH, cell spread, and cycle counters are the
