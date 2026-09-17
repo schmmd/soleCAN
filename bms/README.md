@@ -515,6 +515,22 @@ captures and are not listed.
 
 ---
 
+## Comparing two tractors
+
+`solectrac-bms-diagnostics.py --jsonl FILE` appends one JSON snapshot per
+poll cycle (the `/state` dict plus a wall-clock `ts`) while the dashboard
+keeps serving. It also works with `--replay`, so a capture from another
+tractor can be turned into the same format offline.
+
+```bash
+python3 bms/solectrac-bms-diagnostics.py --replay other-tractor.asc --jsonl other.jsonl
+python3 bms/solectrac-bms-diagnostics.py --interface slcan --channel /dev/tty.usbmodem1101 --jsonl mine.jsonl
+diff <(tail -1 mine.jsonl | jq -S 'del(.ts, .poll)') <(tail -1 other.jsonl | jq -S 'del(.ts, .poll)')
+```
+
+Identity, alarm state, SOH, cell spread, and cycle counters are the
+fields worth diffing; SOC, current, and timings differ on every cycle.
+
 ## Polling patterns
 
 | Phase                         | Frequency | DIDs                                                                  |
