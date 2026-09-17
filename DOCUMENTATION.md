@@ -223,6 +223,16 @@ CONNECTOR PIN-1 / PIN-2". The BMS exposes two CAN pairs: the main vehicle bus
 (above) and this diagnostics pair. It is the channel the host-side **UDAN**
 tool consumes.
 
+**Physical connector — TENTATIVE.** The harness-side 2-pin plug matches the
+**Superseal 1.5 series** (AMP / TE "Superseal 1.5mm") 2-way waterproof
+connector — identified by the female housing's flip-up secondary lock lever,
+the individual yellow per-wire seals, and the male tower cap with a single
+flat latch. The item referenced (Amazon ASIN `B08579V5ZJ`) is an unbranded
+clone: PA66 nylon, IP67, 1.5 mm terminals, crimp or solder. Genuine TE
+equivalents are male tab housing `282103-1` and female plug housing
+`282080-1`. Buy a mating pigtail by the Superseal-1.5 2-way form factor;
+the commodity clones intermate with genuine TE housings.
+
 **Resistance confirms it is a separate, BMS-only bus.** Measured key-off with
 nothing plugged in, the 2-pin connector reads 120 Ω across the pair. If the
 2-pin were a tap onto the main bus, it would read the same as any other tap on
