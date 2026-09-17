@@ -61,6 +61,19 @@ Every name below is a silk label on the top side of the board:
 Pin 1 is the **top-left** pad: the silk outline has a cut corner there, and
 the chip's dot or beveled edge goes to that corner.
 
+The chip's dot marks pin 1 (NSI8221 datasheet, Figure 1.2):
+
+![NSI8221 package pinout](nsi8221-package.png)
+
+Pin functions, with KELLY on the left and ESP32 on the right:
+
+```
+ 5V  -> VDD1 |1 ●   8| VDD2 <- 3V3
+ BLU <- VOA  |2     7| VIA  <- GPIO48
+ GRN -> VIB  |3     6| VOB  -> GPIO47
+ BLK -- GND1 |4     5| GND2 -- GND
+```
+
 1. Flux both pad columns.
 2. Tin **one** pad (top-left is fine), place the chip with tweezers, reflow
    that pad while nudging the chip until all 8 leads sit centered on their
@@ -88,9 +101,20 @@ The silk reads `O G I` left to right: OUT, GND, IN.
   the `5V ON` LED), matching the silk outline. That puts the output leg in
   `O`. The datasheet's TO-92 drawing is a *bottom* view, so do not trust it
   as a front view.
+
+  78L05 as the datasheet draws it, a **bottom view** with the flat side at
+  the top. Flip it: front view, flat face toward you, legs down, reads
+  OUT, GND, IN left to right.
+
+  ![78L05 TO-92 pinout, bottom view](78l05-package.png)
 - **LM7805 / L7805CV (TO-220)**: its IN and OUT are mirrored versus the
   78L05, so insert it facing the **opposite** way and match the legs to the
   letters: OUT in `O`, GND in `G`, IN in `I`.
+
+  L7805CV legs, seen from the front with the tab and metal back facing
+  away from you (ST datasheet):
+
+  ![L7805CV TO-220 pinout](l7805-package.png)
 
 If you get this wrong the 5 V rail will not read 5 V and U1 may not survive.
 Run the "Power-up check" before wiring the Kelly.
