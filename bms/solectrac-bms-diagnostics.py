@@ -30,6 +30,7 @@ Usage:
     ./solectrac-bms-diagnostics.py --replay data/bms/bms-screenshots.asc \\
         --replay-speed 5 --loop
     ./solectrac-bms-diagnostics.py --output session.asc          # record bus
+    ./solectrac-bms-diagnostics.py --jsonl snapshots.jsonl        # + JSONL log
 
 Then open http://127.0.0.1:8000/ (or pass --open to launch the browser).
 """
@@ -416,6 +417,8 @@ class BmsState:
     fw_version: Optional[str] = None
     hw_string: Optional[str] = None
     discovery: Optional[int] = None
+    # --probe raw hex by DID (one-shot)
+    probe: dict = field(default_factory=dict)
     # Pack topology, static (one-shot)
     cell_index_map: list = field(default_factory=list)   # 0x0202 — 20 phys cell idx
     probe_channel_map: list = field(default_factory=list)  # 0x0205 — 7 channel idx
@@ -614,6 +617,7 @@ class BmsState:
                 "cell_extremum": self.cell_extremum.hex(),
                 "cell_index": self.cell_index.hex(),
             },
+            "probe": dict(self.probe),
             "comms": {
                 "transport": self.transport_desc,
                 "polls_ok": self.polls_ok,
@@ -912,6 +916,34 @@ ALL_POLLS = [
 ]
 
 
+# Documented in bms/README.md but not in ALL_POLLS: mostly static blocks
+# (calibration tables, X700 IoT config, unmapped ranges). --probe reads each
+# once at startup and stores the raw hex so two packs can be diffed without
+# a decode. Silent DIDs cost RESPONSE_TIMEOUT each, so this can take a
+# couple of minutes on a live bus.
+PROBE_DIDS = sorted({
+    *range(0x0103, 0x0106), *(d for d in range(0x0200, 0x020C) if d not in (0x0202, 0x0205)),
+    0x0620, 0x0621, *range(0x0641, 0x0649), 0x064E, 0x0670, 0x0671,
+    0x0905, 0x0960, 0x0961, 0x0962,
+    0x0E11, 0x0E21, 0x0E61, *range(0x0E70, 0x0E73), 0x0EF0,
+    0x2832, 0x283A, 0x2850,
+    0x3010, *range(0x3030, 0x3094), *range(0x30A0, 0x30E7), *range(0x3140, 0x3154),
+    0x4011, 0x4012, 0x4019, 0x401A,
+    0xA501, 0xA502, 0xA506, 0xA507, 0xA50E,
+})
+
+
+def probe_once(transport, st: BmsState, lock: threading.Lock):
+    """Read every PROBE_DID once; store hex (or the error text) in st.probe."""
+    for did in PROBE_DIDS:
+        try:
+            val = transport.read_did(did).hex()
+        except (IsoTpError, UdsError) as e:
+            val = f"ERR {e}"
+        with lock:
+            st.probe[f"0x{did:04X}"] = val
+
+
 def read_identity(transport, st: BmsState):
     try:
         st.fw_version = transport.read_did(0xF195).decode("ascii", errors="replace").rstrip("\x00")
@@ -936,8 +968,11 @@ def read_identity(transport, st: BmsState):
         st.last_error = f"0x0205: {e}"
 
 
-def poll_once(transport, st: BmsState, lock: threading.Lock):
+def poll_once(transport, st: BmsState, lock: threading.Lock, jsonl=None):
     """Poll every DID in ALL_POLLS, updating ``st`` under ``lock``.
+
+    If ``jsonl`` is an open file, append one ``to_dict()`` snapshot (plus a
+    wall-clock ``ts``) per successful cycle.
 
     Per-DID UdsError is non-fatal — leaves that field stale and continues.
     IsoTpError signals a transport-level problem and aborts the cycle so we
@@ -967,21 +1002,28 @@ def poll_once(transport, st: BmsState, lock: threading.Lock):
             st.polls_ok += 1
             st.last_update_s = time.time()
             st.poll_durations_ms.append((time.monotonic() - start) * 1000)
+            if jsonl is not None:
+                snap = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), **st.to_dict()}
+                jsonl.write(json.dumps(snap) + "\n")
+                jsonl.flush()
         else:
             st.polls_err += 1
 
 
 def poller_thread(transport, st: BmsState, lock: threading.Lock,
-                  period: float, stop_event: threading.Event):
+                  period: float, stop_event: threading.Event, jsonl=None,
+                  probe: bool = False):
     """Background polling loop. Exits when ``stop_event`` is set."""
     try:
         transport.drain()
         with lock:
             pass  # let any startup race settle
         read_identity(transport, st)
+        if probe:
+            probe_once(transport, st, lock)
         next_t = time.monotonic()
         while not stop_event.is_set():
-            poll_once(transport, st, lock)
+            poll_once(transport, st, lock, jsonl)
             next_t += period
             slack = next_t - time.monotonic()
             if slack > 0:
@@ -1785,6 +1827,16 @@ def main():
                    help="record all CAN frames (live bus traffic + our UDS "
                         "requests) to an ASC file while running. Live "
                         "transports only — incompatible with --replay.")
+    p.add_argument("--jsonl", metavar="FILE",
+                   help="append one JSON snapshot (same shape as /state, plus "
+                        "a wall-clock 'ts') per poll cycle to FILE. Works "
+                        "with live buses and --replay. Diff two tractors "
+                        "with: diff <(jq -S . a.jsonl) <(jq -S . b.jsonl)")
+    p.add_argument("--probe", action="store_true",
+                   help="also read every documented-but-unpolled DID once at "
+                        "startup (calibration tables, X700, unmapped ranges) "
+                        "and expose the raw hex under 'probe' in /state and "
+                        "--jsonl. Takes up to a few minutes on a live bus.")
     # Replay
     p.add_argument("--replay", metavar="FILE",
                    help="replay UDS responses from a captured CAN log "
@@ -1810,9 +1862,10 @@ def main():
     stop_event = threading.Event()
 
     period = 1.0 / args.rate
+    jsonl = open(args.jsonl, "a") if args.jsonl else None
     poller = threading.Thread(
         target=poller_thread,
-        args=(transport, state, lock, period, stop_event),
+        args=(transport, state, lock, period, stop_event, jsonl, args.probe),
         name="bms-poller",
         daemon=True,
     )
@@ -1838,6 +1891,8 @@ def main():
         server.server_close()
         poller.join(timeout=2.0)
         transport.close()
+        if jsonl:
+            jsonl.close()
 
 
 if __name__ == "__main__":

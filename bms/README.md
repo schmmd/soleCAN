@@ -515,6 +515,31 @@ captures and are not listed.
 
 ---
 
+## Comparing two tractors
+
+`solectrac-bms-diagnostics.py --jsonl FILE` appends one JSON snapshot per
+poll cycle (the `/state` dict plus a wall-clock `ts`) while the dashboard
+keeps serving. It also works with `--replay`, so a capture from another
+tractor can be turned into the same format offline.
+
+```bash
+python3 bms/solectrac-bms-diagnostics.py --replay other-tractor.asc --jsonl other.jsonl
+python3 bms/solectrac-bms-diagnostics.py --interface slcan --channel /dev/tty.usbmodem1101 --jsonl mine.jsonl
+diff <(tail -1 mine.jsonl | jq -S 'del(.ts, .comms)') <(tail -1 other.jsonl | jq -S 'del(.ts, .comms)')
+```
+
+Identity, alarm state, SOH, cell spread, and cycle counters are the
+fields worth diffing; SOC, current, and timings differ on every cycle.
+
+Add `--probe` to also read every DID documented below but not in the
+regular poll set (calibration tables `0x30xx`/`0x40xx`, X700 IoT config,
+the unmapped `0x01xx`/`0x02xx`/`0x06xx`/`0x0Exx`/`0x09xx` ranges) once
+at startup. The raw hex lands under `probe` keyed by DID, undecoded; most
+of these blocks are static, so a byte-level diff between two packs is
+still meaningful. Silent DIDs cost a 1.5 s timeout each, so expect a few
+minutes on a live bus. Under `--replay` only DIDs present in the capture
+before the probe runs will answer.
+
 ## Polling patterns
 
 | Phase                         | Frequency | DIDs                                                                  |
