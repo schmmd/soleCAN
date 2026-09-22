@@ -2164,6 +2164,7 @@ static String staDisconnectReasonName(uint8_t reason) {
         case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:     return "4way_handshake_timeout";
         case WIFI_REASON_GROUP_KEY_UPDATE_TIMEOUT:   return "group_key_update_timeout";
         case WIFI_REASON_802_1X_AUTH_FAILED:         return "802_1x_auth_failed";
+        case WIFI_REASON_STA_LEAVING:                return "sta_leaving";
         case WIFI_REASON_BEACON_TIMEOUT:             return "beacon_timeout";
         case WIFI_REASON_NO_AP_FOUND:                return "no_ap_found";
         case WIFI_REASON_AUTH_FAIL:                  return "auth_fail";
