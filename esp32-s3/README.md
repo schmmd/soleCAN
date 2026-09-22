@@ -406,10 +406,18 @@ credentials through the form, they **take precedence over any baked-in
 re-enter them through the form or fully erase flash (`esptool erase_flash`, or
 `pio run -t erase`), which clears NVS.
 
+**Offline recovery — `wifi clear` over USB.** If a stale station SSID keeps the
+shared-radio AP flapping so badly you can't reach `/wifi`, type `wifi clear` into
+the USB serial console (`pio device monitor`, or any terminal). It blanks the
+stored credentials in NVS and drops the radio to solid AP-only immediately — no
+web form, no flash erase. `wifi` alone reports the current SSID and link state.
+Like `mode`, it works in any USB role; on `-DNO_WIFI` builds it just prints that
+WiFi is disabled and never touches the radio.
+
 > No pre-apply scan is done (deliberate simplicity): a mistyped SSID makes the
 > station scan endlessly and destabilizes the shared-radio AP, and because it
 > persists in NVS the degradation survives a reboot until you correct it via the
-> form. Type carefully.
+> form or `wifi clear` over USB. Type carefully.
 
 ## Endpoints
 
