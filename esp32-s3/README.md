@@ -382,6 +382,12 @@ Change it two ways, no reflash needed:
 - **USB console:** type `mode <logging|slcan|kelly>` (or just `mode` to report)
   into the serial console. This works even on `-DNO_WIFI` builds. In `kelly` mode
   the USB port is the bridge, so switch back over HTTP or by power-cycling.
+- **`log`** — type `log` in the console to dump the full retained device-log ring
+  (boot banner, WiFi/CAN/BLE events, heartbeats) over USB. Same content as `/logs`,
+  but capturable with a plain terminal at any time: because the log is retained in
+  RAM from boot, you don't have to catch the ephemeral boot stream (opening the
+  native USB-CDC port doesn't reset the chip, and a reset re-enumerates the port so
+  a dumb reader misses the first lines) or join WiFi. Works in any USB role.
 
 ## Changing the station WiFi at runtime (`/wifi`)
 

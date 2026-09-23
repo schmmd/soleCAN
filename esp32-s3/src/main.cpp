@@ -461,6 +461,32 @@ static Preferences g_prefs;
 
 static inline bool staConfigured() { return g_sta_ssid[0] != '\0'; }
 
+// STA reconnection is throttled, not continuous. The AP and STA share one radio;
+// Arduino's default auto-reconnect makes an absent home network scan every
+// channel forever, which drags the soft-AP beacon off-channel so the "tractor"
+// SSID appears briefly then vanishes. Instead we disable auto-reconnect and fire
+// one connect burst every STA_RETRY_INTERVAL_MS from loop(); between bursts the
+// radio parks on the AP channel and the AP stays solid. A burst still causes a
+// brief (~1-2 s) beacon blip while it scans — unavoidable on a single radio.
+#define STA_RETRY_INTERVAL_MS 60000
+static uint32_t g_sta_last_attempt_ms = 0;
+
+// Kick off (or retry) the station join and stamp the attempt time. Auto-reconnect
+// stays off so the only STA scans are the ones staRetryTick() schedules.
+static void staBeginJoin() {
+    WiFi.begin(g_sta_ssid, g_sta_pass);
+    WiFi.setAutoReconnect(false);
+    g_sta_last_attempt_ms = millis();
+}
+
+// One throttled reconnect burst per interval while the configured home network
+// is out of range. No-op when STA isn't configured or is already connected.
+static void staRetryTick() {
+    if (!staConfigured() || WiFi.status() == WL_CONNECTED) return;
+    if (millis() - g_sta_last_attempt_ms < STA_RETRY_INTERVAL_MS) return;
+    staBeginJoin();
+}
+
 // ── USB port role ─────────────────────────────────────────────────────────────
 // The native USB-CDC port has a runtime-selectable role. Boots to LOGGING (enum
 // 0); RAM-only, so a power cycle always returns to logging. Switched via the
@@ -494,6 +520,7 @@ static bool usbModeFromName(const String& s, UsbMode& out) {
 // Defined near the SLCAN section (they print over Serial / read device state).
 static bool tryModeCommand(const char* line);
 static bool tryWifiCommand(const char* line);
+static bool tryLogCommand(const char* line);
 void usbLoggingPoll();
 
 // NVS 'wifi' namespace overrides the compiled defaults; an absent 'ssid' key
@@ -2136,6 +2163,30 @@ void logLine(const char* fmt, ...) {
     if (usbTextAllowed()) Serial.write((const uint8_t*)buf, n);
 }
 
+// Scratch for a ring snapshot. Shared by GET /logs and the `log` USB console
+// command; both run on the loop thread (never concurrent), so one buffer is safe.
+static char g_log_snap[sizeof(g_log_ring) + 1];
+
+// Copy the ring oldest -> newest into g_log_snap under the spinlock, NUL-terminate,
+// and return the byte count. Snapshotting under the lock lets callers send the
+// text outside the critical section (no I/O while interrupts are masked).
+static size_t logSnapshot() {
+    size_t len;
+    portENTER_CRITICAL(&g_log_mux);
+    if (g_log_wrapped) {
+        size_t tail = sizeof(g_log_ring) - g_log_head;
+        memcpy(g_log_snap, g_log_ring + g_log_head, tail);
+        memcpy(g_log_snap + tail, g_log_ring, g_log_head);
+        len = sizeof(g_log_ring);
+    } else {
+        memcpy(g_log_snap, g_log_ring, g_log_head);
+        len = g_log_head;
+    }
+    portEXIT_CRITICAL(&g_log_mux);
+    g_log_snap[len] = '\0';
+    return len;
+}
+
 // Marks a served request so an active web client (dashboard poller, file
 // download) defers the CAN-quiet deep sleep — see checkCanQuietSleep(). Called
 // at the top of every real endpoint but deliberately NOT from handleNotFound:
@@ -2165,6 +2216,7 @@ static String staDisconnectReasonName(uint8_t reason) {
         case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:     return "4way_handshake_timeout";
         case WIFI_REASON_GROUP_KEY_UPDATE_TIMEOUT:   return "group_key_update_timeout";
         case WIFI_REASON_802_1X_AUTH_FAILED:         return "802_1x_auth_failed";
+        case WIFI_REASON_STA_LEAVING:                return "sta_leaving";
         case WIFI_REASON_BEACON_TIMEOUT:             return "beacon_timeout";
         case WIFI_REASON_NO_AP_FOUND:                return "no_ap_found";
         case WIFI_REASON_AUTH_FAIL:                  return "auth_fail";
@@ -2542,21 +2594,8 @@ void handleUsbPost() {
 // the critical section (no heap work while interrupts are masked).
 void handleLog() {
     noteHttpActivity();
-    static char snap[sizeof(g_log_ring) + 1];
-    size_t len;
-    portENTER_CRITICAL(&g_log_mux);
-    if (g_log_wrapped) {
-        size_t tail = sizeof(g_log_ring) - g_log_head;
-        memcpy(snap, g_log_ring + g_log_head, tail);
-        memcpy(snap + tail, g_log_ring, g_log_head);
-        len = sizeof(g_log_ring);
-    } else {
-        memcpy(snap, g_log_ring, g_log_head);
-        len = g_log_head;
-    }
-    portEXIT_CRITICAL(&g_log_mux);
-    snap[len] = '\0';
-    server.send(200, "text/plain", len ? snap : "(no log yet)\r\n");
+    size_t len = logSnapshot();
+    server.send(200, "text/plain", len ? g_log_snap : "(no log yet)\r\n");
 }
 
 // Apply new STA credentials: AP-password gated, validated, persisted to NVS,
@@ -2585,7 +2624,7 @@ void handleWifiSave() {
 
     WiFi.mode(staConfigured() ? WIFI_AP_STA : WIFI_AP);
     WiFi.disconnect(false);
-    if (staConfigured()) WiFi.begin(g_sta_ssid, g_sta_pass);
+    if (staConfigured()) staBeginJoin();
 
     logLine("WiFi: STA reconfigured to \"%s\" (pass %u chars)",
             g_sta_ssid, (unsigned)strlen(g_sta_pass));
@@ -3020,6 +3059,19 @@ static bool tryWifiCommand(const char* line) {
 #endif
 }
 
+// Recognizes a `log` line over the USB console. Dumps the retained device-log ring
+// (boot banner, WiFi/BLE events, heartbeats) over USB, so the full log — including
+// boot — is capturable with a plain terminal at any time, without racing the
+// USB-CDC re-enumeration on reset or joining WiFi to reach GET /logs. Same data as
+// /logs; wired into both the logging poll and the SLCAN dispatch, so any USB role.
+static bool tryLogCommand(const char* line) {
+    if (strcmp(line, "log") != 0) return false;
+    size_t len = logSnapshot();
+    if (len) Serial.write((const uint8_t*)g_log_snap, len);
+    else     Serial.printf("(no log yet)\r\n");
+    return true;
+}
+
 // Runs each loop iteration while in LOGGING mode: accepts a `mode` command typed
 // over USB (other input discarded) and emits a ~10 s device-status heartbeat.
 void usbLoggingPoll() {
@@ -3030,7 +3082,7 @@ void usbLoggingPoll() {
         if (c == '\r' || c == '\n') {
             if (len > 0) {
                 buf[len] = '\0';
-                if (!tryModeCommand(buf)) tryWifiCommand(buf);
+                if (!tryModeCommand(buf) && !tryWifiCommand(buf)) tryLogCommand(buf);
                 len = 0;
             }
         } else if (len < sizeof(buf) - 1) {
@@ -3126,10 +3178,11 @@ static bool canTransmit0(uint32_t id, bool extd, uint8_t dlc, const uint8_t* dat
 #endif
 
 void slcanHandleCommand(const char* cmd) {
-    // A `mode …` or `wifi …` line is consumed here first; neither collides with
-    // SLCAN's single-letter commands, so python-can is unaffected.
+    // A `mode …`, `wifi …`, or `log` line is consumed here first; none collide
+    // with SLCAN's single-letter commands, so python-can is unaffected.
     if (tryModeCommand(cmd)) return;
     if (tryWifiCommand(cmd)) return;
+    if (tryLogCommand(cmd)) return;
     switch (cmd[0]) {
         case 'O': slcan_open = true;  Serial.write('\r'); break;
         case 'C': slcan_open = false; Serial.write('\r'); break;
@@ -3604,11 +3657,12 @@ void setup() {
     // happens in the background; we don't block boot waiting on it.
     //
     // Only enable the station when a home network is actually configured. The
-    // AP and STA share one radio: if WIFI_SSID is empty the station would scan
-    // every channel forever looking for a network that doesn't exist, which
-    // makes the soft-AP beacon hop channels and drop out (it appears briefly
-    // then vanishes and won't accept clients). Build with an empty WIFI_SSID
-    // for a rock-solid AP-only setup; set it to join a bench network as before.
+    // AP and STA share one radio, so an absent home network must not be scanned
+    // for continuously — that drags the soft-AP beacon off-channel. staBeginJoin()
+    // disables auto-reconnect and staRetryTick() (in loop) fires one connect burst
+    // per STA_RETRY_INTERVAL_MS, so the AP only blips briefly during a scan
+    // instead of vanishing. Build with an empty WIFI_SSID for a pure AP-only setup
+    // (no blips at all); set it to also join a bench network.
     // Record STA join outcomes for /config and the serial log. Registered
     // before begin() so even the very first failure is captured. The callback
     // runs on the WiFi event task; it only writes the volatile g_sta_* words.
@@ -3633,7 +3687,7 @@ void setup() {
     const bool join_sta = staConfigured();
     WiFi.mode(join_sta ? WIFI_AP_STA : WIFI_AP);
     g_ap_running = WiFi.softAP(AP_SSID, AP_PASS);
-    if (join_sta) WiFi.begin(g_sta_ssid, g_sta_pass);
+    if (join_sta) staBeginJoin();
 
     if (join_sta)
         logLine("WiFi: AP \"%s\" %s; STA joining \"%s\" (pass %u chars)",
@@ -3820,6 +3874,7 @@ void loop() {
 
 #if !defined(NO_WIFI)
     socketcandPoll();
+    staRetryTick();
     dns_server.processNextRequest();
     server.handleClient();
 #endif
