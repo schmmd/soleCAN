@@ -519,6 +519,7 @@ static bool usbModeFromName(const String& s, UsbMode& out) {
 
 // Defined near the SLCAN section (they print over Serial / read device state).
 static bool tryModeCommand(const char* line);
+static bool tryWifiCommand(const char* line);
 static bool tryLogCommand(const char* line);
 void usbLoggingPoll();
 
@@ -3028,6 +3029,36 @@ static bool tryModeCommand(const char* line) {
     return true;
 }
 
+// Recognizes a `wifi` line over the USB console. Wired into both the logging poll
+// and the SLCAN dispatch, so it works in any USB role. `wifi` alone reports the
+// station SSID and link state; `wifi clear` erases the stored STA credentials and
+// drops to a solid AP-only radio — the field reset when a stale/out-of-range STA
+// network keeps dragging the soft-AP beacon off-channel. Returns true if the line
+// was a wifi command, so the SLCAN handler consumes it before its own parsing.
+static bool tryWifiCommand(const char* line) {
+    if (strncmp(line, "wifi", 4) != 0) return false;
+#if defined(NO_WIFI)
+    Serial.printf("wifi: disabled in this build (-DNO_WIFI)\r\n");
+    return true;                            // never touch the radio in a silent build
+#else
+    const char* p = line + 4;
+    while (*p == ' ' || *p == '\t') p++;
+    if (strcmp(p, "clear") == 0) {
+        g_sta_ssid[0] = g_sta_pass[0] = '\0';
+        saveStaCreds(g_sta_ssid, g_sta_pass);   // persist blank -> AP-only after reboot too
+        WiFi.mode(WIFI_AP);
+        WiFi.disconnect(true);                  // stop the STA scan/link now
+        Serial.printf("wifi: STA cleared -> AP-only\r\n");
+    } else if (*p == '\0') {
+        Serial.printf("wifi: ssid=\"%s\" sta=%s\r\n", g_sta_ssid,
+                      WiFi.status() == WL_CONNECTED ? "connected" : "down");
+    } else {
+        Serial.printf("wifi: unknown '%s' (try: wifi | wifi clear)\r\n", p);
+    }
+    return true;
+#endif
+}
+
 // Recognizes a `log` line over the USB console. Dumps the retained device-log ring
 // (boot banner, WiFi/BLE events, heartbeats) over USB, so the full log — including
 // boot — is capturable with a plain terminal at any time, without racing the
@@ -3051,7 +3082,7 @@ void usbLoggingPoll() {
         if (c == '\r' || c == '\n') {
             if (len > 0) {
                 buf[len] = '\0';
-                if (!tryModeCommand(buf)) tryLogCommand(buf);
+                if (!tryModeCommand(buf) && !tryWifiCommand(buf)) tryLogCommand(buf);
                 len = 0;
             }
         } else if (len < sizeof(buf) - 1) {
@@ -3147,9 +3178,10 @@ static bool canTransmit0(uint32_t id, bool extd, uint8_t dlc, const uint8_t* dat
 #endif
 
 void slcanHandleCommand(const char* cmd) {
-    // A `mode …` or `log` line is consumed here first; neither collides with
-    // SLCAN's single-letter commands, so python-can is unaffected.
+    // A `mode …`, `wifi …`, or `log` line is consumed here first; none collide
+    // with SLCAN's single-letter commands, so python-can is unaffected.
     if (tryModeCommand(cmd)) return;
+    if (tryWifiCommand(cmd)) return;
     if (tryLogCommand(cmd)) return;
     switch (cmd[0]) {
         case 'O': slcan_open = true;  Serial.write('\r'); break;
