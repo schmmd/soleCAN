@@ -493,6 +493,7 @@ static bool usbModeFromName(const String& s, UsbMode& out) {
 
 // Defined near the SLCAN section (they print over Serial / read device state).
 static bool tryModeCommand(const char* line);
+static bool tryLogCommand(const char* line);
 void usbLoggingPoll();
 
 // NVS 'wifi' namespace overrides the compiled defaults; an absent 'ssid' key
@@ -2135,6 +2136,30 @@ void logLine(const char* fmt, ...) {
     if (usbTextAllowed()) Serial.write((const uint8_t*)buf, n);
 }
 
+// Scratch for a ring snapshot. Shared by GET /logs and the `log` USB console
+// command; both run on the loop thread (never concurrent), so one buffer is safe.
+static char g_log_snap[sizeof(g_log_ring) + 1];
+
+// Copy the ring oldest -> newest into g_log_snap under the spinlock, NUL-terminate,
+// and return the byte count. Snapshotting under the lock lets callers send the
+// text outside the critical section (no I/O while interrupts are masked).
+static size_t logSnapshot() {
+    size_t len;
+    portENTER_CRITICAL(&g_log_mux);
+    if (g_log_wrapped) {
+        size_t tail = sizeof(g_log_ring) - g_log_head;
+        memcpy(g_log_snap, g_log_ring + g_log_head, tail);
+        memcpy(g_log_snap + tail, g_log_ring, g_log_head);
+        len = sizeof(g_log_ring);
+    } else {
+        memcpy(g_log_snap, g_log_ring, g_log_head);
+        len = g_log_head;
+    }
+    portEXIT_CRITICAL(&g_log_mux);
+    g_log_snap[len] = '\0';
+    return len;
+}
+
 // Marks a served request so an active web client (dashboard poller, file
 // download) defers the CAN-quiet deep sleep — see checkCanQuietSleep(). Called
 // at the top of every real endpoint but deliberately NOT from handleNotFound:
@@ -2542,21 +2567,8 @@ void handleUsbPost() {
 // the critical section (no heap work while interrupts are masked).
 void handleLog() {
     noteHttpActivity();
-    static char snap[sizeof(g_log_ring) + 1];
-    size_t len;
-    portENTER_CRITICAL(&g_log_mux);
-    if (g_log_wrapped) {
-        size_t tail = sizeof(g_log_ring) - g_log_head;
-        memcpy(snap, g_log_ring + g_log_head, tail);
-        memcpy(snap + tail, g_log_ring, g_log_head);
-        len = sizeof(g_log_ring);
-    } else {
-        memcpy(snap, g_log_ring, g_log_head);
-        len = g_log_head;
-    }
-    portEXIT_CRITICAL(&g_log_mux);
-    snap[len] = '\0';
-    server.send(200, "text/plain", len ? snap : "(no log yet)\r\n");
+    size_t len = logSnapshot();
+    server.send(200, "text/plain", len ? g_log_snap : "(no log yet)\r\n");
 }
 
 // Apply new STA credentials: AP-password gated, validated, persisted to NVS,
@@ -2990,6 +3002,19 @@ static bool tryModeCommand(const char* line) {
     return true;
 }
 
+// Recognizes a `log` line over the USB console. Dumps the retained device-log ring
+// (boot banner, WiFi/BLE events, heartbeats) over USB, so the full log — including
+// boot — is capturable with a plain terminal at any time, without racing the
+// USB-CDC re-enumeration on reset or joining WiFi to reach GET /logs. Same data as
+// /logs; wired into both the logging poll and the SLCAN dispatch, so any USB role.
+static bool tryLogCommand(const char* line) {
+    if (strcmp(line, "log") != 0) return false;
+    size_t len = logSnapshot();
+    if (len) Serial.write((const uint8_t*)g_log_snap, len);
+    else     Serial.printf("(no log yet)\r\n");
+    return true;
+}
+
 // Runs each loop iteration while in LOGGING mode: accepts a `mode` command typed
 // over USB (other input discarded) and emits a ~10 s device-status heartbeat.
 void usbLoggingPoll() {
@@ -2998,7 +3023,11 @@ void usbLoggingPoll() {
     while (Serial.available()) {            // (a) line-buffered `mode` command
         char c = Serial.read();
         if (c == '\r' || c == '\n') {
-            if (len > 0) { buf[len] = '\0'; tryModeCommand(buf); len = 0; }
+            if (len > 0) {
+                buf[len] = '\0';
+                if (!tryModeCommand(buf)) tryLogCommand(buf);
+                len = 0;
+            }
         } else if (len < sizeof(buf) - 1) {
             buf[len++] = c;
         } else {
@@ -3092,9 +3121,10 @@ static bool canTransmit0(uint32_t id, bool extd, uint8_t dlc, const uint8_t* dat
 #endif
 
 void slcanHandleCommand(const char* cmd) {
-    // A `mode …` line switches the USB role (never collides with SLCAN's
-    // single-letter commands, so python-can is unaffected).
+    // A `mode …` or `log` line is consumed here first; neither collides with
+    // SLCAN's single-letter commands, so python-can is unaffected.
     if (tryModeCommand(cmd)) return;
+    if (tryLogCommand(cmd)) return;
     switch (cmd[0]) {
         case 'O': slcan_open = true;  Serial.write('\r'); break;
         case 'C': slcan_open = false; Serial.write('\r'); break;
