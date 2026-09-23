@@ -3046,8 +3046,13 @@ static bool tryWifiCommand(const char* line) {
     if (strcmp(p, "clear") == 0) {
         g_sta_ssid[0] = g_sta_pass[0] = '\0';
         saveStaCreds(g_sta_ssid, g_sta_pass);   // persist blank -> AP-only after reboot too
+        // Tear down the live STA link *before* dropping to AP-only. Order matters:
+        // WiFi.mode(WIFI_AP) removes the STA interface, so a disconnect issued
+        // after it never deauths — the radio stays associated (sta=connected) until
+        // reboot. eraseap=true also wipes the driver's remembered AP so it can't
+        // silently reassociate.
+        WiFi.disconnect(/*wifioff=*/true, /*eraseap=*/true);
         WiFi.mode(WIFI_AP);
-        WiFi.disconnect(true);                  // stop the STA scan/link now
         Serial.printf("wifi: STA cleared -> AP-only\r\n");
     } else if (*p == '\0') {
         Serial.printf("wifi: ssid=\"%s\" sta=%s\r\n", g_sta_ssid,
