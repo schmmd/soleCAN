@@ -307,27 +307,21 @@ docker build -f esp32-s3/Dockerfile \
 written in a single shot at offset `0x0`. That is the form a browser-based
 flasher wants — no toolchain install, just a USB cable:
 
-1. Open [esp.huhn.me](https://esp.huhn.me) or the
+1. Open
    [Adafruit ESPTool](https://adafruit.github.io/Adafruit_WebSerial_ESPTool/)
+   or [esp.huhn.me](https://esp.huhn.me)
    in **desktop Chrome or Edge** (WebSerial is not available in Safari,
    Firefox, or any mobile browser).
-2. Click **Connect** and pick the board's USB serial port.
-3. Load `firmware-merged.bin` at address `0x0` and flash. If you got the image
+3. Click **Connect** and pick the board's USB serial port.
+4. Load `firmware-merged.bin` at address `0x0` and flash. If you got the image
    from a GitHub Release rather than a local build, it's the same file under a
    versioned name, `solecan-firmware-rejsacan-<version>-merged.bin` — load that
    one at `0x0` instead.
 
-If the browser can't connect, hold **BOOT-0**, tap **RST**, release **BOOT-0**
-to force download mode, then retry.
-
 Pre-built merged images are attached to every
 [GitHub Release](https://github.com/schmmd/soleCAN/releases) (as
 `solecan-firmware-rejsacan-<version>-merged.bin`), so flashing a board needs no
-build at all. That build carries the firmware's stock AP-only defaults — see
-"Customizing the WiFi AP and mDNS hostname" below — and no station
-credentials, so the board joins no network on its own after flashing; join its
-`tractor` AP and set a station network at runtime through the `/wifi` form (see
-"Changing the station WiFi at runtime" below) if you want it on your network.
+build at all.
 
 ## Customizing the WiFi AP and mDNS hostname (optional)
 
