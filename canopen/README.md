@@ -574,11 +574,11 @@ SEAT / OPC TIMING AT 15 Hz (fast table, seat_10s.csv + fast run, 2026-09-24)
     ramp 1200 -> 2800 in ~200 rpm steps (~1 s). 0x306E/0x3593 are therefore
     the RAMPED speed limit that follows 0x3011; 0x3840 and 0x33D1 are copies.
 
-  0x3011 Max_Speed_SpdM varies BETWEEN sessions at rest: 2240 (switch sweep),
-    2000 (seat run), 2800 after lever F (fast run), 1200 after power-up.
-    Not range-dependent (all ranges equal within a session). Candidates: SOC
-    or temperature derate written by the VCL. Still TENTATIVE; log it against
-    BMS SOC over several sessions.
+  0x3011 Max_Speed_SpdM at rest = the LAST SELECTED range+direction entry of
+    the 0x3103-0x3108 table (2240 = R3 reverse in the switch sweep, 2000 = R1
+    forward / R2 reverse in the seat run, 2800 = R3 forward after lever F),
+    and 1200 after power-up until the lever first leaves neutral. Nothing
+    new; see "ACTIVE SPEED LIMIT + RANGE MECHANISM".
 
   0x33EF (rotor angle hypothesis) — DROPPED. At rest it dithers in 256 steps
     around a slowly drifting value; under throttle it sweeps +-25k within a
