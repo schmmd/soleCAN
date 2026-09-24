@@ -632,6 +632,51 @@ REFERENCE HUNT (2026-09-24): PUBLIC SOURCES ARE EXHAUSTED AT ~300 NAMES
     or Solectrac's VCL project. Behavioural decoding remains the only route.
   - Victron dbus-canopen-motordrive curtis_e.c: already mined (see above).
 
+SUB-INDEX WALK (canopen_full.txt, 2026-09-24)                       CONFIRMED
+--------------------------------------------------------------------------
+  Tool: canopen/subindex_walk.py -> canopen_params.csv. 2,261 non-zero subs
+  across 378 objects. The layout is systematic:
+
+  PARAMETER (EEPROM-writable):  sub 0 = value, sub 3 = MIN, sub 4 = MAX
+  MONITOR variable:             sub 0 only
+  (sub 5 = 0 on every object: the known quirk. Subs 1/2 appear only on the
+  comm-profile records 0x1003/0x1018/0x14xx/0x16xx/0x18xx/0x1Axx and on
+  0x2000/0x2001/0x20D0/0x373D/0x57xx.)
+  Verified against named objects: 0x3011 Max_Speed 2800 [100..8000],
+  0x305B Drive_Current_Limit 16384 [1638..32767], 0x3000 Throttle_Type 2
+  [1..5], 0x3103 speed table 2800 [0..6000]; monitors 0x3207/0x3209/0x3226/
+  0x33E6/0x3160 have no sub 3/4.
+
+  So the dictionary splits: 366 parameters (178 unnamed) and 1040 monitors
+  (929 unnamed). The unnamed OEM block 0x33xx-0x36xx is almost entirely
+  MONITORS (VCL RAM: User/AutoUser variables) — only 0x330F and 0x3529-0x352E
+  there are parameters. 87 of the unnamed parameters sit in 0x38xx (Curtis
+  motor-characterization / dealer parameters absent from the public manual).
+
+  The min/max pair types an unnamed parameter without knowing its name:
+    0..1 = boolean (6 of them), 0..32767 = percent (26), 100..8000 / 0..6000 =
+    rpm, 0..4096 = cutback-style fraction, 1408..12800 = volts/64.
+  Notable unnamed parameters with a live-looking value:
+    0x3806 = 4619 [1408..12800] = 72.2 V in /64 units: a nominal-pack-voltage
+             parameter (equals Capacitor_Voltage at rest)          TENTATIVE
+    0x3826 = 4973 [0..10000]: the rest value of monitor 0x35EA (session 137:
+             4973 -> 510 under load) — 0x35EA tracks a limit whose ceiling is
+             this parameter                                        TENTATIVE
+    0x330F = 39 [1..127]: the only OEM-block parameter; node-ID-like range
+             (node is 40 = 0x28)                                   UNKNOWN
+    0x3529-0x352E: a coherent six-parameter set (111/44/1124/200/40/1500)
+    0x38A6 = 70 [45..90]: a temperature threshold (C)              TENTATIVE
+    0x3858 = 4 [1..6], 0x3827 = 1301 [178..2364], 0x381E = 1792 [150..8000]:
+             motor-characterization values (poles? rated rpm? base speed?)
+  Records/arrays: 0x2000 (8 subs, sub 7 = ASCII "CUR ", a Curtis manufacturer
+  record), 0x2001 (22 subs, all 0), 0x5702/0x5740/0x5742 (8/11/24 subs, all
+  0: reserved or empty history arrays). No segmented objects anywhere.
+
+  NEXT: with the parameter/monitor split known, the 929 unnamed monitors are
+  the behavioural-decode target (they are the VCL's live variables) and the
+  178 unnamed parameters can be typed from their ranges and value-matched
+  against the Solectrac service manual's parameter listings, if any.
+
 EXCLUDED / ARTIFACTS
 --------------------
   0x35C6   FALSE positive: signed value dithering around 0 (+24 -> -24),
