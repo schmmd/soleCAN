@@ -609,7 +609,10 @@ extern const uint8_t dashboard_html_start[] asm("_binary_src_dashboard_html_star
 extern const uint8_t dashboard_html_end[]   asm("_binary_src_dashboard_html_end");
 
 // ── SD-card session logging (RejsaCAN) ──────────────────────────────────────────
-// Records two streams to the onboard microSD whenever a card is present at boot:
+// Records two streams to the onboard microSD whenever a card is present at boot.
+// The card is mounted at boot, but the session directory is only created on the
+// first received CAN frame: a USB-powered bench boot with no bus attached leaves
+// no empty session behind.
 //
 //   /sNNNNN/can_PP.asc    every received CAN frame, Vector ASCII — replayable by
 //                         solecan-analyze.py / solecan-stream.py --replay unchanged
@@ -654,7 +657,7 @@ extern const uint8_t dashboard_html_end[]   asm("_binary_src_dashboard_html_end"
 #define SD_WRITE_CHUNK_BYTES 8192                     // batch writes into bursts this size
 
 struct SdState {
-    const char* state = "no_card";     // no_card | logging | error
+    const char* state = "no_card";     // no_card | waiting | logging | error
     uint32_t          session   = 0;
     volatile uint32_t kb_written = 0;  // writer task (core 0) owns these two
     volatile uint32_t free_mb    = 0;
@@ -664,14 +667,21 @@ struct SdState {
 };
 static SdState g_sd;
 
-// Set true once at boot after a successful mount + first session open; gates the
-// producer in loop(). Only ever cleared again (mid-session card failure), never
+// Set true once at boot after a successful mount; gates the producer in loop()
+// and the /sd/* handlers. Only ever cleared again (card failure), never
 // re-armed until reboot. Cross-core rule for this flag and the status fields in
 // SdState/SdStream: every field has exactly one writer, and readers (buildJson)
 // tolerate a torn multi-field snapshot — no control flow crosses the core
 // boundary except this flag; the writer task otherwise sees nothing but bytes
 // in the ring buffers.
 volatile bool g_sd_active = false;
+
+// Session open is deferred to the first CAN frame so bus-less (USB bench) boots
+// leave no empty /sNNNNN/ behind. The loop task sets this once, with the log
+// t=0 timestamp, when the first frame arrives; the writer task then opens the
+// session (SD I/O stays on core 0) and drains the rings that buffered the
+// frames in the meantime. Until then the card sits mounted in state "waiting".
+volatile bool g_sd_session_wanted = false;
 
 // Serializes every SD/SPI touch between the writer task (core 0) and the
 // /sd/* HTTP handlers (loop task, core 1). The writer holds it per
@@ -818,6 +828,8 @@ static bool sdOpenPart(SdStream& s) {
     return true;
 }
 
+// Writer task only. t=0 (g_sd_session_start_us) is set by the producer when it
+// requests the session, so the frames buffered before this runs stamp correctly.
 static bool sdStartSession() {
     uint32_t lowest, highest;
     sdScanSessions(lowest, highest);
@@ -827,7 +839,6 @@ static bool sdStartSession() {
     char dir[16];
     snprintf(dir, sizeof dir, "/s%05lu", (unsigned long)g_sd.session);
     if (!SD.mkdir(dir)) return false;
-    g_sd_session_start_us = esp_timer_get_time();
     if (!sdOpenPart(g_sd_raw)) return false;
     if (!sdOpenPart(g_sd_json)) { g_sd_raw.file.close(); return false; }
     return true;
@@ -959,7 +970,17 @@ static void sdWriterTask(void*) {
     uint32_t last_flush = millis();
     uint32_t last_free  = millis() - SD_FREE_CHECK_MS;   // check on first idle
 
+    bool session_open = false;
+
     for (;;) {
+        if (!session_open) {
+            if (!g_sd_session_wanted) { vTaskDelay(pdMS_TO_TICKS(20)); continue; }
+            xSemaphoreTake(g_sd_mutex, portMAX_DELAY);
+            if (!sdStartSession()) sdFail("start_session");   // never returns
+            session_open = true;
+            g_sd.state   = "logging";
+            xSemaphoreGive(g_sd_mutex);
+        }
         bool flush_due = (millis() - last_flush >= SD_FLUSH_MS);
 
         xSemaphoreTake(g_sd_mutex, portMAX_DELAY);
@@ -992,7 +1013,8 @@ static bool sdInitRing(SdStream& s) {
     return s.sb != nullptr;
 }
 
-// Probe the card once and, only on success, start logging + spawn the writer.
+// Probe the card once and, only on success, mount + spawn the writer
+// (the session itself opens on the first CAN frame — see g_sd_session_wanted).
 // Called from setup(); leaves the feature dormant (g_sd_active stays false) on
 // any failure so the firmware behaves exactly as a card-less tap. Boot failures
 // latch state="error" with a fail_op right here — sdFail() self-deletes the
@@ -1007,14 +1029,8 @@ static void sdInit() {
 
     SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
     if (!SD.begin(SD_CS_PIN, SPI, SD_SPI_HZ)) { g_sd.state = "no_card"; return; }
-    if (!sdStartSession()) {
-        g_sd.fail_op = "start_session";
-        g_sd.state   = "error";
-        SD.end();
-        return;
-    }
 
-    g_sd.state = "logging";
+    g_sd.state = "waiting";
     xTaskCreatePinnedToCore(sdWriterTask, "sdwriter", 8192, nullptr, 1, nullptr, 0);
     g_sd_active = true;   // arm the producer last, once everything is ready
 }
@@ -3935,7 +3951,13 @@ static void canServiceTick() {
         slcanSendFrame(msg);
         socketcandSendFrame(msg, /*channel=*/0);
 #if defined(HAS_SD)
-        if (g_sd_active) sdEnqueueRaw(msg);   // no-op enqueue when no card
+        if (g_sd_active) {
+            if (!g_sd_session_wanted) {          // first frame: open the session
+                g_sd_session_start_us = esp_timer_get_time();
+                g_sd_session_wanted   = true;
+            }
+            sdEnqueueRaw(msg);
+        }
 #endif
     }
 #if defined(HAS_MCP2515)
@@ -3969,7 +3991,7 @@ static void canServiceTick() {
     // unattended session would log no JSON. Built here on the loop task, so the
     // decoded globals stay single-threaded; only the serialized line crosses to
     // the writer.
-    if (g_sd_active) {
+    if (g_sd_active && g_sd_session_wanted) {
         static uint32_t last_json_ms = 0;
         uint32_t now = millis();
         if (now - last_json_ms >= 1000 / SD_JSON_HZ) {
