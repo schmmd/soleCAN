@@ -3105,8 +3105,28 @@ static bool tryWifiCommand(const char* line) {
 }
 
 #if defined(HAS_SD)
+// Never hand HWCDC more than its free ring space. Its SOF-watchdog "plugged"
+// state flaps for a few ms even on a healthy link, and a write that arrives
+// during a flap takes the not-connected path: if the write is larger than the
+// ring it keeps only the ring's worth of it, drops the rest, and still reports
+// the full size — observed on the bench as a 19 MB pull landing ~3.8 KB short
+// with a splice mid-file. A write that fits the free space is simply queued on
+// that path, so sizing each write to availableForWrite() makes a flap harmless.
 static bool sdUsbSink(void*, const uint8_t* p, size_t n) {
-    return Serial.write(p, n) == n;   // short write = host stopped reading (CDC tx timeout)
+    uint32_t stall_ms = 0;
+    while (n) {
+        size_t room = Serial.availableForWrite();
+        size_t w = room ? Serial.write(p, room < n ? room : n) : 0;
+        if (w == 0) {                       // ring full: host is behind (or gone)
+            if (++stall_ms > 2000) return false;
+            delay(1);
+            continue;
+        }
+        stall_ms = 0;
+        p += w;
+        n -= w;
+    }
+    return true;
 }
 #endif
 
@@ -3687,6 +3707,7 @@ void bleTick() {
 
 void setup() {
     Serial.begin(115200);
+    Serial.setTxBufferSize(8192);   // USB CDC TX ring (default 256 B): `sd get` writes ring-sized pieces
 
     ledInit();
     ledWrite(4, 4, 4);   // dim white the moment firmware starts running
