@@ -492,6 +492,57 @@ SD SESSION 137 — 14 min OF REAL WORK (driving + woodchipping), 2026-09-24
   Zero-centred small dither (0x350E, 0x3554, 0x3555, 0x38CC, 0x35C1, 0x35C6,
     +-150..700): instantaneous phase quantities, not state.
 
+STATIONARY SWITCH SWEEP (canopen_stages.csv, 2026-09-24)
+--------------------------------------------------------
+  Tool: canopen/canopen_stages.py (passive: listens to the firmware poller
+  over SLCAN, one stage per input change, 2 sweeps per stage) and
+  canopen/analyze_stages.py (last full sweep per stage vs baseline). Key on,
+  motor stopped throughout, so the ~150 rpm/current-driven objects were quiet.
+  Stages seat_empty and lever_f are VOID: the first version of the script did
+  not flush the serial backlog, and those two stages were consumed entirely
+  from replies buffered before the input changed (fixed since).
+
+  NOT VISIBLE TO THE CURTIS (no object moved beyond idle drift):    CONFIRMED
+    brake pedal, parking brake, hydraulics switch, PTO switch.
+    0x3226 Switches did not change for any of them, so none is wired to a
+    Curtis switch input. Consistent with DOCUMENTATION.md: the PTO indicator
+    lands on the cluster, and the hydraulic pump is the Kelly's business.
+
+  SEAT (operator presence) -> VCL LIMP, latched until the lever moves  CONFIRMED
+    Standing up (seen from the seat_back stage onward, since seat_empty is
+    void) switched the VCL into a reduced state that PERSISTED after sitting
+    back down, through hyd/pto stages, and cleared only once the lever was
+    moved (lever_r shows it gone; whether lever_f already cleared it is lost
+    with that stage):
+      0x3011 Max_Speed_SpdM     2240 -> 1200 rpm   (also mirrored in 0x306E,
+      0x3593, 0x3840 Max_Speed_SpdMx, and 0x33D1 the RPDO speed-limit input)
+      0x3213 Throttle_Multiplier 128 -> 0          (throttle scaled to zero)
+      0x3228 (OEM flag word)    384 -> 256         (bit 7 cleared)
+      0x38C7 Rotor Position      58 -> 0
+      0x35AA                   9192 -> 200, 0x35AB 0 -> 200
+    0x322B Interlock stayed 37 (bit 5 set) throughout: the seat is NOT the
+    Curtis interlock input; the VCL learns of it some other way and enforces
+    it by rewriting the speed/throttle parameters. 0x35AA collapsing to 200
+    supports reading the 0x35B7/0x35AA cluster as "available headroom":
+    it is a limit, and the limp slammed it.
+
+  0x3011 Max_Speed_SpdM is REWRITTEN BY THE VCL                     TENTATIVE
+    2240 rpm for the whole stationary session, in every range (the stock
+    snapshot read 2800; session 137 reached 2860 rpm), 1200 during the seat
+    limp. So the 2800 cap is not a fixed parameter but something the VCL
+    computes; 2240 = 80 % of 2800 may be a "no throttle / stationary" value.
+    Watch it against throttle in a future drive capture.
+
+  Re-confirmed: 0x3226 bit 7 (reverse), bits 3/4/5 (R1/R2/R3), 0x3224 low
+  byte mirror, 0x33E6 packed state (R1=0x0000 R2=0x1000 R3=0x2000, +0x800 R),
+  and the throttle cluster (0x3211/0x3216/0x3218/0x3521 ...) reading -1 in
+  reverse at zero throttle.
+
+  0x3228 OEM flag word, observed values: 384 rest, 256 seat-limp, 320 lever R,
+  448 after returning to N, 496 in R1, 504 in R2/R3. Bits 3-6 came on during
+  the lever/range stages and never went off again: latching "seen" bits
+  rather than live state. Still TENTATIVE.
+
 EXCLUDED / ARTIFACTS
 --------------------
   0x35C6   FALSE positive: signed value dithering around 0 (+24 -> -24),
