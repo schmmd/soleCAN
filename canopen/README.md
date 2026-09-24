@@ -674,8 +674,22 @@ SUB-INDEX WALK (canopen_full.txt, 2026-09-24)                       CONFIRMED
 
   NEXT: with the parameter/monitor split known, the 929 unnamed monitors are
   the behavioural-decode target (they are the VCL's live variables) and the
-  178 unnamed parameters can be typed from their ranges and value-matched
-  against the Solectrac service manual's parameter listings, if any.
+  178 unnamed parameters can be typed from their ranges.
+  Checked 2026-09-24: the Solectrac/Farmtrac FT25G service manual (docs/) has
+  NO Curtis parameter listing — only troubleshooting steps that refer to the
+  handheld's "Battery Parameter" menu (under-voltage 70 % = 62 V) and live
+  values (capacitor voltage < 84 V). No value-matching possible from it.
+
+  Battery-side Curtis parameters, from canopen_params.csv (named, CONFIRMED
+  values; interpretation TENTATIVE):
+    0x3048 Nominal_Voltage          4864 /64 = 76 V   (pack nominal is 73 V)
+    0x3049 User_Overvoltage          321
+    0x3170/71/72 BDI_Reset/Full/Empty_Volts_Per_Cell 2090/2040/1730 mV
+    0x3174 BDI_Reset_Percent 75, 0x3173 BDI_Discharge_Time 34
+  The BDI per-cell thresholds (2.09/2.04/1.73 V) are lead-acid-style
+  numbers; the pack is 20S lithium (3.65 V nominal/cell). Curtis's BDI
+  (0x3308, the "Curtis SOC") is therefore not calibrated to this chemistry,
+  which explains why it disagrees with the BMS SOC. Treat 0x3308 as noise.
 
 EXCLUDED / ARTIFACTS
 --------------------
