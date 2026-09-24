@@ -101,6 +101,32 @@
   #define CAN_TX_ENABLED 0
 #endif
 
+// ── CANopen SDO poller (opt-in) ───────────────────────────────────────────────
+// -DCANOPEN_POLL sweeps the Curtis motor controller's CANopen dictionary
+// (node 0x28, table in canopen_objects.h) with expedited SDO uploads on
+// 0x628 while the controller is alive. The 0x5A8 replies are self-describing
+// (index/sub in bytes 1-3) and reach every RX consumer — SD raw log, SLCAN,
+// socketcand — timestamped alongside the J1939 traffic; no separate file.
+// TWAI does not loop back our own TX, so the requests themselves are not
+// logged. Requires CAN_ALLOW_TX.
+#if defined(CANOPEN_POLL)
+  #if !CAN_TX_ENABLED
+    #error "CANOPEN_POLL needs -DCAN_ALLOW_TX (the poller transmits SDO requests)"
+  #endif
+  #ifndef CANOPEN_NODE
+  #define CANOPEN_NODE          0x28
+  #endif
+  #define CANOPEN_SDO_REQ_ID    (0x600 + CANOPEN_NODE)
+  #define CANOPEN_SDO_RESP_ID   (0x580 + CANOPEN_NODE)
+  #ifndef CANOPEN_POLL_GAP_MS
+  #define CANOPEN_POLL_GAP_MS   5     // pause after each reply/timeout; ~2 frames per poll
+  #endif
+  #ifndef CANOPEN_POLL_TIMEOUT_MS
+  #define CANOPEN_POLL_TIMEOUT_MS 50  // controller answers in a few ms; python tool used 60
+  #endif
+  #define CANOPEN_ALIVE_MS      2000  // poll only while FF21CA from SA 0xCA is this fresh
+#endif
+
 // Per-board pin map. Selected via -DBOARD_* in platformio.ini.
 #if defined(BOARD_ADAFRUIT_FEATHER_S3)
   #define CAN_TX_PIN       GPIO_NUM_8
@@ -443,6 +469,18 @@ uint32_t    g_last_http_ms   = 0;   // millis() at last served HTTP request (def
 uint32_t    g_can_recoveries = 0;   // bus-off recoveries initiated since boot
 uint32_t    g_socketcand_tx_dropped = 0;   // frames dropped on full client TCP buffers
 uint32_t    g_slcan_tx_dropped = 0;   // frames dropped on a full USB-CDC TX buffer (stalled reader)
+
+#if defined(CANOPEN_POLL)
+#include "canopen_objects.h"
+// One SDO upload in flight at a time, advanced by the 0x5A8 reply (seen in
+// canServiceTick) or by timeout. Runs on the loop task; never blocks.
+static struct {
+    uint16_t idx     = 0;      // next kCanopenObjects[] entry to request
+    bool     pending = false;
+    uint32_t sent_ms = 0;
+    uint32_t sweeps = 0, sent = 0, replies = 0, timeouts = 0, tx_fail = 0;
+} g_canopen;
+#endif
 bool        g_can_initialized = false;
 bool        g_ap_running      = false;
 
@@ -2105,6 +2143,17 @@ String buildJson(bool pretty = true, bool minimal = false) {
         if (g_sd_json.dropped) sd["json_dropped"] = g_sd_json.dropped;
     }
 #endif
+#if defined(CANOPEN_POLL)
+    if (!minimal) {
+        auto co = doc["canopen"].to<JsonObject>();
+        co["objects"]  = (uint32_t)(sizeof kCanopenObjects / sizeof kCanopenObjects[0]);
+        co["sweeps"]   = g_canopen.sweeps;
+        co["sent"]     = g_canopen.sent;
+        co["replies"]  = g_canopen.replies;
+        co["timeouts"] = g_canopen.timeouts;
+        if (g_canopen.tx_fail) co["tx_fail"] = g_canopen.tx_fail;
+    }
+#endif
 
     // Current USB port role (small, device-wide fact — emitted even in the
     // minimal/BLE snapshot so any client can see the mode).
@@ -3157,6 +3206,36 @@ static bool canTransmit0(uint32_t id, bool extd, uint8_t dlc, const uint8_t* dat
 }
 #endif
 
+#if defined(CANOPEN_POLL)
+static inline void canopenOnFrame(const twai_message_t& msg) {
+    if (!msg.extd && msg.identifier == CANOPEN_SDO_RESP_ID && g_canopen.pending) {
+        g_canopen.pending = false;
+        g_canopen.replies++;
+    }
+}
+
+static void canopenPollTick() {
+    uint32_t now = millis();
+    if (g_canopen.pending) {
+        if (now - g_canopen.sent_ms < CANOPEN_POLL_TIMEOUT_MS) return;
+        g_canopen.pending = false;
+        g_canopen.timeouts++;
+    }
+    if (now - g_canopen.sent_ms < CANOPEN_POLL_GAP_MS) return;
+    if (!g_motor.last_seen_ms || now - g_motor.last_seen_ms > CANOPEN_ALIVE_MS) return;
+    uint16_t index = kCanopenObjects[g_canopen.idx];
+    uint8_t req[8] = { 0x40, (uint8_t)(index & 0xFF), (uint8_t)(index >> 8), 0x00, 0, 0, 0, 0 };
+    g_canopen.sent_ms = now;
+    if (!canTransmit0(CANOPEN_SDO_REQ_ID, false, 8, req)) { g_canopen.tx_fail++; return; }
+    g_canopen.sent++;
+    g_canopen.pending = true;
+    if (++g_canopen.idx >= sizeof kCanopenObjects / sizeof kCanopenObjects[0]) {
+        g_canopen.idx = 0;
+        g_canopen.sweeps++;
+    }
+}
+#endif  // CANOPEN_POLL
+
 void slcanHandleCommand(const char* cmd) {
     // A `mode …` or `wifi …` line is consumed here first; neither collides with
     // SLCAN's single-letter commands, so python-can is unaffected.
@@ -3792,6 +3871,9 @@ static void canServiceTick() {
 #if defined(HAS_SD)
         if (g_sd_active) sdEnqueueRaw(msg);   // no-op enqueue when no card
 #endif
+#if defined(CANOPEN_POLL)
+        canopenOnFrame(msg);
+#endif
     }
 #if defined(HAS_MCP2515)
     if (g_mcp_initialized) {
@@ -3838,6 +3920,9 @@ static void canServiceTick() {
 void loop() {
     canServiceTick();
     canRecoveryTick();
+#if defined(CANOPEN_POLL)
+    canopenPollTick();
+#endif
 
     // USB port role (g_usb_mode). slcan parses USB as SLCAN; logging streams
     // device status + accepts a `mode` command; kelly is a transparent

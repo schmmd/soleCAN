@@ -123,6 +123,34 @@ two-node bench setup — one talker plus this board — nothing ACKs the talker,
 it retransmits and eventually goes bus-off. Build with `-DCAN_ALLOW_TX` for
 bench work where this board must provide the ACK.
 
+## CANopen dictionary poller (opt-in)
+
+The Curtis motor controller also answers CANopen SDO on the main bus (node
+0x28, see `canopen/README.md`). Build with **`-DCANOPEN_POLL`** (plus
+`-DCAN_ALLOW_TX`, which it requires) and the firmware sweeps the controller's
+known sub-index-0 objects (`src/canopen_objects.h`, ~1420 entries) in a
+continuous loop: one expedited SDO upload on `0x628` at a time, advanced by
+the `0x5A8` reply or a 50 ms timeout, about 5 ms apart. A full sweep takes
+roughly 15–20 s. It only polls while the motor controller's `FF21CA`
+broadcast has been seen in the last 2 s, so a parked tractor never gets
+polled and a bench board with no controller stays quiet.
+
+There is no separate CANopen file. The replies are self-describing (index and
+sub-index in bytes 1–3) and go through the normal RX path, so they show up
+wherever you are capturing: the SD session's `can_NN.asc`, SLCAN over USB, or
+socketcand over WiFi, timestamped alongside the J1939 traffic. Filter the
+standard-ID `5A8` frames offline to recover them. Our own `0x628` requests are not logged
+(TWAI does not loop back transmitted frames). `/json` gains a `canopen`
+object with `sweeps`, `sent`, `replies`, `timeouts` counters.
+
+```bash
+PLATFORMIO_BUILD_FLAGS="-DCAN_ALLOW_TX -DCANOPEN_POLL" pio run -e rejsacan
+docker build -f esp32-s3/Dockerfile --build-arg CAN_ALLOW_TX=1 --build-arg CANOPEN_POLL=1 -t solectrac-fw .
+```
+
+Regenerate the object table after re-dumping the dictionary:
+`python3 canopen/gen_canopen_table.py`.
+
 ## Kelly e-hydraulic pump monitor (RejsaCAN, opt-in)
 
 The e-hydraulic **Kelly KLS pump controller** is not on the CAN bus — it has a
