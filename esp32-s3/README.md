@@ -503,7 +503,14 @@ Logging status shows in `/json` under `sd` (state, session, KB written, free MB,
 drops) and on the dashboard footer; full diagnostics (`raw_part`, `json_part`,
 `recoveries`, `fail_op`, `fail_kb`) live on `/sd/status`. Tunables are `#define`s at the top of the
 "SD-card session logging" section in `main.cpp` (`SD_JSON_HZ`, `SD_FLUSH_MS`,
-`SD_MAX_PART_BYTES`, `SD_MIN_FREE_BYTES`, ring sizes).
+`SD_MAX_PART_BYTES`, `SD_MIN_FREE_BYTES`, ring sizes). The card's SPI clock is
+`SD_SPI_HZ`, default **20 MHz** — the highest setting within the SD spec's
+25 MHz SPI-mode limit that the ESP32-S3's clock divider can produce (the
+library default is 4 MHz, which capped downloads over both WiFi and USB). The
+board wires the slot directly to the module, so 40 MHz
+(`-DSD_SPI_HZ=40000000`) usually works too, but it is outside the SD spec and
+depends on the card: pull a session and compare it against a direct card read
+before trusting it.
 
 **Pulling data off and replaying it** — pop the card into a reader, then the raw
 log feeds the existing tools directly:

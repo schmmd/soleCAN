@@ -634,6 +634,18 @@ extern const uint8_t dashboard_html_end[]   asm("_binary_src_dashboard_html_end"
 #ifndef SD_JSON_HZ
 #define SD_JSON_HZ          1                         // decoded-snapshot cadence
 #endif
+// SPI clock for the card. The SD library defaults to a very conservative 4 MHz;
+// the SD spec allows 25 MHz in SPI mode, and the ESP32-S3's integer divider of
+// 80 MHz makes 20 MHz the highest in-spec setting. The RejsaCAN wires the slot
+// straight to the module (no level shifter, no series resistors, short traces),
+// so nothing on the board limits it below the chip. GPIO39/40/41 go through the
+// GPIO matrix, which Espressif rates identical to IO_MUX up to 40 MHz; 40 MHz is
+// out of SD spec (relies on the card's MISO output delay being better than the
+// 14 ns it's allowed) — bench-verify before shipping it. Override with
+// -DSD_SPI_HZ=40000000.
+#ifndef SD_SPI_HZ
+#define SD_SPI_HZ           20000000
+#endif
 #define SD_MAX_PART_BYTES   (64ULL * 1024 * 1024)     // roll raw/json parts at this size
 #define SD_MIN_FREE_BYTES   (512ULL * 1024 * 1024)    // reap oldest sessions below this
 #define SD_FLUSH_MS         1000                      // fsync cadence → ≤~1 s lost on power cut
@@ -914,7 +926,7 @@ static void sdRecoverOrFail(const char* op) {
         g_sd_json.file.close();
         SD.end();
         vTaskDelay(pdMS_TO_TICKS(SD_RECOVER_DELAY_MS * attempt));
-        if (!SD.begin(SD_CS_PIN)) continue;
+        if (!SD.begin(SD_CS_PIN, SPI, SD_SPI_HZ)) continue;
         if (!sdOpenPart(g_sd_raw))  continue;
         if (!sdOpenPart(g_sd_json)) continue;
         g_sd.recoveries = g_sd.recoveries + 1;
@@ -1016,7 +1028,7 @@ static void sdInit() {
     }
 
     SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
-    if (!SD.begin(SD_CS_PIN)) { g_sd.state = "no_card"; return; }
+    if (!SD.begin(SD_CS_PIN, SPI, SD_SPI_HZ)) { g_sd.state = "no_card"; return; }
 
     g_sd.state = "waiting";
     xTaskCreatePinnedToCore(sdWriterTask, "sdwriter", 8192, nullptr, 1, nullptr, 0);
@@ -3109,8 +3121,28 @@ static bool tryWifiCommand(const char* line) {
 }
 
 #if defined(HAS_SD)
+// Never hand HWCDC more than its free ring space. Its SOF-watchdog "plugged"
+// state flaps for a few ms even on a healthy link, and a write that arrives
+// during a flap takes the not-connected path: if the write is larger than the
+// ring it keeps only the ring's worth of it, drops the rest, and still reports
+// the full size — observed on the bench as a 19 MB pull landing ~3.8 KB short
+// with a splice mid-file. A write that fits the free space is simply queued on
+// that path, so sizing each write to availableForWrite() makes a flap harmless.
 static bool sdUsbSink(void*, const uint8_t* p, size_t n) {
-    return Serial.write(p, n) == n;   // short write = host stopped reading (CDC tx timeout)
+    uint32_t stall_ms = 0;
+    while (n) {
+        size_t room = Serial.availableForWrite();
+        size_t w = room ? Serial.write(p, room < n ? room : n) : 0;
+        if (w == 0) {                       // ring full: host is behind (or gone)
+            if (++stall_ms > 2000) return false;
+            delay(1);
+            continue;
+        }
+        stall_ms = 0;
+        p += w;
+        n -= w;
+    }
+    return true;
 }
 #endif
 
@@ -3691,6 +3723,7 @@ void bleTick() {
 
 void setup() {
     Serial.begin(115200);
+    Serial.setTxBufferSize(8192);   // USB CDC TX ring (default 256 B): `sd get` writes ring-sized pieces
 
     ledInit();
     ledWrite(4, 4, 4);   // dim white the moment firmware starts running
