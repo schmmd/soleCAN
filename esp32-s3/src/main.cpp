@@ -121,7 +121,11 @@
   #define CANOPEN_SDO_REQ_ID    (0x600 + CANOPEN_NODE)
   #define CANOPEN_SDO_RESP_ID   (0x580 + CANOPEN_NODE)
   #ifndef CANOPEN_POLL_GAP_MS
-  #define CANOPEN_POLL_GAP_MS   5     // pause after each reply/timeout; ~2 frames per poll
+    #if defined(CANOPEN_FAST)
+    #define CANOPEN_POLL_GAP_MS 0     // back-to-back: short table, maximise sweep rate
+    #else
+    #define CANOPEN_POLL_GAP_MS 5     // pause after each reply/timeout; ~2 frames per poll
+    #endif
   #endif
   #ifndef CANOPEN_POLL_TIMEOUT_MS
   #define CANOPEN_POLL_TIMEOUT_MS 50  // controller answers in a few ms; python tool used 60
@@ -473,7 +477,11 @@ uint32_t    g_socketcand_tx_dropped = 0;   // frames dropped on full client TCP 
 uint32_t    g_slcan_tx_dropped = 0;   // frames dropped on a full USB-CDC TX buffer (stalled reader)
 
 #if defined(CANOPEN_POLL)
-#include "canopen_objects.h"
+#if defined(CANOPEN_FAST)
+#include "canopen_fast.h"       // ~16 objects at ~15 Hz (experiment table)
+#else
+#include "canopen_objects.h"    // full dictionary, ~8 s per sweep
+#endif
 // One SDO upload in flight at a time, advanced by the 0x5A8 reply (seen in
 // canServiceTick) or by timeout. Runs on the loop task; never blocks.
 static struct {

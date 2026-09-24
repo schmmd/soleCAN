@@ -152,6 +152,11 @@ docker build -f esp32-s3/Dockerfile --build-arg CAN_ALLOW_TX=1 --build-arg CANOP
 Regenerate the object table after re-dumping the dictionary:
 `python3 canopen/gen_canopen_table.py`.
 
+Add **`-DCANOPEN_FAST`** to poll the short hand-maintained table in
+`src/canopen_fast.h` instead (about 16 objects, back-to-back, roughly 15 Hz).
+Use it for experiments where the *order* in which objects change matters;
+the full sweep is the default for logging.
+
 ## Kelly e-hydraulic pump monitor (RejsaCAN, opt-in)
 
 The e-hydraulic **Kelly KLS pump controller** is not on the CAN bus — it has a

@@ -11,6 +11,7 @@ Run it YOURSELF in your terminal (it's interactive):
 
     python3 canopen/canopen_stages.py                  # -> canopen/canopen_stages.csv
     python3 canopen/canopen_stages.py --sweeps 2       # two full sweeps per stage
+    python3 canopen/canopen_stages.py --stages fast --sweeps 60   # -DCANOPEN_FAST firmware
 
 Tractor keyed on, motor STOPPED for every stage: with the motor still, the
 ~150 RPM/current-driven objects stay quiet, so whatever moves belongs to the
@@ -46,6 +47,22 @@ STAGES = [
     ("range_r1",       "Range switch to R1."),
     ("range_r2",       "Range switch to R2."),
     ("range_r3",       "Range switch to R3."),
+]
+
+# For the -DCANOPEN_FAST firmware (~15 sweeps/s): timing-order experiments.
+# Use --sweeps 60 or so (~4 s per stage) and CHANGE THE INPUT AFTER PRESSING
+# ENTER, so the transition itself is inside the stage.
+FAST_STAGES = [
+    ("baseline",      "Key on, NEUTRAL, R3, seated, foot off. Sit still. (Enter, then hold)"),
+    ("seat_empty",    "Press Enter, THEN stand up off the seat within 2 s."),
+    ("seat_back",     "Press Enter, THEN sit back down."),
+    ("lever_f",       "Press Enter, THEN move the lever to FORWARD (no throttle)."),
+    ("lever_n",       "Press Enter, THEN lever back to NEUTRAL."),
+    ("throttle_r3",   "FORWARD, R3. Press Enter, THEN press the pedal 1/4 for 2 s and release."),
+    ("throttle_r1",   "Lever N, switch to R1, lever F. Press Enter, THEN pedal 1/4 for 2 s, release."),
+    ("throttle_r2",   "Same in R2. Press Enter, THEN pedal 1/4 for 2 s, release."),
+    ("roll_slow",     "R1, FORWARD. Press Enter, THEN creep forward as slowly as possible ~3 s."),
+    ("stop",          "Release, lever N. Sit still."),
 ]
 
 def parse_reply(msg):
@@ -106,7 +123,10 @@ def main():
     ap.add_argument("--sweeps", type=int, default=1, help="complete sweeps per stage")
     ap.add_argument("--out", default=os.path.join(HERE, "canopen_stages.csv"))
     ap.add_argument("--port", default=PORT)
+    ap.add_argument("--stages", choices=("full", "fast"), default="full",
+                    help="fast = FAST_STAGES for the -DCANOPEN_FAST firmware")
     args = ap.parse_args()
+    stages = FAST_STAGES if args.stages == "fast" else STAGES
 
     switch_to_slcan(args.port)
     base_med, base_spread = {}, {}
@@ -115,7 +135,7 @@ def main():
     writer.writerow(["stage", "t_mono", "index", "sub", "value"])
     try:
         with can.Bus(interface="slcan", channel=args.port, bitrate=250000) as bus:
-            for label, instr in STAGES:
+            for label, instr in stages:
                 print(f"\n=== {label} ===\n  SET: {instr}")
                 ans = input("  Press Enter when set  (s=skip, q=quit): ").strip().lower()
                 if ans == "q":
