@@ -475,8 +475,14 @@ session to it; with no card it runs exactly as a card-less tap (zero overhead,
 no writer task). A card inserted after boot is *not* picked up — reboot to use
 it. The two other boards have no card reader and are unaffected.
 
-Each power-on is one session directory `/sNNNNN/` (index = highest existing + 1),
-containing two streams, split into 64 MB parts:
+The card is mounted at boot (`sd.state` = `waiting`), but the session directory
+is only created when the **first CAN frame** arrives (`waiting` → `logging`).
+A USB-powered bench boot with no bus attached therefore leaves nothing on the
+card. Frames received before the writer opens the session are buffered in the
+PSRAM ring and land in the log with correct timestamps.
+
+Each power-on that sees CAN traffic is one session directory `/sNNNNN/`
+(index = highest existing + 1), containing two streams, split into 64 MB parts:
 
 | File | Contents |
 |---|---|
@@ -532,7 +538,8 @@ mid-transfer the stream is truncated and the socket closed, so the client
 detects a short read against `Content-Length` rather than a silently
 zero-filled file. Deleting the active
 session is refused (`409`); `/sd/sessions` and `/sd/sessions/N` answer `503` when
-no card was present at boot or logging has latched an error, while
+no card was present at boot or logging has latched an error (they answer
+normally while `waiting`, with no session marked active), while
 `/sd/status` always answers `200` and reports that state.
 
 On the default build the board deep-sleeps after 10 minutes of CAN silence
