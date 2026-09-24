@@ -695,6 +695,47 @@ SUB-INDEX WALK (canopen_full.txt, 2026-09-24)                       CONFIRMED
   therefore a relay of the dashboard SOC, not an independent estimate —
   useful only as a cross-check that the VCL is receiving F100F3.  CONFIRMED
 
+PACK CURRENT ATTRIBUTION (session 137: BMS F100F3 vs Curtis 0x359E vs Kelly)
+-----------------------------------------------------------------------------
+  The SD data_00.jsonl carries the BMS pack current and the Kelly pump
+  telemetry at 1 Hz next to the CANopen sweeps, so pack = traction + rest:
+    state              pack (BMS)  Curtis Battery_Current  other   Kelly
+    key-on, pump off      2.2 A          0.0 A              2.2 A   0 rpm
+    pump on, stationary  23-33 A        0-3 A             20-33 A   ~2750 rpm, 24-33 A phase
+    chipping @2800 rpm   58-73 A       34-47 A            18-28 A   ~2790 rpm
+  - 0x359E sign/scale cross-validated against the BMS: it is the traction
+    controller's DC draw alone; BMS current (negative = discharge on
+    F100F3) is the whole pack.                                    CONFIRMED
+  - The remainder, 20-33 A (~1.5-2.4 kW at 72 V), is the Kelly e-hydraulic
+    pump, which ran at ~2750 rpm for the entire session whenever the
+    hydraulics switch was on — including the stationary idle before the
+    chipping run. The base load with the pump off is ~2 A (aux/cluster).
+    Kelly phase current (AC) vs the DC remainder correlate at r=0.57; the
+    magnitudes agree.                                             CONFIRMED
+  Practical: the hydraulic pump is a constant ~25 A parasitic whenever it is
+  switched on; for chipping (PTO from the traction motor) it contributed
+  ~35 % of the pack draw.
+
+RESIDUAL MINING OF THE UNNAMED MOVERS (session 137)
+---------------------------------------------------
+  69 unnamed, undiscussed objects varied. Fitted each as a linear combination
+  of rpm, |rpm|, motor current, battery current, Vcap, throttle, modulation:
+  23 fit with R2 >= 0.9 (mirrors / filtered copies). The poorly-fitted rest
+  are NOT new dynamics — they are slow drifts and dithers:
+    0x33E8 56..61, 0x33E9 53..57, 0x33F1 83..90, 0x361A 207..212,
+    0x373E 185..188, 0x361B/0x361C/0x361F 7855..7865, 0x35F5 782..813:
+        slow monotonic drift over the session — temperatures or filtered
+        analog inputs in unknown units.                          TENTATIVE
+    0x354B 1200/5000/10000/13000/30008: steps between Max_Speed-like values,
+        13 distinct — a speed-ramp target or limit selector.     TENTATIVE
+    0x3508/0x350F 610 at rest, dips to 4..9 briefly when moving off — a
+        countdown/timer (the pair is identical).                 TENTATIVE
+    0x35EB -1..1, 0x350A 997..1023, 0x360A 68..72, 0x3285 (wraps around 0),
+    0x324F +-32k: dither / AC-sample noise. Exclude.
+  Conclusion: session 137 has no undiscovered fast-moving quantity; what the
+  full-table poller can still find is in slow variables (long sessions,
+  thermal) and in event responses (faults), not in more of the same driving.
+
 EXCLUDED / ARTIFACTS
 --------------------
   0x35C6   FALSE positive: signed value dithering around 0 (+24 -> -24),
