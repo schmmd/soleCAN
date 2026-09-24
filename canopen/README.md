@@ -591,6 +591,24 @@ SEAT / OPC TIMING AT 15 Hz (fast table, seat_10s.csv + fast run, 2026-09-24)
     under throttle in every range, reset-ramp on power-up. Consistent with an
     available-current / headroom ramp. TENTATIVE.
 
+0x3160 MASTER_TIMER — KEY-ON RUN-TIME COUNTER, NOT A CLOCK        CONFIRMED
+--------------------------------------------------------------------------
+  Rate: 9.57 ticks/s while the controller is powered, measured two ways
+  (session 137 poll timebase 9.575; canopen_ts.csv wall clock 9.560). Not
+  10 Hz: either an odd tick period or a ~4 % slow Curtis clock.
+  Stops when off: 21:05 (2026-09-23) -> 08:59 (2026-09-24) advanced 6,095
+  ticks = ~10.6 min of key-on time in a 12 h interval. Did not count while
+  parked/charging overnight.
+  Persists across key cycles and the OPC power-down (EEPROM-backed).
+  Value at end of session 137: 6,520,553 ticks = ~189 h of controller-on
+  time, vs 118.1 h on the dashboard hour meter at the same time. The two
+  meters count different things; most likely the dash counts a narrower
+  condition (motor turning / OPC active) while the Curtis counts every
+  powered second. Check: note both, use the tractor a few hours, compare
+  increments (9.57 ticks per dash-second => dash counts key-on time).
+  Use: monotonic run-time stamp to order sessions and measure controller-on
+  time between them. Cannot give wall-clock time.
+
 EXCLUDED / ARTIFACTS
 --------------------
   0x35C6   FALSE positive: signed value dithering around 0 (+24 -> -24),
