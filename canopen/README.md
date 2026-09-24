@@ -508,12 +508,13 @@ STATIONARY SWITCH SWEEP (canopen_stages.csv, 2026-09-24)
     Curtis switch input. Consistent with DOCUMENTATION.md: the PTO indicator
     lands on the cluster, and the hydraulic pump is the Kelly's business.
 
-  SEAT (operator presence) -> VCL LIMP, latched until the lever moves  CONFIRMED
+  SEAT (operator presence) -> "LIMP" = POWER-UP STATE   (superseded, see
+  "SEAT / OPC TIMING" below: leaving the seat powers the Curtis DOWN after
+  7 s; what follows is its restart defaults, held until the lever moves)
     Standing up (seen from the seat_back stage onward, since seat_empty is
-    void) switched the VCL into a reduced state that PERSISTED after sitting
+    void) left the controller in a reduced state that PERSISTED after sitting
     back down, through hyd/pto stages, and cleared only once the lever was
-    moved (lever_r shows it gone; whether lever_f already cleared it is lost
-    with that stage):
+    moved:
       0x3011 Max_Speed_SpdM     2240 -> 1200 rpm   (also mirrored in 0x306E,
       0x3593, 0x3840 Max_Speed_SpdMx, and 0x33D1 the RPDO speed-limit input)
       0x3213 Throttle_Multiplier 128 -> 0          (throttle scaled to zero)
@@ -542,6 +543,50 @@ STATIONARY SWITCH SWEEP (canopen_stages.csv, 2026-09-24)
   448 after returning to N, 496 in R1, 504 in R2/R3. Bits 3-6 came on during
   the lever/range stages and never went off again: latching "seen" bits
   rather than live state. Still TENTATIVE.
+
+SEAT / OPC TIMING AT 15 Hz (fast table, seat_10s.csv + fast run, 2026-09-24)
+-----------------------------------------------------------------------------
+  Firmware -DCANOPEN_FAST (src/canopen_fast.h, 16 objects, ~15 sweeps/s),
+  canopen_stages.py --stages seat --secs 10, analyze_stages.py --order.
+
+  LEAVING THE SEAT POWERS THE CURTIS DOWN after the 7 s OPC timer   CONFIRMED
+    Stand-up at ~1.5 s into the stage; nothing at all changes until 8.33 s
+    (= the service manual's 7 s OPC timer, DOCUMENTATION.md §F100D0). Then,
+    within 100 ms, in this order:
+      8.33  0x3226 Switches   1060 -> 36 -> 0    bit 10 (Sw_11, pin 4) drops
+                                                 FIRST, then every input
+      8.35  0x3011 Max_Speed  2000 -> 0          (0x3840 likewise)
+      8.36  0x306E/0x3593     2000 -> 1994 -> ... decaying ramps
+      8.38  0x3228 flag word   376 -> 1404
+      8.39  0x322B Interlock    37 -> 4 -> 68
+      8.40  0x33E6             8192 -> 0
+    and then the controller stops answering and its J1939 stops: the OPC
+    relay cuts the Curtis's keyswitch. So Sw_11 (previously "always on, not
+    exercised") is the OPC enable input, and the "seat limp" seen in the
+    stationary sweep was simply the controller's POWER-UP state after this
+    shutdown and the re-key.
+
+  POWER-UP / NEUTRAL-START SEQUENCE (fast run, seat_back + lever_f)  CONFIRMED
+    On (re)start: Switches 1316, Interlock 69 -> 5 -> 37, Max_Speed 1200,
+    Throttle_Multiplier 0, 0x35B7 ramps 4656 -> 9192 over ~1 s. The 1200 rpm
+    cap and zero throttle multiplier HOLD until the lever leaves neutral:
+    lever F -> 0x3213 0 -> 128, 0x3011 1200 -> 2800 at once, 0x306E/0x3593
+    ramp 1200 -> 2800 in ~200 rpm steps (~1 s). 0x306E/0x3593 are therefore
+    the RAMPED speed limit that follows 0x3011; 0x3840 and 0x33D1 are copies.
+
+  0x3011 Max_Speed_SpdM varies BETWEEN sessions at rest: 2240 (switch sweep),
+    2000 (seat run), 2800 after lever F (fast run), 1200 after power-up.
+    Not range-dependent (all ranges equal within a session). Candidates: SOC
+    or temperature derate written by the VCL. Still TENTATIVE; log it against
+    BMS SOC over several sessions.
+
+  0x33EF (rotor angle hypothesis) — DROPPED. At rest it dithers in 256 steps
+    around a slowly drifting value; under throttle it sweeps +-25k within a
+    second. Not a clean angle at 15 Hz. Unknown; low priority.
+
+  0x35AA/0x35B7 behave as a ramping limit: 9192 at rest, converging to ~3670
+    under throttle in every range, reset-ramp on power-up. Consistent with an
+    available-current / headroom ramp. TENTATIVE.
 
 EXCLUDED / ARTIFACTS
 --------------------
