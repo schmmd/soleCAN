@@ -484,6 +484,13 @@ PSRAM ring and land in the log with correct timestamps.
 Each power-on that sees CAN traffic is one session directory `/sNNNNN/`
 (index = highest existing + 1), containing two streams, split into 64 MB parts:
 
+The folder is renamed to `/sNNNNN-socSS` the moment the first BMS SOC frame is
+decoded, where `SS` is the start-of-session pack SOC rounded to a whole percent
+(e.g. `/s00007-soc42`). The board has no accurate clock, so this makes sessions
+identifiable at a glance when browsing the card. Sessions whose BMS never
+published a SOC reading keep the plain `/sNNNNN` name. The `/sd/sessions/{id}`
+download and delete endpoints still address a session by its plain number.
+
 | File | Contents |
 |---|---|
 | `can_PP.asc` | every received CAN frame, Vector ASCII — replayable by the Python tools unchanged |

@@ -518,9 +518,12 @@ def stage_sd_files(args, sd_ok: bool) -> None:
         try:
             tf = tarfile.open(fileobj=io.BytesIO(body))
             names = tf.getnames()
-            check(f"s{sid:05d}/can_00.asc" in names, "raw part in tar",
+            # Member dir is "sNNNNN" or "sNNNNN-socSS" once the start SOC landed.
+            sdir = next((n.split("/")[0] for n in names
+                         if n.startswith(f"s{sid:05d}")), f"s{sid:05d}")
+            check(f"{sdir}/can_00.asc" in names, "raw part in tar",
                   ", ".join(names[:4]))
-            jsonl = f"s{sid:05d}/data_00.jsonl"
+            jsonl = f"{sdir}/data_00.jsonl"
             if check(jsonl in names, "json part in tar"):
                 data = tf.extractfile(jsonl).read()
                 check(data.lstrip()[:1] == b"{", "jsonl member looks like JSON",
