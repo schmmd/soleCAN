@@ -4,10 +4,16 @@
     python3 canopen/sdo_write.py 0x3104               # read: value, min, max, EE-write flag
     python3 canopen/sdo_write.py 0x3104 2000 --apply    # write 2000, read back
     python3 canopen/sdo_write.py 0x3104 2240 --apply    # put it back (or just key-cycle)
+    python3 canopen/sdo_write.py 0x3106 2000 --apply --persist   # EEPROM: survives key cycles
+
+--persist wraps the write in 0x332F := 1 ... := 0 (CAN_EE_Writes_Enabled), so
+that one write is committed to EEPROM and the flag is cleared again, even if
+the write fails. Undo = another --persist write of the old value.
 
 Guards, all must pass before a single write frame goes out:
-  1. 0x332F CAN_EE_Writes_Enabled == 0  -> the write is VOLATILE (RAM), gone at
-     the next key cycle. Refuses otherwise; this script never touches 0x332F.
+  1. 0x332F CAN_EE_Writes_Enabled == 0 at start -> a plain write is VOLATILE
+     (RAM), gone at the next key cycle. Refuses if it is already set. Only
+     --persist touches 0x332F, and only around its one write.
   2. Motor stopped (0x3207 == 0) and lever in neutral (0x33E6 dir bits == 0).
   3. The object is a PARAMETER (sub 3/4 present) and value is within [min, max].
   4. --apply on the command line.
@@ -61,11 +67,24 @@ def read(bus, index, sub=0):
     n = (d[0] >> 2) & 3 if d[0] & 1 else 0
     return int.from_bytes(d[4:8 - n], "little")
 
-def write16(bus, index, value, sub=0):
-    d = xfer(bus, [0x2B, index & 0xFF, index >> 8, sub, value & 0xFF, (value >> 8) & 0xFF, 0, 0])
+def write16(bus, index, value, sub=0, nbytes=2):
+    cs = {1: 0x2F, 2: 0x2B, 4: 0x23}[nbytes]
+    d = xfer(bus, [cs, index & 0xFF, index >> 8, sub] + list(value.to_bytes(4, "little")))
     if d is None: return "no reply"
     if d[0] == 0x80: return f"abort 0x{int.from_bytes(d[4:8], 'little'):08X}"
     return "ok" if d[0] == 0x60 else f"unexpected scs 0x{d[0]:02X}"
+
+EE = 0x332F   # CAN_EE_Writes_Enabled: non-zero => every SDO write also hits EEPROM
+
+def set_ee(bus, on):
+    """Set 0x332F to 1/0 and verify by read-back. Size unknown (no sub 3/4):
+    try 2-byte, fall back to 1-byte on a length abort."""
+    for n in (2, 1):
+        r = write16(bus, EE, 1 if on else 0, nbytes=n)
+        if r == "ok": break
+    v = read(bus, EE)
+    if v != (1 if on else 0): raise RuntimeError(f"0x332F did not take: write={r}, reads {v}")
+    return v
 
 def motor_state(bus, secs=1.0):
     """(rpm, dir) from the J1939 FF21CA broadcast, or None if not seen."""
@@ -81,6 +100,8 @@ def main():
     ap.add_argument("index", type=lambda x: int(x, 0))
     ap.add_argument("value", type=int, nargs="?")
     ap.add_argument("--apply", action="store_true", help="actually write")
+    ap.add_argument("--persist", action="store_true",
+                    help="with --apply: enable EEPROM writes (0x332F=1) just for this write, then disable again")
     ap.add_argument("--port", default=PORT)
     ap.add_argument("--retries", type=int, default=0, help="extra attempts per SDO transfer (default 0)")
     a = ap.parse_args()
@@ -113,12 +134,25 @@ def run(a):
         if problems:
             print("REFUSED:\n  " + "\n  ".join(problems)); raise SystemExit(2)
         if not a.apply:
-            print(f"dry run: would write {a.value} to 0x{a.index:04X} (RAM only). Add --apply."); return
-        print(f"writing {a.value} -> 0x{a.index:04X} ... ", end="", flush=True)
-        print(write16(bus, a.index, a.value))
-        time.sleep(0.2)
-        print(f"read back: 0x{a.index:04X} = {read(bus, a.index)}   0x3011 Max_Speed = {read(bus, 0x3011)}   UserFault1 0x3238 = {read(bus, 0x3238)}")
-        print("Volatile: a key cycle restores the EEPROM value. Watch the cluster for a fault code.")
+            print(f"dry run: would write {a.value} to 0x{a.index:04X} ({'EEPROM' if a.persist else 'RAM only'}). Add --apply."); return
+        if a.persist:
+            print("enabling EEPROM writes (0x332F := 1) ... ", end="", flush=True)
+            print(set_ee(bus, True))
+        try:
+            print(f"writing {a.value} -> 0x{a.index:04X} ... ", end="", flush=True)
+            print(write16(bus, a.index, a.value))
+            time.sleep(0.2)
+        finally:
+            if a.persist:
+                # Always turn EEPROM writes back off, even if the write failed:
+                # leaving 0x332F set makes the VCL's own parameter rewrites wear the EEPROM.
+                print("disabling EEPROM writes (0x332F := 0) ... ", end="", flush=True)
+                print(set_ee(bus, False))
+        print(f"read back: 0x{a.index:04X} = {read(bus, a.index)}   0x3011 Max_Speed = {read(bus, 0x3011)}   UserFault1 0x3238 = {read(bus, 0x3238)}   0x332F = {read(bus, EE)}")
+        if a.persist:
+            print("PERSISTED: key-cycle, then re-read to confirm it survived.")
+        else:
+            print("Volatile: a key cycle restores the EEPROM value. Watch the cluster for a fault code.")
 
 if __name__ == "__main__":
     main()
