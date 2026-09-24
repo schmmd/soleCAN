@@ -209,8 +209,8 @@ raw-range vs display-range pair. Confirmed against our data:
   0x3206 Frequency               ~2 x rpm  (electrical speed; 4-pole motor)
   0x3211 Mapped_Throttle         +-32767 = +-100 %   (was "torque cmd" here)
   0x3216 Throttle_Command        +-32767 = +-100 %
-  0x3308 BDI_Percentage          0-100 %   37 %  (Curtis's own SOC estimate —
-                                            compare with the BMS-shown SOC)
+  0x3308 BDI_Percentage          0-100 %   37 %  (= BMS shown SOC, relayed by
+                                            the VCL; see SUB-INDEX WALK)
   0x3559 Max_Speed_Controller_Limit  8000  constant; the controller ceiling,
                                             NOT the range cap
   0x3581/0x35F3/0x3604/0x3605    cutbacks (motor-temp / ctrl-temp / over-V /
@@ -687,9 +687,13 @@ SUB-INDEX WALK (canopen_full.txt, 2026-09-24)                       CONFIRMED
     0x3170/71/72 BDI_Reset/Full/Empty_Volts_Per_Cell 2090/2040/1730 mV
     0x3174 BDI_Reset_Percent 75, 0x3173 BDI_Discharge_Time 34
   The BDI per-cell thresholds (2.09/2.04/1.73 V) are lead-acid-style
-  numbers; the pack is 20S lithium (3.65 V nominal/cell). Curtis's BDI
-  (0x3308, the "Curtis SOC") is therefore not calibrated to this chemistry,
-  which explains why it disagrees with the BMS SOC. Treat 0x3308 as noise.
+  numbers and would put a 71 V pack at ~80 %. Yet 0x3308 BDI_Percentage
+  tracked the BMS's SHOWN SOC (F100F3, the dashboard value) to within 1 point
+  for all of session 137: BDI 36/35/34/33 vs BMS 35.2 -> 32.8 %. So the
+  Curtis is NOT computing BDI from its lead-acid thresholds; the OEM VCL
+  reads the BMS SOC off J1939 and writes it into BDI_Percentage. 0x3308 is
+  therefore a relay of the dashboard SOC, not an independent estimate —
+  useful only as a cross-check that the VCL is receiving F100F3.  CONFIRMED
 
 EXCLUDED / ARTIFACTS
 --------------------

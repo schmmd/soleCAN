@@ -49,7 +49,7 @@ DECODE = {
     0x324D: ("Keyswitch_Voltage",       "CONFIRMED", lambda v: f"{v / 100:.2f} V"),
     0x320B: ("Motor_Temperature",       "CONFIRMED", lambda v: f"{s16(v) / 10:.1f} C"),
     0x322A: ("Controller_Temperature",  "CONFIRMED", lambda v: f"{s16(v) / 10:.1f} C"),
-    0x3308: ("BDI_Percentage (Curtis SOC)", "CONFIRMED", lambda v: f"{v} %"),
+    0x3308: ("BDI_Percentage (= BMS shown SOC via VCL)", "CONFIRMED", lambda v: f"{v} %"),
     0x3215: ("Throttle_Pot_Raw",        "CONFIRMED", lambda v: f"{v / 36044 * 5.5:.2f} V at pedal wiper"),
     0x3217: ("Pot2_Raw (unused input)", "CONFIRMED", lambda v: f"{v / 36044 * 5.5:.2f} V"),
     0x3211: ("Mapped_Throttle",         "CONFIRMED", pct32),
