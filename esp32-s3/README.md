@@ -504,8 +504,21 @@ session to it; with no card it runs exactly as a card-less tap (zero overhead,
 no writer task). A card inserted after boot is *not* picked up — reboot to use
 it. The two other boards have no card reader and are unaffected.
 
-Each power-on is one session directory `/sNNNNN/` (index = highest existing + 1),
-containing two streams, split into 64 MB parts:
+The card is mounted at boot (`sd.state` = `waiting`), but the session directory
+is only created when the **first CAN frame** arrives (`waiting` → `logging`).
+A USB-powered bench boot with no bus attached therefore leaves nothing on the
+card. Frames received before the writer opens the session are buffered in the
+PSRAM ring and land in the log with correct timestamps.
+
+Each power-on that sees CAN traffic is one session directory `/sNNNNN/`
+(index = highest existing + 1), containing two streams, split into 64 MB parts:
+
+The folder is renamed to `/sNNNNN-socSS` the moment the first BMS SOC frame is
+decoded, where `SS` is the start-of-session pack SOC rounded to a whole percent
+(e.g. `/s00007-soc42`). The board has no accurate clock, so this makes sessions
+identifiable at a glance when browsing the card. Sessions whose BMS never
+published a SOC reading keep the plain `/sNNNNN` name. The `/sd/sessions/{id}`
+download and delete endpoints still address a session by its plain number.
 
 | File | Contents |
 |---|---|
@@ -526,7 +539,14 @@ Logging status shows in `/json` under `sd` (state, session, KB written, free MB,
 drops) and on the dashboard footer; full diagnostics (`raw_part`, `json_part`,
 `recoveries`, `fail_op`, `fail_kb`) live on `/sd/status`. Tunables are `#define`s at the top of the
 "SD-card session logging" section in `main.cpp` (`SD_JSON_HZ`, `SD_FLUSH_MS`,
-`SD_MAX_PART_BYTES`, `SD_MIN_FREE_BYTES`, ring sizes).
+`SD_MAX_PART_BYTES`, `SD_MIN_FREE_BYTES`, ring sizes). The card's SPI clock is
+`SD_SPI_HZ`, default **20 MHz** — the highest setting within the SD spec's
+25 MHz SPI-mode limit that the ESP32-S3's clock divider can produce (the
+library default is 4 MHz, which capped downloads over both WiFi and USB). The
+board wires the slot directly to the module, so 40 MHz
+(`-DSD_SPI_HZ=40000000`) usually works too, but it is outside the SD spec and
+depends on the card: pull a session and compare it against a direct card read
+before trusting it.
 
 **Pulling data off and replaying it** — pop the card into a reader, then the raw
 log feeds the existing tools directly:
@@ -561,7 +581,8 @@ mid-transfer the stream is truncated and the socket closed, so the client
 detects a short read against `Content-Length` rather than a silently
 zero-filled file. Deleting the active
 session is refused (`409`); `/sd/sessions` and `/sd/sessions/N` answer `503` when
-no card was present at boot or logging has latched an error, while
+no card was present at boot or logging has latched an error (they answer
+normally while `waiting`, with no session marked active), while
 `/sd/status` always answers `200` and reports that state.
 
 On the default build the board deep-sleeps after 10 minutes of CAN silence

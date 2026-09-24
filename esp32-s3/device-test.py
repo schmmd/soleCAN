@@ -416,6 +416,32 @@ def stage_sd(args, j: dict) -> bool:
                            "(pass --expect-sd to make this a failure)")
         return False
 
+    if state == "waiting":
+        # The session only opens on the first CAN frame, so a bus-less bench
+        # boot sits here. Prime it with one frame from the injector.
+        if not args.inject_channel:
+            report("WARN", "card mounted but no CAN frame yet — session checks "
+                           "need --inject-channel to send one")
+            return False
+        try:
+            import can
+            ack_bus = open_ack_bus(args)
+            bus = open_injector_bus(args)
+            can_id, data_hex = FIX_MOTOR
+            bus.send(can.Message(arbitration_id=can_id, is_extended_id=True,
+                                 data=bytes.fromhex(data_hex)), timeout=1.0)
+            time.sleep(2.5)   # writer opens the session + first flush
+            bus.shutdown()
+            if ack_bus:
+                ack_bus.shutdown()
+        except Exception as e:  # noqa: BLE001
+            check(False, "prime SD session with one frame", str(e))
+            return False
+        sd = fetch_json(args.host).get("sd", {})
+        state = sd.get("state")
+        check(state == "logging", "waiting -> logging on first CAN frame",
+              f"state={state}")
+
     check(state == "logging", "SD session logging", f"state={state}")
     check(sd.get("session", 0) >= 1, "session directory open",
           f"session={sd.get('session')}")
@@ -492,9 +518,12 @@ def stage_sd_files(args, sd_ok: bool) -> None:
         try:
             tf = tarfile.open(fileobj=io.BytesIO(body))
             names = tf.getnames()
-            check(f"s{sid:05d}/can_00.asc" in names, "raw part in tar",
+            # Member dir is "sNNNNN" or "sNNNNN-socSS" once the start SOC landed.
+            sdir = next((n.split("/")[0] for n in names
+                         if n.startswith(f"s{sid:05d}")), f"s{sid:05d}")
+            check(f"{sdir}/can_00.asc" in names, "raw part in tar",
                   ", ".join(names[:4]))
-            jsonl = f"s{sid:05d}/data_00.jsonl"
+            jsonl = f"{sdir}/data_00.jsonl"
             if check(jsonl in names, "json part in tar"):
                 data = tf.extractfile(jsonl).read()
                 check(data.lstrip()[:1] == b"{", "jsonl member looks like JSON",

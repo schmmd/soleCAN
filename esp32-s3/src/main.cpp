@@ -54,6 +54,7 @@
   #include <esp_timer.h>
   #include <esp_heap_caps.h>
   #include "freertos/stream_buffer.h"
+  #include "session_name.h"   // pure session-dir naming (host-tested)
 #endif
 // Energy-saving deep sleep is on by default; build with -DNO_AUTOSHUTDOWN to
 // keep the board fully awake through CAN-bus silence.
@@ -647,7 +648,10 @@ extern const uint8_t dashboard_html_start[] asm("_binary_src_dashboard_html_star
 extern const uint8_t dashboard_html_end[]   asm("_binary_src_dashboard_html_end");
 
 // ── SD-card session logging (RejsaCAN) ──────────────────────────────────────────
-// Records two streams to the onboard microSD whenever a card is present at boot:
+// Records two streams to the onboard microSD whenever a card is present at boot.
+// The card is mounted at boot, but the session directory is only created on the
+// first received CAN frame: a USB-powered bench boot with no bus attached leaves
+// no empty session behind.
 //
 //   /sNNNNN/can_PP.asc    every received CAN frame, Vector ASCII — replayable by
 //                         solecan-analyze.py / solecan-stream.py --replay unchanged
@@ -669,6 +673,18 @@ extern const uint8_t dashboard_html_end[]   asm("_binary_src_dashboard_html_end"
 #ifndef SD_JSON_HZ
 #define SD_JSON_HZ          1                         // decoded-snapshot cadence
 #endif
+// SPI clock for the card. The SD library defaults to a very conservative 4 MHz;
+// the SD spec allows 25 MHz in SPI mode, and the ESP32-S3's integer divider of
+// 80 MHz makes 20 MHz the highest in-spec setting. The RejsaCAN wires the slot
+// straight to the module (no level shifter, no series resistors, short traces),
+// so nothing on the board limits it below the chip. GPIO39/40/41 go through the
+// GPIO matrix, which Espressif rates identical to IO_MUX up to 40 MHz; 40 MHz is
+// out of SD spec (relies on the card's MISO output delay being better than the
+// 14 ns it's allowed) — bench-verify before shipping it. Override with
+// -DSD_SPI_HZ=40000000.
+#ifndef SD_SPI_HZ
+#define SD_SPI_HZ           20000000
+#endif
 #define SD_MAX_PART_BYTES   (64ULL * 1024 * 1024)     // roll raw/json parts at this size
 #define SD_MIN_FREE_BYTES   (512ULL * 1024 * 1024)    // reap oldest sessions below this
 #define SD_FLUSH_MS         1000                      // fsync cadence → ≤~1 s lost on power cut
@@ -680,8 +696,10 @@ extern const uint8_t dashboard_html_end[]   asm("_binary_src_dashboard_html_end"
 #define SD_WRITE_CHUNK_BYTES 8192                     // batch writes into bursts this size
 
 struct SdState {
-    const char* state = "no_card";     // no_card | logging | error
+    const char* state = "no_card";     // no_card | waiting | logging | error
     uint32_t          session   = 0;
+    char              dir[24]   = "";  // active session dir, e.g. "/s00001" or
+                                       // "/s00001-42" once the SOC suffix lands
     volatile uint32_t kb_written = 0;  // writer task (core 0) owns these two
     volatile uint32_t free_mb    = 0;
     const char*       fail_op  = "";     // which SD call failed (state == "error")
@@ -690,14 +708,31 @@ struct SdState {
 };
 static SdState g_sd;
 
-// Set true once at boot after a successful mount + first session open; gates the
-// producer in loop(). Only ever cleared again (mid-session card failure), never
+// Set true once at boot after a successful mount; gates the producer in loop()
+// and the /sd/* handlers. Only ever cleared again (card failure), never
 // re-armed until reboot. Cross-core rule for this flag and the status fields in
 // SdState/SdStream: every field has exactly one writer, and readers (buildJson)
 // tolerate a torn multi-field snapshot — no control flow crosses the core
 // boundary except this flag; the writer task otherwise sees nothing but bytes
 // in the ring buffers.
 volatile bool g_sd_active = false;
+
+// Session open is deferred to the first CAN frame so bus-less (USB bench) boots
+// leave no empty /sNNNNN/ behind. The loop task sets this once, with the log
+// t=0 timestamp, when the first frame arrives; the writer task then opens the
+// session (SD I/O stays on core 0) and drains the rings that buffered the
+// frames in the meantime. Until then the card sits mounted in state "waiting".
+volatile bool g_sd_session_wanted = false;
+
+// Start-of-session SOC folder rename request. The loop task (core 1) sets these
+// once, when the first BMS SOC frame of the session is decoded; the writer task
+// (core 0) performs the SD.rename under the mutex and clears the flag — always
+// after the deferred session open above, since the writer handles the open
+// first in the same loop pass. Aligned volatiles: core 1 is the sole writer of
+// the pending SOC and only ever raises the flag, the writer only ever lowers it
+// — no read-modify-write races.
+volatile bool    g_sd_rename_pending = false;
+volatile int16_t g_sd_pending_soc    = -1;   // 0..100, or -1 if SOC unknown
 
 // Serializes every SD/SPI touch between the writer task (core 0) and the
 // /sd/* HTTP handlers (loop task, core 1). The writer holds it per
@@ -731,7 +766,7 @@ struct SdStreamGuard {
 // .jsonl are two instances; everything that touches a stream goes through the
 // shared helpers below so the two lifecycles can't drift apart.
 struct SdStream {
-    const char*          path_fmt;    // "/s%05lu/<name>_%02u.<ext>" (session, part)
+    const char*          name_fmt;    // "<name>_%02u.<ext>" (part) — joined to g_sd.dir
     const char*          write_op;    // fail_op tag for a failed write
     const char*          open_op;     // fail_op tag for a failed part open
     bool                 asc_header;  // new parts get the Vector ASCII header
@@ -744,8 +779,8 @@ struct SdStream {
     volatile uint16_t    part = 0;
     volatile uint32_t    dropped = 0;     // producer (core 1) owns this
 };
-static SdStream g_sd_raw  = { "/s%05lu/can_%02u.asc",    "raw_write",  "raw_open",  true,  SD_RAW_RING_BYTES };
-static SdStream g_sd_json = { "/s%05lu/data_%02u.jsonl", "json_write", "json_open", false, SD_JSON_RING_BYTES };
+static SdStream g_sd_raw  = { "can_%02u.asc",    "raw_write",  "raw_open",  true,  SD_RAW_RING_BYTES };
+static SdStream g_sd_json = { "data_%02u.jsonl", "json_write", "json_open", false, SD_JSON_RING_BYTES };
 
 static int64_t g_sd_session_start_us = 0;   // esp_timer µs at session open (log t=0)
 
@@ -801,15 +836,8 @@ static const char* sdBasename(const char* name) {
     return slash ? slash + 1 : name;
 }
 
-// Parse a session directory basename: exactly 's' followed by digits. Anything
-// else — a user's "stuff/" folder, "saved" — is rejected; strtoul alone would
-// parse those to 0 and permanently jam the reaper on a nonexistent /s00000.
-static bool sdParseSession(const char* nm, uint32_t& n) {
-    if (nm[0] != 's' || nm[1] < '0' || nm[1] > '9') return false;
-    char* end = nullptr;
-    n = strtoul(nm + 1, &end, 10);
-    return *end == '\0';
-}
+// Session-dir parsing/naming lives in session_name.h (sessionParse, etc.) so it
+// can be host-tested; sessionParse tolerates the "-socSS" SOC suffix.
 
 // One walk of the root directory serving both consumers: the highest session
 // index (next session number = highest + 1, monotonic per card, survives
@@ -822,7 +850,7 @@ static void sdScanSessions(uint32_t& lowest_other, uint32_t& highest) {
     if (!root) return;
     for (File e = root.openNextFile(); e; e = root.openNextFile()) {
         uint32_t n;
-        if (e.isDirectory() && sdParseSession(sdBasename(e.name()), n)) {
+        if (e.isDirectory() && sessionParse(sdBasename(e.name()), n)) {
             if (n > highest) highest = n;
             if (n < lowest_other && n != g_sd.session &&
                 n != g_sd_http_stream_session) lowest_other = n;
@@ -835,8 +863,9 @@ static void sdScanSessions(uint32_t& lowest_other, uint32_t& highest) {
 // Open the stream's current part file (fresh — FILE_WRITE truncates) and reset
 // its size accounting.
 static bool sdOpenPart(SdStream& s) {
-    char path[32];
-    snprintf(path, sizeof path, s.path_fmt, (unsigned long)g_sd.session, s.part);
+    char name[24], path[48];
+    snprintf(name, sizeof name, s.name_fmt, s.part);
+    snprintf(path, sizeof path, "%s/%s", g_sd.dir, name);
     s.file = SD.open(path, FILE_WRITE);
     if (!s.file) return false;
     if (s.asc_header) sdWriteAscHeader(s.file);
@@ -844,16 +873,18 @@ static bool sdOpenPart(SdStream& s) {
     return true;
 }
 
+// Writer task only. t=0 (g_sd_session_start_us) is set by the producer when it
+// requests the session, so the frames buffered before this runs stamp correctly.
 static bool sdStartSession() {
     uint32_t lowest, highest;
     sdScanSessions(lowest, highest);
     g_sd.session   = highest + 1;
     g_sd_raw.part  = 0;
     g_sd_json.part = 0;
-    char dir[16];
-    snprintf(dir, sizeof dir, "/s%05lu", (unsigned long)g_sd.session);
-    if (!SD.mkdir(dir)) return false;
-    g_sd_session_start_us = esp_timer_get_time();
+    // Born without a SOC suffix — it's appended by a rename once the first BMS
+    // SOC frame is decoded (see sdApplyRename).
+    sessionDirName(g_sd.dir, sizeof g_sd.dir, g_sd.session);
+    if (!SD.mkdir(g_sd.dir)) return false;
     if (!sdOpenPart(g_sd_raw)) return false;
     if (!sdOpenPart(g_sd_json)) { g_sd_raw.file.close(); return false; }
     return true;
@@ -877,14 +908,36 @@ static bool sdRemoveSessionDir(const char* path) {
     return SD.rmdir(path);
 }
 
+// Resolve a session number to its actual on-disk directory path, which may carry
+// a "-socSS" SOC suffix, so callers can't just rebuild "/sNNNNN". One root walk,
+// same dir filter as the reaper. Returns false if no such session exists. Caller
+// must hold g_sd_mutex (every caller already operates under SdLock).
+static bool sdResolveDir(uint32_t session, char* out, size_t cap) {
+    File root = SD.open("/");
+    if (!root) return false;
+    bool found = false;
+    for (File e = root.openNextFile(); e; e = root.openNextFile()) {
+        uint32_t n;
+        if (e.isDirectory() && sessionParse(sdBasename(e.name()), n) && n == session) {
+            snprintf(out, cap, "/%s", sdBasename(e.name()));
+            found = true;
+            e.close();
+            break;
+        }
+        e.close();
+    }
+    root.close();
+    return found;
+}
+
 // Reap the oldest session dir, never the active one. Returns false when there's
 // nothing else to delete.
 static bool sdReapOldest() {
     uint32_t oldest, highest;
     sdScanSessions(oldest, highest);
     if (oldest == UINT32_MAX) return false;
-    char path[16];
-    snprintf(path, sizeof path, "/s%05lu", (unsigned long)oldest);
+    char path[24];
+    if (!sdResolveDir(oldest, path, sizeof path)) return false;
     return sdRemoveSessionDir(path);
 }
 
@@ -941,7 +994,7 @@ static void sdRecoverOrFail(const char* op) {
         g_sd_json.file.close();
         SD.end();
         vTaskDelay(pdMS_TO_TICKS(SD_RECOVER_DELAY_MS * attempt));
-        if (!SD.begin(SD_CS_PIN)) continue;
+        if (!SD.begin(SD_CS_PIN, SPI, SD_SPI_HZ)) continue;
         if (!sdOpenPart(g_sd_raw))  continue;
         if (!sdOpenPart(g_sd_json)) continue;
         g_sd.recoveries = g_sd.recoveries + 1;
@@ -980,15 +1033,50 @@ static void sdRollIfDue(SdStream& s) {
     if (!sdOpenPart(s)) sdRecoverOrFail(s.open_op);
 }
 
+// Append the session's start SOC to the folder name, requested by the loop task
+// once the first BMS SOC frame was decoded. Both parts are closed first —
+// renaming a directory with files open under it is unsafe on FatFs — and bumped
+// to a fresh part so reopening (FILE_WRITE truncates) can't wipe the part just
+// written. If the rename itself fails, logging continues under the old name: the
+// suffix is a browsing convenience, not correctness. Writer task, under mutex.
+static void sdApplyRename() {
+    int soc = g_sd_pending_soc;
+    g_sd_rename_pending = false;
+    if (soc < 0) return;
+    char newdir[24];
+    sessionDirNameSoc(newdir, sizeof newdir, g_sd.session, soc);
+
+    g_sd_raw.file.flush();  g_sd_raw.file.close();
+    g_sd_json.file.flush(); g_sd_json.file.close();
+    g_sd_raw.part  = g_sd_raw.part + 1;
+    g_sd_json.part = g_sd_json.part + 1;
+    if (SD.rename(g_sd.dir, newdir))
+        strlcpy(g_sd.dir, newdir, sizeof g_sd.dir);
+    // sdOpenPart now targets g_sd.dir (renamed on success, unchanged on failure).
+    if (!sdOpenPart(g_sd_raw))  sdRecoverOrFail(g_sd_raw.open_op);
+    if (!sdOpenPart(g_sd_json)) sdRecoverOrFail(g_sd_json.open_op);
+}
+
 static void sdWriterTask(void*) {
     static uint8_t buf[SD_WRITE_CHUNK_BYTES];   // static — doesn't fit the task stack
     uint32_t last_flush = millis();
     uint32_t last_free  = millis() - SD_FREE_CHECK_MS;   // check on first idle
 
+    bool session_open = false;
+
     for (;;) {
+        if (!session_open) {
+            if (!g_sd_session_wanted) { vTaskDelay(pdMS_TO_TICKS(20)); continue; }
+            xSemaphoreTake(g_sd_mutex, portMAX_DELAY);
+            if (!sdStartSession()) sdFail("start_session");   // never returns
+            session_open = true;
+            g_sd.state   = "logging";
+            xSemaphoreGive(g_sd_mutex);
+        }
         bool flush_due = (millis() - last_flush >= SD_FLUSH_MS);
 
         xSemaphoreTake(g_sd_mutex, portMAX_DELAY);
+        if (g_sd_rename_pending) sdApplyRename();
         bool did = sdDrainStream(g_sd_raw, flush_due, buf);
         did     |= sdDrainStream(g_sd_json, flush_due, buf);
         g_sd.kb_written = (uint32_t)(sd_total_bytes >> 10);
@@ -1018,7 +1106,8 @@ static bool sdInitRing(SdStream& s) {
     return s.sb != nullptr;
 }
 
-// Probe the card once and, only on success, start logging + spawn the writer.
+// Probe the card once and, only on success, mount + spawn the writer
+// (the session itself opens on the first CAN frame — see g_sd_session_wanted).
 // Called from setup(); leaves the feature dormant (g_sd_active stays false) on
 // any failure so the firmware behaves exactly as a card-less tap. Boot failures
 // latch state="error" with a fail_op right here — sdFail() self-deletes the
@@ -1032,15 +1121,9 @@ static void sdInit() {
     }
 
     SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
-    if (!SD.begin(SD_CS_PIN)) { g_sd.state = "no_card"; return; }
-    if (!sdStartSession()) {
-        g_sd.fail_op = "start_session";
-        g_sd.state   = "error";
-        SD.end();
-        return;
-    }
+    if (!SD.begin(SD_CS_PIN, SPI, SD_SPI_HZ)) { g_sd.state = "no_card"; return; }
 
-    g_sd.state = "logging";
+    g_sd.state = "waiting";
     xTaskCreatePinnedToCore(sdWriterTask, "sdwriter", 8192, nullptr, 1, nullptr, 0);
     g_sd_active = true;   // arm the producer last, once everything is ready
 }
@@ -1362,8 +1445,18 @@ void decodeCAN(uint32_t can_id, const uint8_t* raw, uint8_t len) {
             g_pack.power_w     = volts * amps;
             g_pack.soc_raw     = d[4];
             g_pack.soc_pct     = d[4] * 0.4f - 0.8f;
-            if (isnan(g_session_soc_start_pct))
+            if (isnan(g_session_soc_start_pct)) {
                 g_session_soc_start_pct = g_pack.soc_pct;
+#if defined(HAS_SD)
+                // Ask the writer task to append this start SOC to the folder
+                // name (see sdApplyRename). Once per session; a no-op if the
+                // card isn't logging.
+                if (g_sd_active && !g_sd_rename_pending) {
+                    g_sd_pending_soc    = socToSuffix(g_pack.soc_pct);
+                    g_sd_rename_pending = true;
+                }
+#endif
+            }
 
             // Integrate power into session energy counters
             uint32_t now = millis();
@@ -2785,7 +2878,7 @@ static void handleSdStatus() {
 }
 
 // Session/file inventory: one mutex-guarded walk of the card. Only /sNNNNN
-// directories are listed (same sdParseSession() filter as the reaper).
+// directories are listed (same sessionParse() filter as the reaper).
 static bool sdListJson(JsonDocument& doc) {
     auto sessions = doc["sessions"].to<JsonArray>();
     bool open_ok = true;
@@ -2796,13 +2889,14 @@ static bool sdListJson(JsonDocument& doc) {
         else {
         for (File e = root.openNextFile(); e; e = root.openNextFile()) {
             uint32_t n;
-            if (e.isDirectory() && sdParseSession(sdBasename(e.name()), n)) {
+            if (e.isDirectory() && sessionParse(sdBasename(e.name()), n)) {
                 auto s = sessions.add<JsonObject>();
                 s["id"]     = n;
+                s["dir"]    = sdBasename(e.name());   // "sNNNNN" or "sNNNNN-SS"
                 s["active"] = (n == g_sd.session);
                 uint64_t total = 0;
-                char path[16];
-                snprintf(path, sizeof path, "/s%05lu", (unsigned long)n);
+                char path[24];
+                snprintf(path, sizeof path, "/%s", sdBasename(e.name()));
                 auto files = s["files"].to<JsonArray>();
                 File d = SD.open(path);
                 if (d) {
@@ -2907,12 +3001,14 @@ static void canServiceTick();
 struct SdTarMember { String name; uint32_t size; };
 typedef bool (*SdSink)(void* ctx, const uint8_t* p, size_t n);   // false = receiver gone
 
-// Freeze the member list and compute the exact archive size. False = no such session.
-static bool sdTarPlan(uint32_t id, std::vector<SdTarMember>& members, uint64_t& total) {
-    char dir[16];
-    snprintf(dir, sizeof dir, "/s%05lu", (unsigned long)id);
+// Freeze the member list and compute the exact archive size. False = no such
+// session. `dir` (≥ 24 bytes) receives the on-disk path resolved under the
+// lock — it may carry a "-socSS" SOC suffix, so callers can't rebuild "/sNNNNN".
+static bool sdTarPlan(uint32_t id, char* dir, size_t dir_cap,
+                      std::vector<SdTarMember>& members, uint64_t& total) {
     {
         SdLock lock;
+        if (!sdResolveDir(id, dir, dir_cap)) return false;
         File d = SD.open(dir);
         if (!d || !d.isDirectory()) {
             if (d) d.close();
@@ -2934,10 +3030,8 @@ static bool sdTarPlan(uint32_t id, std::vector<SdTarMember>& members, uint64_t& 
 
 // Push the planned archive through `sink`. False = truncated (sink refused a
 // write, or a member read short); the caller decides how to drop the connection.
-static bool sdTarStream(uint32_t id, const std::vector<SdTarMember>& members,
+static bool sdTarStream(const char* dir, const std::vector<SdTarMember>& members,
                         SdSink sink, void* ctx) {
-    char dir[16];
-    snprintf(dir, sizeof dir, "/s%05lu", (unsigned long)id);
     static uint8_t buf[4096];   // loop-task stack is tight; single-threaded caller
     for (auto& m : members) {
         char arcname[48], path[48];
@@ -2987,18 +3081,18 @@ static void handleSdSessionGet() {
     if (!sdParseIdArg(id)) { sdSendError(404, "not_found"); return; }
 
     SdStreamGuard stream_guard(id);   // clears g_sd_http_stream_session on any return
+    char dir[24];
     std::vector<SdTarMember> members;
     uint64_t total;
-    if (!sdTarPlan(id, members, total)) { sdSendError(404, "not_found"); return; }
+    if (!sdTarPlan(id, dir, sizeof dir, members, total)) { sdSendError(404, "not_found"); return; }
     if (total > UINT32_MAX) { sdSendError(507, "too_large"); return; }
 
-    char name[16];
-    snprintf(name, sizeof name, "s%05lu.tar", (unsigned long)id);
     server.setContentLength((size_t)total);
-    server.sendHeader("Content-Disposition", String("attachment; filename=") + name);
+    server.sendHeader("Content-Disposition",
+                      String("attachment; filename=") + (dir + 1) + ".tar");   // sNNNNN[-socSS].tar
     server.send(200, "application/x-tar", "");
     WiFiClient client = server.client();
-    if (!sdTarStream(id, members, sdHttpSink, &client)) client.stop();
+    if (!sdTarStream(dir, members, sdHttpSink, &client)) client.stop();
 }
 
 // DELETE /sd/sessions/{id} — recursively remove a session directory via the
@@ -3011,19 +3105,15 @@ static const char* sdDeleteSession(uint32_t id, uint32_t& free_mb) {
     // session an HTTP client is streaming — one line, future-proof.
     if (id == g_sd_http_stream_session) return "streaming";
 
-    char dir[16];
-    snprintf(dir, sizeof dir, "/s%05lu", (unsigned long)id);
+    char dir[24];   // resolved under the lock — may carry a "-socSS" SOC suffix
 
     enum Result { OK, NOT_FOUND, REMOVE_FAILED } result = OK;
     free_mb = 0;
     {
         SdLock lock;
-        File d = SD.open(dir);
-        if (!d || !d.isDirectory()) {
-            if (d) d.close();
+        if (!sdResolveDir(id, dir, sizeof dir)) {
             result = NOT_FOUND;
         } else {
-            d.close();
             if (!sdRemoveSessionDir(dir)) {
                 result = REMOVE_FAILED;
             } else {
@@ -3142,8 +3232,28 @@ static bool tryWifiCommand(const char* line) {
 }
 
 #if defined(HAS_SD)
+// Never hand HWCDC more than its free ring space. Its SOF-watchdog "plugged"
+// state flaps for a few ms even on a healthy link, and a write that arrives
+// during a flap takes the not-connected path: if the write is larger than the
+// ring it keeps only the ring's worth of it, drops the rest, and still reports
+// the full size — observed on the bench as a 19 MB pull landing ~3.8 KB short
+// with a splice mid-file. A write that fits the free space is simply queued on
+// that path, so sizing each write to availableForWrite() makes a flap harmless.
 static bool sdUsbSink(void*, const uint8_t* p, size_t n) {
-    return Serial.write(p, n) == n;   // short write = host stopped reading (CDC tx timeout)
+    uint32_t stall_ms = 0;
+    while (n) {
+        size_t room = Serial.availableForWrite();
+        size_t w = room ? Serial.write(p, room < n ? room : n) : 0;
+        if (w == 0) {                       // ring full: host is behind (or gone)
+            if (++stall_ms > 2000) return false;
+            delay(1);
+            continue;
+        }
+        stall_ms = 0;
+        p += w;
+        n -= w;
+    }
+    return true;
 }
 #endif
 
@@ -3198,13 +3308,14 @@ static bool trySdCommand(const char* line) {
         return true;
     }
     SdStreamGuard stream_guard(id);   // reaper must not delete it mid-stream
+    char dir[24];
     std::vector<SdTarMember> members;
     uint64_t total;
-    if (!sdTarPlan(id, members, total)) { Serial.printf("sd: error not_found\r\n"); return true; }
+    if (!sdTarPlan(id, dir, sizeof dir, members, total)) { Serial.printf("sd: error not_found\r\n"); return true; }
     if (total > UINT32_MAX)             { Serial.printf("sd: error too_large\r\n"); return true; }
     g_usb_sd_stream = true;            // mute log echo + SLCAN frames until done
     Serial.printf("sd: tar %lu %lu\r\n", (unsigned long)id, (unsigned long)total);
-    sdTarStream(id, members, sdUsbSink, nullptr);   // short stream = truncation, as HTTP
+    sdTarStream(dir, members, sdUsbSink, nullptr);  // short stream = truncation, as HTTP
     Serial.flush();
     g_usb_sd_stream = false;
     return true;
@@ -3754,6 +3865,7 @@ void bleTick() {
 
 void setup() {
     Serial.begin(115200);
+    Serial.setTxBufferSize(8192);   // USB CDC TX ring (default 256 B): `sd get` writes ring-sized pieces
 
     ledInit();
     ledWrite(4, 4, 4);   // dim white the moment firmware starts running
@@ -3981,7 +4093,13 @@ static void canServiceTick() {
         slcanSendFrame(msg);
         socketcandSendFrame(msg, /*channel=*/0);
 #if defined(HAS_SD)
-        if (g_sd_active) sdEnqueueRaw(msg);   // no-op enqueue when no card
+        if (g_sd_active) {
+            if (!g_sd_session_wanted) {          // first frame: open the session
+                g_sd_session_start_us = esp_timer_get_time();
+                g_sd_session_wanted   = true;
+            }
+            sdEnqueueRaw(msg);
+        }
 #endif
 #if defined(CANOPEN_POLL)
         canopenOnFrame(msg);
@@ -4018,7 +4136,7 @@ static void canServiceTick() {
     // unattended session would log no JSON. Built here on the loop task, so the
     // decoded globals stay single-threaded; only the serialized line crosses to
     // the writer.
-    if (g_sd_active) {
+    if (g_sd_active && g_sd_session_wanted) {
         static uint32_t last_json_ms = 0;
         uint32_t now = millis();
         if (now - last_json_ms >= 1000 / SD_JSON_HZ) {
