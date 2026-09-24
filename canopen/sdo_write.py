@@ -31,7 +31,7 @@ import argparse, os, sys, time
 import can, serial
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from canopen_dump import switch_to_slcan, NODE, PORT
+from canopen_dump import switch_to_slcan, discover_node, NODE, PORT
 
 def console(port, line):
     """Send one USB console command (works in logging and slcan roles)."""
@@ -39,7 +39,8 @@ def console(port, line):
         s.write((line + "\r\n").encode()); time.sleep(0.3)
         return s.read(300).decode(errors="replace").strip()
 
-REQ, RESP = 0x600 + NODE, 0x580 + NODE
+NODE_ID = NODE          # set by discover at runtime
+REQ = RESP = None       # 0x600+NODE_ID / 0x580+NODE_ID, set in run()
 
 RETRIES = 0   # set from --retries; extra attempts after the first
 
@@ -115,7 +116,16 @@ def main():
         print(console(a.port, "canopen on"))
 
 def run(a):
+    global NODE_ID, REQ, RESP
     with can.Bus(interface="slcan", channel=a.port, bitrate=250000) as bus:
+        found = discover_node(bus)
+        if found is None:
+            print("no CANopen node responded (tractor keyed off? controller silent?)"); raise SystemExit(2)
+        NODE_ID, REQ, RESP = found, 0x600 + found, 0x580 + found
+        if found != NODE:
+            print(f"note: controller is on node {found} (0x{found:02X}), not the default {NODE} "
+                  f"— range-switch selected, see README")
+        print(f"node {NODE_ID}: ", end="")
         ee = read(bus, 0x332F)
         cur, lo, hi = read(bus, a.index), read(bus, a.index, 3), read(bus, a.index, 4)
         print(f"0x{a.index:04X}: value={cur}  min={lo}  max={hi}   CAN_EE_Writes_Enabled={ee}")

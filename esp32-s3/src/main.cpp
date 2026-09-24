@@ -131,6 +131,9 @@
   #define CANOPEN_POLL_TIMEOUT_MS 50  // controller answers in a few ms; python tool used 60
   #endif
   #define CANOPEN_ALIVE_MS      2000  // poll only while FF21CA from SA 0xCA is this fresh
+  #ifndef CANOPEN_RELOCK_MISS
+  #define CANOPEN_RELOCK_MISS   16    // consecutive timeouts before scanning for a moved node
+  #endif
 #endif
 
 // Per-board pin map. Selected via -DBOARD_* in platformio.ini.
@@ -485,8 +488,10 @@ uint32_t    g_slcan_tx_dropped = 0;   // frames dropped on a full USB-CDC TX buf
 // One SDO upload in flight at a time, advanced by the 0x5A8 reply (seen in
 // canServiceTick) or by timeout. Runs on the loop task; never blocks.
 static struct {
-    bool     enabled = true;   // runtime switch: USB console `canopen off|on`
-    uint16_t idx     = 0;      // next kCanopenObjects[] entry to request
+    bool     enabled = true;      // runtime switch: USB console `canopen off|on`
+    uint8_t  node    = CANOPEN_NODE;  // current target node; relocks if it moves
+    uint16_t miss    = 0;         // consecutive timeouts (node-search trigger)
+    uint16_t idx     = 0;         // next kCanopenObjects[] entry to request
     bool     pending = false;
     uint32_t sent_ms = 0;
     uint32_t sweeps = 0, sent = 0, replies = 0, timeouts = 0, tx_fail = 0;
@@ -2252,6 +2257,7 @@ String buildJson(bool pretty = true, bool minimal = false) {
     if (!minimal) {
         auto co = doc["canopen"].to<JsonObject>();
         co["enabled"]  = g_canopen.enabled;
+        co["node"]     = g_canopen.node;
         co["objects"]  = (uint32_t)(sizeof kCanopenObjects / sizeof kCanopenObjects[0]);
         co["sweeps"]   = g_canopen.sweeps;
         co["sent"]     = g_canopen.sent;
@@ -3257,9 +3263,10 @@ static bool tryCanopenCommand(const char* line) {
     if      (strcmp(p, "off") == 0) g_canopen.enabled = false;
     else if (strcmp(p, "on")  == 0) g_canopen.enabled = true;
     else if (*p != '\0') { Serial.printf("canopen: unknown '%s' (try: canopen | canopen off | canopen on)\r\n", p); return true; }
-    Serial.printf("canopen: %s  sent=%lu replies=%lu timeouts=%lu\r\n",
-                  g_canopen.enabled ? "on" : "off", (unsigned long)g_canopen.sent,
-                  (unsigned long)g_canopen.replies, (unsigned long)g_canopen.timeouts);
+    Serial.printf("canopen: %s  node=%u sent=%lu replies=%lu timeouts=%lu\r\n",
+                  g_canopen.enabled ? "on" : "off", (unsigned)g_canopen.node,
+                  (unsigned long)g_canopen.sent, (unsigned long)g_canopen.replies,
+                  (unsigned long)g_canopen.timeouts);
 #endif
     return true;
 }
@@ -3462,9 +3469,12 @@ static bool canTransmit0(uint32_t id, bool extd, uint8_t dlc, const uint8_t* dat
 
 #if defined(CANOPEN_POLL)
 static inline void canopenOnFrame(const twai_message_t& msg) {
-    if (!msg.extd && msg.identifier == CANOPEN_SDO_RESP_ID && g_canopen.pending) {
+    // Any SDO response (upload, or an abort for a missing object) from the
+    // current node counts as "node is here" and clears the search state.
+    if (!msg.extd && msg.identifier == (uint32_t)(0x580 + g_canopen.node) && g_canopen.pending) {
         g_canopen.pending = false;
         g_canopen.replies++;
+        g_canopen.miss = 0;
     }
 }
 
@@ -3474,6 +3484,12 @@ static void canopenPollTick() {
         if (now - g_canopen.sent_ms < CANOPEN_POLL_TIMEOUT_MS) return;
         g_canopen.pending = false;
         g_canopen.timeouts++;
+        // The controller's CANopen node ID has been observed to change across a
+        // key cycle (40 -> 39). Once we lose it, walk every node ID (one poll
+        // each) until a response returns, then lock on. 11-bit SDO requests
+        // don't touch the 29-bit J1939 traffic, so scanning is harmless here.
+        if (++g_canopen.miss >= CANOPEN_RELOCK_MISS)
+            g_canopen.node = g_canopen.node >= 127 ? 1 : g_canopen.node + 1;
     }
     if (now - g_canopen.sent_ms < CANOPEN_POLL_GAP_MS) return;
     if (!g_canopen.enabled) return;
@@ -3481,7 +3497,7 @@ static void canopenPollTick() {
     uint16_t index = kCanopenObjects[g_canopen.idx];
     uint8_t req[8] = { 0x40, (uint8_t)(index & 0xFF), (uint8_t)(index >> 8), 0x00, 0, 0, 0, 0 };
     g_canopen.sent_ms = now;
-    if (!canTransmit0(CANOPEN_SDO_REQ_ID, false, 8, req)) { g_canopen.tx_fail++; return; }
+    if (!canTransmit0(0x600 + g_canopen.node, false, 8, req)) { g_canopen.tx_fail++; return; }
     g_canopen.sent++;
     g_canopen.pending = true;
     if (++g_canopen.idx >= sizeof kCanopenObjects / sizeof kCanopenObjects[0]) {

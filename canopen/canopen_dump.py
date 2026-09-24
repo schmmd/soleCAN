@@ -26,6 +26,26 @@ def switch_to_slcan(port):
     with serial.Serial(port, 115200, timeout=0.5) as s:
         s.write(b"mode slcan\r\n"); time.sleep(0.3); s.read(200)
 
+def discover_node(bus, candidates=None, timeout=0.08):
+    """Find the controller's live CANopen node by reading 0x1000 from each
+    candidate until one answers. The Curtis picks its node ID at key-on from
+    the range-switch position (Sw5/Sw6), so it varies 38..41 (R1..R3) — see
+    canopen/README.md "CAN NODE ID IS RANGE-SWITCH SELECTED". Returns the node
+    or None. Tries the common ones (40=R3, 39=R2, 38=R1, 41) before a full sweep.
+    """
+    import can
+    if candidates is None:
+        candidates = [40, 39, 38, 41] + [n for n in range(1, 128) if n not in (38, 39, 40, 41)]
+    for n in candidates:
+        bus.send(can.Message(arbitration_id=0x600 + n, is_extended_id=False,
+                             data=[0x40, 0x00, 0x10, 0, 0, 0, 0, 0]))
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            m = bus.recv(timeout=max(0.0, end - time.monotonic()))
+            if m and not m.is_extended_id and m.arbitration_id == 0x580 + n:
+                return n
+    return None
+
 def sdo_upload(bus, index, sub, timeout=0.06):
     """One expedited SDO upload. Returns a result dict, or None on no reply."""
     bus.send(can.Message(arbitration_id=0x600 + NODE, is_extended_id=False,
