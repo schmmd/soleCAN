@@ -126,7 +126,7 @@ PGN_NAMES = {
     0x00F107: "BMS current/voltage limits",
     0x00F108: "BMS active fault bitmap",
     0x00FF50: "Charger telemetry (V, A)",
-    0x00FF21: "Motor telemetry (RPM, torque, state)",
+    0x00FF21: "Motor telemetry (RPM, motor current, state)",
     0x000600: "BMS->Charger command (V/I setpoint, enable)",
 }
 
@@ -489,12 +489,12 @@ DECODERS = [
     ("motor.range", "FF21", "CA", "7",
      "(b7 >> 4) + 1", "", "verified",
      "range switch R1/R2/R3 (RPM cap selector); verified by range-1-2-3.asc walking 1->2->3"),
-    ("motor.torque_raw", "FF21", "CA", "0-1", "u16 LE (raw)",
-     "", "verified",
-     "unsigned magnitude of controller's commanded motor effort "
-     "(torque / current command), observed 0..262; symmetric across "
-     "drive and regen. Direction comes from sign(pack.current_a). Idle "
-     "offset ~3, controller dead-low ~14. See DOCUMENTATION.md §FF21CA."),
+    ("motor.current_a", "FF21", "CA", "0-1", "u16 LE",
+     "a", "verified",
+     "motor RMS current, 1 A/bit (Curtis Current_RMS; cross-validated via "
+     "CANopen 0x33EA/0x3209), observed 0..262 A; unsigned, rises under drive "
+     "and regen alike. Direction of work comes from sign(pack.current_a). "
+     "Idle ~3 A, motor turns above ~14 A. See DOCUMENTATION.md §FF21CA."),
     ("motor.controller_temp_c", "FF21", "CA", "4", "u8 - 40",
      "c", "tentative",
      "main controller temp; consistently warmer than byte 5 and ramps up "
@@ -694,14 +694,14 @@ def summarize(counts: dict, rows: list):
         rpms_signed = values_for(rows, scenario, "motor.rpm_signed")
         rpms_mag = values_for(rows, scenario, "motor.rpm_magnitude")
         dirs = values_for(rows, scenario, "motor.direction")
-        tq = values_for(rows, scenario, "motor.torque_raw")
+        amps = values_for(rows, scenario, "motor.current_a")
         if rpms_signed:
             n_fwd = sum(1 for d in dirs if d == 1)
             n_rev = sum(1 for d in dirs if d == -1)
             n_neu = sum(1 for d in dirs if d == 0)
             print(f"    motor RPM : {min(rpms_signed)}..{max(rpms_signed)} (signed)")
             print(f"    |RPM|     : {min(rpms_mag)}..{max(rpms_mag)}")
-            print(f"    torque    : {min(tq)}..{max(tq)} (raw)")
+            print(f"    motor I   : {min(amps)}..{max(amps)} A")
             print(f"    F/N/R     : F={n_fwd}  R={n_rev}  N={n_neu}")
             ranges = values_for(rows, scenario, "motor.range")
             if ranges:

@@ -1120,10 +1120,10 @@ def stage_inject(args) -> None:
         check(jget(j, "motor.rpm_magnitude") == 1500
               and jget(j, "motor.direction") == 1
               and jget(j, "motor.range") == 2
-              and jget(j, "motor.torque_raw") == 100
+              and jget(j, "motor.current_a") == 100
               and jget(j, "motor.controller_temp_c") == 25
               and jget(j, "motor.motor_temp_c") == 30,
-              "motor telemetry decode (1500 RPM fwd, R2, 25/30 C)",
+              "motor telemetry decode (1500 RPM fwd, R2, 100 A, 25/30 C)",
               f"got {jget(j, 'motor')}")
 
         injector.stop_evt.set()

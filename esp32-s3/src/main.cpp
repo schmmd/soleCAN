@@ -360,7 +360,7 @@ struct MotorState {
     uint8_t  range    = 1;
     // LE u16: commanded effort magnitude; peaks past 255 under hard
     // acceleration (observed 262), so a single byte would wrap.
-    uint16_t torque_raw  = 0;
+    uint16_t current_a   = 0;   // motor RMS current, 1 A/bit (FF21CA bytes 0-1)
     int8_t   controller_temp_c = INT8_MIN;
     int8_t   motor_temp_c      = INT8_MIN;
     bool     valid             = false;
@@ -1454,7 +1454,7 @@ void decodeCAN(uint32_t can_id, const uint8_t* raw, uint8_t len) {
         g_motor.rpm_signed         = dir * rpm_mag;
         g_motor.direction          = dir;
         g_motor.range         = ((d[7] >> 4) & 0x0F) + 1;
-        g_motor.torque_raw       = le16(d[0], d[1]);
+        g_motor.current_a        = le16(d[0], d[1]);
         if (d[4]) g_motor.controller_temp_c = (int8_t)(d[4] - TEMP_OFFSET_C);
         if (d[5]) g_motor.motor_temp_c      = (int8_t)(d[5] - TEMP_OFFSET_C);
         g_motor.valid = true;
@@ -1994,7 +1994,7 @@ String buildJson(bool pretty = true, bool minimal = false) {
             mot["rpm_magnitude"] = g_motor.rpm_magnitude;
             mot["direction"]     = g_motor.direction;
             mot["range"]    = g_motor.range;
-            mot["torque_raw"] = g_motor.torque_raw;
+            mot["current_a"]  = g_motor.current_a;
             if (g_motor.controller_temp_c != INT8_MIN)
                 mot["controller_temp_c"] = g_motor.controller_temp_c;
             if (g_motor.motor_temp_c != INT8_MIN)
