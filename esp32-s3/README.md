@@ -557,6 +557,25 @@ python3 esp32-s3/sd-pull.py /dev/cu.usbmodem101 get 7       # = GET /sd/sessions
 python3 esp32-s3/sd-pull.py /dev/cu.usbmodem101 delete 7    # = DELETE /sd/sessions/7
 ```
 
+No helper script needed — the port is a plain tty, so the shell can do it.
+Status and the inventory are one line each; a session is one text line then
+raw bytes, and bash's `read` consumes a non-seekable stream byte-by-byte, so
+`head -c` starts exactly where the tar does (bash, not fish):
+
+```bash
+PORT=/dev/cu.usbmodem101
+stty -f $PORT raw                      # no line discipline mangling (Linux: stty -F)
+exec 3<> $PORT
+printf 'sd list\r\n' >&3; grep -m1 '^sd: ' <&3     # sessions and their files
+
+printf 'sd get 7\r\n' >&3
+while IFS= read -r line <&3; do line=${line%$'\r'}    # skip log lines to the reply
+  case $line in "sd: tar "*) break;; "sd: error"*) echo "$line" >&2; break;; esac
+done
+head -c "${line##* }" <&3 > s00007.tar               # exactly <bytes>, then stop
+tar -tvf s00007.tar
+```
+
 Wire protocol, if you'd rather script it yourself: send `sd`, `sd list`,
 `sd get N` or `sd delete N` as a line. Every reply is one line starting with
 `sd: ` (skip anything else — log lines may arrive first). `sd` and `sd list`
