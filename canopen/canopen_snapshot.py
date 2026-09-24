@@ -79,7 +79,7 @@ DECODE = {
     0x3149: ("CAN_PDO_Timeout_Period",  "CONFIRMED", lambda v: f"{v} ({'disabled' if v == 0 else 'enabled'})"),
     0x332F: ("CAN_EE_Writes_Enabled",   "CONFIRMED", lambda v: f"{v} ({'writes volatile' if v == 0 else 'WRITES HIT EEPROM'})"),
     0x3160: ("Master_Timer",            "CONFIRMED", lambda v: f"{v} ticks"),
-    0x320A: ("Vehicle_Speed",           "TENTATIVE", lambda v: f"{s16(v) / 10:.1f} mph? (fixed ratio: 0.0394 x rpm)"),
+    0x320A: ("Vehicle_Speed (assumes H range)", "CONFIRMED", lambda v: f"{s16(v) / 10:.1f} mph (fixed H-range ratio)"),
     0x35BF: ("Time_to_Capture_Speed_1", "TENTATIVE", lambda v: f"{v / 100:.2f} s"),
     0x35B7: ("headroom ramp",           "TENTATIVE", lambda v: f"{v} (9192 rest -> ~3670 under throttle)"),
     0x35AA: ("headroom ramp (twin)",    "TENTATIVE", str),

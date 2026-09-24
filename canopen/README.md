@@ -440,11 +440,14 @@ SD SESSION 137 — 14 min OF REAL WORK (driving + woodchipping), 2026-09-24
     (OEM block) are the FF21CA staging variables.
 
   Named Curtis monitor variables, now confirmed under real load:
-    0x320A Vehicle_Speed   = 0.0394 x rpm (worst residual 0.9; 110 at 2802 rpm).
-                             Fixed ratio => Curtis's own configured wheel/gear
-                             constant, NOT the mechanical range. 3.94/1000 rpm
-                             matches DOCUMENTATION.md's H-range 6.25 km/h per
-                             1000 rpm if the unit is 0.1 mph.        TENTATIVE
+    0x320A Vehicle_Speed   = 0.0394 x rpm (worst residual 0.9; 112 at 2800
+                             rpm = 11.2 mph = 18.0 km/h). Unit 0.1 mph, from a
+                             FIXED ratio configured for HIGH mechanical range
+                             (DOCUMENTATION.md: H/Agri 17.5 km/h at 2800 rpm;
+                             owner confirms ~11 mph is the high-gear top
+                             speed). Correct only in H; over-reads by the gear
+                             ratio in M and L (Curtis cannot see the range
+                             lever).                                 CONFIRMED
     0x3206 Frequency       = 2.008 x signed rpm (worst residual 108). Electrical
                              speed = rpm x pole pairs, so a 4-pole motor. CONFIRMED
     0x3208 Modulation_Depth 0..1235 (manual 0-1182 = 0-100 %), r=.97 with rpm,
