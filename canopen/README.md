@@ -256,8 +256,18 @@ WRITING PARAMETERS (from the manual's CAN section)
   non-zero first, which makes every subsequent write hit EEPROM at once. Manual
   CAUTION: do not leave 0x332F non-zero during normal operation (EEPROM wear).
   Practical upshot: with 0x332F = 0, an experimental SDO write is self-reverting
-  on the next key cycle — the safer way to test anything. Nothing has been
-  written to this controller so far.
+  on the next key cycle — the safer way to test anything.
+
+  FIRST WRITE (2026-09-24, canopen/sdo_write.py, RAM only):      CONFIRMED
+    0x3104 (R3 reverse cap) 2240 -> 2000: expedited download 0x2B acked with
+    0x60, read back 2000, UserFault1 stayed 0, no cluster fault. Tractor
+    stationary, neutral, post-power-up hold (0x3011 = 1200 at the time).
+    The write needed 4 tries: the firmware poller (~200 SDO/s) contends for
+    the controller's single SDO server and requests get dropped silently;
+    sdo_write.py retries every transfer. Whether the VCL picks the new
+    table value up live (0x3011 -> 2000 on R3+reverse) is the follow-up
+    check; see sdo_write.py for the guards (0x332F must be 0, motor
+    stopped, lever neutral, value within sub 3/4 min..max).
 
 SPEED-LIMIT PARAMETER BLOCK (0x3103-0x3108)                    CONFIRMED
 ------------------------------------------------------------------------
