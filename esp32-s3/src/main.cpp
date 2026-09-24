@@ -2829,16 +2829,16 @@ function pad(n){return 's'+String(n).padStart(5,'0')}
 async function jget(u){var r=await fetch(u);if(!r.ok)throw Error(u+' → '+r.status);return r.json()}
 async function loadStatus(){var el=document.getElementById('status');
  try{var s=await jget('/sd/status'),t=s.state;
-  if(s.state==='logging')t='logging '+pad(s.session)+' · '+mb(s.kb_written)+
+  if(s.state==='logging')t='logging '+(s.dir||pad(s.session))+' · '+mb(s.kb_written)+
    ' written · '+human((s.free_mb||0)*1048576)+' free';
   el.textContent=t;el.className='';
  }catch(e){el.textContent='status: '+e.message;el.className='muted'}}
 async function loadList(){var tb=document.getElementById('rows'),err=document.getElementById('err');
  try{var d=await jget('/sd/sessions');err.textContent='';
   tb.innerHTML=(d.sessions||[]).sort(function(a,b){return b.id-a.id}).map(function(s){
-   return '<tr><td>'+pad(s.id)+(s.active?' <span class=muted>(active)</span>':'')+
+   var nm=s.dir||pad(s.id);return '<tr><td>'+nm+(s.active?' <span class=muted>(active)</span>':'')+
     '<td class=num>'+((s.files||[]).length)+'<td class=num>'+human(s.bytes)+
-    '<td><a href="/sd/sessions/'+s.id+'" download>'+pad(s.id)+'.tar</a>';
+    '<td><a href="/sd/sessions/'+s.id+'" download>'+nm+'.tar</a>';
   }).join('')||'<tr><td colspan=4 class=muted>No sessions</td></tr>';
  }catch(e){err.textContent=e.message}}
 function load(){loadStatus();loadList()}
@@ -2862,6 +2862,7 @@ static void sdStatusJson(JsonDocument& doc) {
     doc["state"] = g_sd.state;
     if (g_sd_active) {
         doc["session"]    = g_sd.session;
+        doc["dir"]        = g_sd.dir + 1;   // "sNNNNN" or "sNNNNN-socSS"
         doc["raw_part"]   = g_sd_raw.part;
         doc["json_part"]  = g_sd_json.part;
         doc["kb_written"] = g_sd.kb_written;
