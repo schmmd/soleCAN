@@ -645,7 +645,7 @@ extern const uint8_t dashboard_html_end[]   asm("_binary_src_dashboard_html_end"
 #define SD_WRITE_CHUNK_BYTES 8192                     // batch writes into bursts this size
 
 struct SdState {
-    const char* state = "no_card";     // no_card | armed | logging | error
+    const char* state = "no_card";     // no_card | waiting | logging | error
     uint32_t          session   = 0;
     volatile uint32_t kb_written = 0;  // writer task (core 0) owns these two
     volatile uint32_t free_mb    = 0;
@@ -668,7 +668,7 @@ volatile bool g_sd_active = false;
 // leave no empty /sNNNNN/ behind. The loop task sets this once, with the log
 // t=0 timestamp, when the first frame arrives; the writer task then opens the
 // session (SD I/O stays on core 0) and drains the rings that buffered the
-// frames in the meantime. Until then the card sits mounted in state "armed".
+// frames in the meantime. Until then the card sits mounted in state "waiting".
 volatile bool g_sd_session_wanted = false;
 
 // Serializes every SD/SPI touch between the writer task (core 0) and the
@@ -1001,7 +1001,7 @@ static bool sdInitRing(SdStream& s) {
     return s.sb != nullptr;
 }
 
-// Probe the card once and, only on success, arm logging + spawn the writer
+// Probe the card once and, only on success, mount + spawn the writer
 // (the session itself opens on the first CAN frame — see g_sd_session_wanted).
 // Called from setup(); leaves the feature dormant (g_sd_active stays false) on
 // any failure so the firmware behaves exactly as a card-less tap. Boot failures
@@ -1018,7 +1018,7 @@ static void sdInit() {
     SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
     if (!SD.begin(SD_CS_PIN)) { g_sd.state = "no_card"; return; }
 
-    g_sd.state = "armed";
+    g_sd.state = "waiting";
     xTaskCreatePinnedToCore(sdWriterTask, "sdwriter", 8192, nullptr, 1, nullptr, 0);
     g_sd_active = true;   // arm the producer last, once everything is ready
 }

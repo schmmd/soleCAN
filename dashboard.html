@@ -424,8 +424,8 @@ function update(d){
       sdTxt='<span class="ok">●</span> SD '+sess+' · '+((sd.kb_written||0)/1024).toFixed(1)+' MB'+
         (sd.free_mb!=null?' · '+(sd.free_mb/1024).toFixed(1)+' GB free':'')+
         (drop?' · <span class="bad">⚠ '+drop+' dropped</span>':'');
-    } else if(sd.state==='armed'){
-      sdTxt='<span class="ok">●</span> SD armed · waiting for CAN';
+    } else if(sd.state==='waiting'){
+      sdTxt='<span class="ok">●</span> SD waiting for CAN';
     } else {
       sdTxt='<span class="bad">●</span> SD '+sd.state;   // no_card / error
     }

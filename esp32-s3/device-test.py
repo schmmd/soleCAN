@@ -416,11 +416,11 @@ def stage_sd(args, j: dict) -> bool:
                            "(pass --expect-sd to make this a failure)")
         return False
 
-    if state == "armed":
+    if state == "waiting":
         # The session only opens on the first CAN frame, so a bus-less bench
         # boot sits here. Prime it with one frame from the injector.
         if not args.inject_channel:
-            report("WARN", "card armed but no CAN frame yet — session checks "
+            report("WARN", "card mounted but no CAN frame yet — session checks "
                            "need --inject-channel to send one")
             return False
         try:
@@ -439,7 +439,7 @@ def stage_sd(args, j: dict) -> bool:
             return False
         sd = fetch_json(args.host).get("sd", {})
         state = sd.get("state")
-        check(state == "logging", "armed -> logging on first CAN frame",
+        check(state == "logging", "waiting -> logging on first CAN frame",
               f"state={state}")
 
     check(state == "logging", "SD session logging", f"state={state}")
