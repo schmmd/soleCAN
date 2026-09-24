@@ -609,6 +609,29 @@ SEAT / OPC TIMING AT 15 Hz (fast table, seat_10s.csv + fast run, 2026-09-24)
   Use: monotonic run-time stamp to order sessions and measure controller-on
   time between them. Cannot give wall-clock time.
 
+REFERENCE HUNT (2026-09-24): PUBLIC SOURCES ARE EXHAUSTED AT ~300 NAMES
+------------------------------------------------------------------------
+  Searched for a Curtis E-series EDS / full object dictionary. Findings:
+  - Curtis publishes NO EDS. The python-canopen wrapper gist (acolomb) imports
+    Curtis_1232E.eds but says to request it from Curtis support; EDS files are
+    per OS version and variant. Our controller: SW 3178 (OS 31.78?), HW 3079,
+    serial 15198 — quote these if asking Curtis.
+  - The OS 30 manual (bintelli mirror) lists 308 indices; the OS 31 manual
+    (May 2017, noco-evco mirror, saved as
+    docs/Curtis_1232E-38E_manual_OS31_2017-05.pdf) lists 314. Merged the OS 31
+    names into canopen_named.csv: 269 -> 299 named. New and useful:
+      0x3238/0x3239 UserFault1/2 (OEM VCL fault bits; both 0 in our dumps),
+      0x3231/0x3232 Hist_UserFault1/2, 0x389A/0x389B UserFault*_History
+      (0x389A = 1: a user fault HAS been logged historically),
+      0x323B-0x324A User_Fault_Action_01..16, 0x303E Interlock_Type,
+      0x38C5/0x38C6 encoder sin/cos compensated, 0x38C7 rotor_position_raw.
+  - The VCL manual section lists the variable classes (User1-120,
+    AutoUser1-300, NVUser1-15, P_User1-150, P_User_Bit1-10) but gives NO CAN
+    indices for them. So the ~1100 unnamed objects (0x33xx-0x3Cxx OEM block)
+    cannot be named from public material; that needs Curtis's EDS for this OS
+    or Solectrac's VCL project. Behavioural decoding remains the only route.
+  - Victron dbus-canopen-motordrive curtis_e.c: already mined (see above).
+
 EXCLUDED / ARTIFACTS
 --------------------
   0x35C6   FALSE positive: signed value dithering around 0 (+24 -> -24),
