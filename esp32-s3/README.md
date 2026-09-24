@@ -470,9 +470,9 @@ it. The two other boards have no card reader and are unaffected.
 Each power-on is one session directory `/sNNNNN/` (index = highest existing + 1),
 containing two streams, split into 64 MB parts:
 
-The folder is renamed to `/sNNNNN-SS` the moment the first BMS SOC frame is
+The folder is renamed to `/sNNNNN-socSS` the moment the first BMS SOC frame is
 decoded, where `SS` is the start-of-session pack SOC rounded to a whole percent
-(e.g. `/s00007-42`). The board has no accurate clock, so this makes sessions
+(e.g. `/s00007-soc42`). The board has no accurate clock, so this makes sessions
 identifiable at a glance when browsing the card. Sessions whose BMS never
 published a SOC reading keep the plain `/sNNNNN` name. The `/sd/sessions/{id}`
 download and delete endpoints still address a session by its plain number.

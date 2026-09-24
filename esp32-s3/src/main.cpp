@@ -746,7 +746,7 @@ static const char* sdBasename(const char* name) {
 }
 
 // Session-dir parsing/naming lives in session_name.h (sessionParse, etc.) so it
-// can be host-tested; sessionParse tolerates the "-SS" SOC suffix.
+// can be host-tested; sessionParse tolerates the "-socSS" SOC suffix.
 
 // One walk of the root directory serving both consumers: the highest session
 // index (next session number = highest + 1, monotonic per card, survives
@@ -817,7 +817,7 @@ static bool sdRemoveSessionDir(const char* path) {
 }
 
 // Resolve a session number to its actual on-disk directory path, which may carry
-// a "-SS" SOC suffix, so callers can't just rebuild "/sNNNNN". One root walk,
+// a "-socSS" SOC suffix, so callers can't just rebuild "/sNNNNN". One root walk,
 // same dir filter as the reaper. Returns false if no such session exists. Caller
 // must hold g_sd_mutex (every caller already operates under SdLock).
 static bool sdResolveDir(uint32_t session, char* out, size_t cap) {
@@ -2883,7 +2883,7 @@ static void handleSdSessionGet() {
     uint32_t id;
     if (!sdParseIdArg(id)) { sdSendError(404, "not_found"); return; }
 
-    char dir[24];   // resolved under the lock — may carry a "-SS" SOC suffix
+    char dir[24];   // resolved under the lock — may carry a "-socSS" SOC suffix
 
     SdStreamGuard stream_guard(id);   // clears g_sd_http_stream_session on any return
 
@@ -2974,7 +2974,7 @@ static void handleSdSessionDelete() {
     // session an HTTP client is streaming — one line, future-proof.
     if (id == g_sd_http_stream_session) { sdSendError(409, "streaming"); return; }
 
-    char dir[24];   // resolved under the lock — may carry a "-SS" SOC suffix
+    char dir[24];   // resolved under the lock — may carry a "-socSS" SOC suffix
 
     enum Result { OK, NOT_FOUND, REMOVE_FAILED } result = OK;
     uint32_t free_mb = 0;

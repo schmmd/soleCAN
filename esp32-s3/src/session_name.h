@@ -2,7 +2,7 @@
 // can be unit-tested on the host (see session_name_test.cpp).
 //
 // Session folders are "/sNNNNN", optionally suffixed with the start-of-session
-// pack SOC as "-SS" (e.g. "/s00001-42") to make them identifiable when the
+// pack SOC as "-socSS" (e.g. "/s00001-soc42") to make them identifiable when the
 // device has no accurate wall-clock time. The suffix is appended by a rename
 // once the first BMS SOC frame is decoded; folders whose session never saw a
 // SOC reading stay plain "/sNNNNN".
@@ -39,10 +39,10 @@ static inline int socToSuffix(float pct) {
     return v;
 }
 
-// Directory path with the SOC suffix, e.g. "/s00001-42". A soc < 0 (unknown)
+// Directory path with the SOC suffix, e.g. "/s00001-soc42". A soc < 0 (unknown)
 // falls back to the plain name.
 static inline void sessionDirNameSoc(char* out, size_t cap, uint32_t session,
                                      int soc) {
     if (soc < 0) sessionDirName(out, cap, session);
-    else snprintf(out, cap, "/s%05lu-%02d", (unsigned long)session, soc);
+    else snprintf(out, cap, "/s%05lu-soc%02d", (unsigned long)session, soc);
 }

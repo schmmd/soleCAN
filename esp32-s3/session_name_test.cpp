@@ -12,8 +12,8 @@ int main() {
 
     // --- sessionParse: plain and suffixed both yield the number ---
     assert(sessionParse("s00001", n)    && n == 1);
-    assert(sessionParse("s00042-42", n) && n == 42);
-    assert(sessionParse("s99999-0", n)  && n == 99999);
+    assert(sessionParse("s00042-soc42", n) && n == 42);
+    assert(sessionParse("s99999-soc0", n)  && n == 99999);
     assert(sessionParse("s7-anything", n) && n == 7);   // lenient after '-'
 
     // --- sessionParse rejects non-session dirs ---
@@ -40,11 +40,11 @@ int main() {
 
     // --- sessionDirNameSoc: suffix, zero-pad, unknown fallback ---
     sessionDirNameSoc(buf, sizeof buf, 1, 42);
-    assert(strcmp(buf, "/s00001-42") == 0);
+    assert(strcmp(buf, "/s00001-soc42") == 0);
     sessionDirNameSoc(buf, sizeof buf, 1, 5);
-    assert(strcmp(buf, "/s00001-05") == 0); // two-digit pad
+    assert(strcmp(buf, "/s00001-soc05") == 0); // two-digit pad
     sessionDirNameSoc(buf, sizeof buf, 1, 100);
-    assert(strcmp(buf, "/s00001-100") == 0);
+    assert(strcmp(buf, "/s00001-soc100") == 0);
     sessionDirNameSoc(buf, sizeof buf, 1, -1);
     assert(strcmp(buf, "/s00001") == 0);    // unknown -> plain
 
