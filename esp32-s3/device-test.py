@@ -416,6 +416,32 @@ def stage_sd(args, j: dict) -> bool:
                            "(pass --expect-sd to make this a failure)")
         return False
 
+    if state == "armed":
+        # The session only opens on the first CAN frame, so a bus-less bench
+        # boot sits here. Prime it with one frame from the injector.
+        if not args.inject_channel:
+            report("WARN", "card armed but no CAN frame yet — session checks "
+                           "need --inject-channel to send one")
+            return False
+        try:
+            import can
+            ack_bus = open_ack_bus(args)
+            bus = open_injector_bus(args)
+            can_id, data_hex = FIX_MOTOR
+            bus.send(can.Message(arbitration_id=can_id, is_extended_id=True,
+                                 data=bytes.fromhex(data_hex)), timeout=1.0)
+            time.sleep(2.5)   # writer opens the session + first flush
+            bus.shutdown()
+            if ack_bus:
+                ack_bus.shutdown()
+        except Exception as e:  # noqa: BLE001
+            check(False, "prime SD session with one frame", str(e))
+            return False
+        sd = fetch_json(args.host).get("sd", {})
+        state = sd.get("state")
+        check(state == "logging", "armed -> logging on first CAN frame",
+              f"state={state}")
+
     check(state == "logging", "SD session logging", f"state={state}")
     check(sd.get("session", 0) >= 1, "session directory open",
           f"session={sd.get('session')}")
