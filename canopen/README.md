@@ -290,8 +290,15 @@ SPEED-LIMIT PARAMETER BLOCK (0x3103-0x3108)                    CONFIRMED
   range+direction — see "ACTIVE SPEED LIMIT + RANGE MECHANISM" below.
 
   NOTE FOR WRITES: this block is the obvious target if anyone ever wants to
-  change the speed caps — and therefore also the most safety-relevant. Treat
-  as read-only until a deliberate, separately-reasoned decision says otherwise.
+  change the speed caps — and therefore also the most safety-relevant.
+
+  *** CHANGED FROM STOCK on 2026-09-24 (owner decision, canopen/sdo_write.py
+  --persist, committed to EEPROM, verified after a key cycle): ***
+      0x3106  R1 reverse cap  1600 -> 2000  (= R1 forward)
+      0x3108  R2 reverse cap  2000 -> 2500  (= R2 forward)
+  0x3104 (R3 reverse, 2240) is unchanged. The stock values are recorded above
+  and in canopen_full.txt; undo is the same command with the old values.
+  Any analysis of reverse behaviour after this date must account for it.
 
 ACTIVE SPEED LIMIT + RANGE MECHANISM                            CONFIRMED
 --------------------------------------------------------------------------

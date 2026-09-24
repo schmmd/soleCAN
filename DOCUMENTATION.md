@@ -971,6 +971,12 @@ recorded here as reference if the mechanical gear is known by other
 means (e.g. operator input), but they are unsafe to apply to live CAN
 data:
 
+> **Controller change, 2026-09-24:** the Curtis per-range RPM caps for
+> *reverse* in R1 and R2 were raised from 80 % of forward to equal forward
+> (1600→2000 and 2000→2500 rpm) via a persistent CANopen parameter write.
+> R3 reverse stays 2240. Details and undo in `canopen/README.md`
+> "SPEED-LIMIT PARAMETER BLOCK".
+
 | Mechanical range | km/h per 1000 motor RPM | km/h at 2800 RPM (max) |
 |------------------|-------------------------|------------------------|
 | L (Low, Agri)    | 1.64                    | 4.6                    |
