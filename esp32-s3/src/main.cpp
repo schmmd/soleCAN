@@ -20,6 +20,7 @@
  *   GET    /sd/sessions         — list recorded sessions JSON (BOARD_REJSACAN only)
  *   GET    /sd/sessions/{id}    — download one session as a USTAR tar stream (BOARD_REJSACAN only)
  *   DELETE /sd/sessions/{id}    — delete one (non-active) recorded session (BOARD_REJSACAN only)
+ *   (the same four operations are available over USB as the `sd` console command)
  *   anything else 302-redirects to / on the soft-AP (captive-portal auto-open)
  *                and 404s on the station interface
  *
@@ -462,6 +463,32 @@ static Preferences g_prefs;
 
 static inline bool staConfigured() { return g_sta_ssid[0] != '\0'; }
 
+// STA reconnection is throttled, not continuous. The AP and STA share one radio;
+// Arduino's default auto-reconnect makes an absent home network scan every
+// channel forever, which drags the soft-AP beacon off-channel so the "tractor"
+// SSID appears briefly then vanishes. Instead we disable auto-reconnect and fire
+// one connect burst every STA_RETRY_INTERVAL_MS from loop(); between bursts the
+// radio parks on the AP channel and the AP stays solid. A burst still causes a
+// brief (~1-2 s) beacon blip while it scans — unavoidable on a single radio.
+#define STA_RETRY_INTERVAL_MS 60000
+static uint32_t g_sta_last_attempt_ms = 0;
+
+// Kick off (or retry) the station join and stamp the attempt time. Auto-reconnect
+// stays off so the only STA scans are the ones staRetryTick() schedules.
+static void staBeginJoin() {
+    WiFi.begin(g_sta_ssid, g_sta_pass);
+    WiFi.setAutoReconnect(false);
+    g_sta_last_attempt_ms = millis();
+}
+
+// One throttled reconnect burst per interval while the configured home network
+// is out of range. No-op when STA isn't configured or is already connected.
+static void staRetryTick() {
+    if (!staConfigured() || WiFi.status() == WL_CONNECTED) return;
+    if (millis() - g_sta_last_attempt_ms < STA_RETRY_INTERVAL_MS) return;
+    staBeginJoin();
+}
+
 // ── USB port role ─────────────────────────────────────────────────────────────
 // The native USB-CDC port has a runtime-selectable role. Boots to LOGGING (enum
 // 0); RAM-only, so a power cycle always returns to logging. Switched via the
@@ -494,6 +521,8 @@ static bool usbModeFromName(const String& s, UsbMode& out) {
 
 // Defined near the SLCAN section (they print over Serial / read device state).
 static bool tryModeCommand(const char* line);
+static bool tryWifiCommand(const char* line);
+static bool trySdCommand(const char* line);
 void usbLoggingPoll();
 
 // NVS 'wifi' namespace overrides the compiled defaults; an absent 'ssid' key
@@ -2174,8 +2203,12 @@ static bool   g_log_wrapped = false;
 // USB text may be written only when the port isn't a binary channel — i.e. not
 // mid-SLCAN-session and not the kelly bridge. (slcan_open only goes true in slcan
 // mode, so logging and pre-session slcan both allow text.)
+// True while `sd get` is streaming a tar over USB: mutes the log echo and SLCAN
+// frame output so nothing can interleave with the announced byte count.
+static volatile bool g_usb_sd_stream = false;
+
 static inline bool usbTextAllowed() {
-    return g_usb_mode != USB_KELLY && !slcan_open;
+    return g_usb_mode != USB_KELLY && !slcan_open && !g_usb_sd_stream;
 }
 
 // Append one formatted line to the ring, and echo it to USB when allowed.
@@ -2227,6 +2260,7 @@ static String staDisconnectReasonName(uint8_t reason) {
         case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:     return "4way_handshake_timeout";
         case WIFI_REASON_GROUP_KEY_UPDATE_TIMEOUT:   return "group_key_update_timeout";
         case WIFI_REASON_802_1X_AUTH_FAILED:         return "802_1x_auth_failed";
+        case WIFI_REASON_STA_LEAVING:                return "sta_leaving";
         case WIFI_REASON_BEACON_TIMEOUT:             return "beacon_timeout";
         case WIFI_REASON_NO_AP_FOUND:                return "no_ap_found";
         case WIFI_REASON_AUTH_FAIL:                  return "auth_fail";
@@ -2647,7 +2681,7 @@ void handleWifiSave() {
 
     WiFi.mode(staConfigured() ? WIFI_AP_STA : WIFI_AP);
     WiFi.disconnect(false);
-    if (staConfigured()) WiFi.begin(g_sta_ssid, g_sta_pass);
+    if (staConfigured()) staBeginJoin();
 
     logLine("WiFi: STA reconfigured to \"%s\" (pass %u chars)",
             g_sta_ssid, (unsigned)strlen(g_sta_pass));
@@ -2737,9 +2771,7 @@ static void sdSendError(int code, const char* msg) {
 
 // Cheap logging status + the diagnostics that used to ride along in /json
 // (raw_part, json_part, recoveries, fail_op, fail_kb). No mutex, no card I/O.
-static void handleSdStatus() {
-    noteHttpActivity();
-    JsonDocument doc;
+static void sdStatusJson(JsonDocument& doc) {
     doc["state"] = g_sd.state;
     if (g_sd_active) {
         doc["session"]    = g_sd.session;
@@ -2755,6 +2787,12 @@ static void handleSdStatus() {
         doc["fail_op"] = g_sd.fail_op;
         doc["fail_kb"] = g_sd.fail_kb;
     }
+}
+
+static void handleSdStatus() {
+    noteHttpActivity();
+    JsonDocument doc;
+    sdStatusJson(doc);
     String out;
     serializeJsonPretty(doc, out);
     server.send(200, "application/json", out);
@@ -2762,10 +2800,7 @@ static void handleSdStatus() {
 
 // Session/file inventory: one mutex-guarded walk of the card. Only /sNNNNN
 // directories are listed (same sessionParse() filter as the reaper).
-static void handleSdList() {
-    noteHttpActivity();
-    if (!g_sd_active) { sdSendError(503, "sd_unavailable"); return; }
-    JsonDocument doc;
+static bool sdListJson(JsonDocument& doc) {
     auto sessions = doc["sessions"].to<JsonArray>();
     bool open_ok = true;
     {
@@ -2804,7 +2839,14 @@ static void handleSdList() {
         root.close();
         }
     }
-    if (!open_ok) { sdSendError(500, "open_root"); return; }
+    return open_ok;
+}
+
+static void handleSdList() {
+    noteHttpActivity();
+    if (!g_sd_active) { sdSendError(503, "sd_unavailable"); return; }
+    JsonDocument doc;
+    if (!sdListJson(doc)) { sdSendError(500, "open_root"); return; }
     String out;
     serializeJsonPretty(doc, out);
     server.send(200, "application/json", out);
@@ -2869,34 +2911,29 @@ static bool sdParseIdArg(uint32_t& id) {
 // the sole CAN consumer.
 static void canServiceTick();
 
-// GET /sd/sessions/{id} — the whole session directory as one uncompressed
-// USTAR stream. Member sizes freeze at header time (the walk below), so the
+// A session as one uncompressed USTAR stream, shared by GET /sd/sessions/{id}
+// and the USB `sd get` command. Member sizes freeze at plan time, so the
 // active session yields a consistent snapshot ≤~1 s stale. If a member reads
-// short of its frozen size (read error / file gone), the stream is truncated
-// and the socket closed, so the client detects a short read against
-// Content-Length rather than receiving a byte-perfect zero-filled file. The
-// mutex is held per chunk, never across client I/O. g_sd_http_stream_session is
-// set for the whole handler so the reaper cannot delete the session mid-stream.
-static void handleSdSessionGet() {
-    noteHttpActivity();
-    if (!g_sd_active) { sdSendError(503, "sd_unavailable"); return; }
-    uint32_t id;
-    if (!sdParseIdArg(id)) { sdSendError(404, "not_found"); return; }
+// short of its frozen size (read error / file gone), the stream is truncated,
+// so the receiver detects a short read against the announced length rather
+// than receiving a byte-perfect zero-filled file. The mutex is held per chunk,
+// never across sink I/O. Callers hold an SdStreamGuard for the whole transfer
+// so the reaper cannot delete the session mid-stream.
+struct SdTarMember { String name; uint32_t size; };
+typedef bool (*SdSink)(void* ctx, const uint8_t* p, size_t n);   // false = receiver gone
 
-    char dir[24];   // resolved under the lock — may carry a "-socSS" SOC suffix
-
-    SdStreamGuard stream_guard(id);   // clears g_sd_http_stream_session on any return
-
-    struct Member { String name; uint32_t size; };
-    std::vector<Member> members;
+// Freeze the member list and compute the exact archive size. False = no such
+// session. `dir` (≥ 24 bytes) receives the on-disk path resolved under the
+// lock — it may carry a "-socSS" SOC suffix, so callers can't rebuild "/sNNNNN".
+static bool sdTarPlan(uint32_t id, char* dir, size_t dir_cap,
+                      std::vector<SdTarMember>& members, uint64_t& total) {
     {
         SdLock lock;
-        if (!sdResolveDir(id, dir, sizeof dir)) { sdSendError(404, "not_found"); return; }
+        if (!sdResolveDir(id, dir, dir_cap)) return false;
         File d = SD.open(dir);
         if (!d || !d.isDirectory()) {
             if (d) d.close();
-            sdSendError(404, "not_found");
-            return;
+            return false;
         }
         for (File f = d.openNextFile(); f; f = d.openNextFile()) {
             if (!f.isDirectory())
@@ -2906,78 +2943,93 @@ static void handleSdSessionGet() {
         }
         d.close();
     }
-
-    uint64_t total = 1024;   // end-of-archive: two zero blocks
+    total = 1024;   // end-of-archive: two zero blocks
     for (auto& m : members)
         total += 512 + (((uint64_t)m.size + 511) / 512) * 512;
-    if (total > UINT32_MAX) { sdSendError(507, "too_large"); return; }
+    return true;
+}
 
-    server.setContentLength((size_t)total);
-    server.sendHeader("Content-Disposition",
-                      String("attachment; filename=") + (dir + 1) + ".tar");
-    server.send(200, "application/x-tar", "");
-    WiFiClient client = server.client();
-
-    static uint8_t buf[4096];   // loop-task stack is tight; single-threaded handler
+// Push the planned archive through `sink`. False = truncated (sink refused a
+// write, or a member read short); the caller decides how to drop the connection.
+static bool sdTarStream(const char* dir, const std::vector<SdTarMember>& members,
+                        SdSink sink, void* ctx) {
+    static uint8_t buf[4096];   // loop-task stack is tight; single-threaded caller
     for (auto& m : members) {
         char arcname[48], path[48];
         snprintf(arcname, sizeof arcname, "%s/%s", dir + 1, m.name.c_str());
         snprintf(path,    sizeof path,    "%s/%s", dir,     m.name.c_str());
         uint8_t hdr[512];
         tarFillHeader(hdr, arcname, m.size);
-        if (!sdClientWrite(client, hdr, 512)) return;
+        if (!sink(ctx, hdr, 512)) return false;
 
         File f;
         { SdLock lock; f = SD.open(path, FILE_READ); }
         uint32_t sent = 0;
+        bool ok = true;
         while (sent < m.size) {
             size_t want = m.size - sent;
             if (want > sizeof buf) want = sizeof buf;
             int n;
             { SdLock lock; n = f ? f.read(buf, want) : -1; }
-            if (n <= 0) {                          // read error / file gone mid-stream:
-                { SdLock lock; if (f) f.close(); } // truncate rather than zero-pad so
-                client.stop();                     // the client sees a short read vs
-                return;                            // Content-Length
-            }
-            if (!sdClientWrite(client, buf, n)) {
-                SdLock lock; if (f) f.close();
-                return;                                       // client went away
-            }
+            if (n <= 0 || !sink(ctx, buf, n)) { ok = false; break; }
             sent += n;
             canServiceTick();    // keep draining CAN between chunks; not under SdLock
             noteHttpActivity();  // a multi-minute download keeps deferring quiet sleep
         }
         { SdLock lock; if (f) f.close(); }
+        if (!ok) return false;
 
         size_t pad = (512 - (m.size % 512)) % 512;
         if (pad) {
             memset(buf, 0, pad);
-            if (!sdClientWrite(client, buf, pad)) return;
+            if (!sink(ctx, buf, pad)) return false;
         }
     }
     memset(buf, 0, 1024);
-    sdClientWrite(client, buf, 1024);   // end-of-archive trailer
+    return sink(ctx, buf, 1024);   // end-of-archive trailer
+}
+
+static bool sdHttpSink(void* ctx, const uint8_t* p, size_t n) {
+    return sdClientWrite(*static_cast<WiFiClient*>(ctx), p, n);
+}
+
+// GET /sd/sessions/{id} — see sdTarPlan/sdTarStream. Content-Length is exact,
+// and a truncated stream closes the socket so the client sees the short read.
+static void handleSdSessionGet() {
+    noteHttpActivity();
+    if (!g_sd_active) { sdSendError(503, "sd_unavailable"); return; }
+    uint32_t id;
+    if (!sdParseIdArg(id)) { sdSendError(404, "not_found"); return; }
+
+    SdStreamGuard stream_guard(id);   // clears g_sd_http_stream_session on any return
+    char dir[24];
+    std::vector<SdTarMember> members;
+    uint64_t total;
+    if (!sdTarPlan(id, dir, sizeof dir, members, total)) { sdSendError(404, "not_found"); return; }
+    if (total > UINT32_MAX) { sdSendError(507, "too_large"); return; }
+
+    server.setContentLength((size_t)total);
+    server.sendHeader("Content-Disposition",
+                      String("attachment; filename=") + (dir + 1) + ".tar");   // sNNNNN[-socSS].tar
+    server.send(200, "application/x-tar", "");
+    WiFiClient client = server.client();
+    if (!sdTarStream(dir, members, sdHttpSink, &client)) client.stop();
 }
 
 // DELETE /sd/sessions/{id} — recursively remove a session directory via the
 // reaper's helper. The active session is never deletable. free_mb is
 // recomputed here (usedBytes() is slow, but deletes are rare) so the response
 // reflects the space just reclaimed.
-static void handleSdSessionDelete() {
-    noteHttpActivity();
-    if (!g_sd_active) { sdSendError(503, "sd_unavailable"); return; }
-    uint32_t id;
-    if (!sdParseIdArg(id)) { sdSendError(404, "not_found"); return; }
-    if (id == g_sd.session) { sdSendError(409, "active_session"); return; }
+static const char* sdDeleteSession(uint32_t id, uint32_t& free_mb) {
+    if (id == g_sd.session) return "active_session";
     // Cannot race on the single-threaded WebServer, but refuse deleting a
     // session an HTTP client is streaming — one line, future-proof.
-    if (id == g_sd_http_stream_session) { sdSendError(409, "streaming"); return; }
+    if (id == g_sd_http_stream_session) return "streaming";
 
     char dir[24];   // resolved under the lock — may carry a "-socSS" SOC suffix
 
     enum Result { OK, NOT_FOUND, REMOVE_FAILED } result = OK;
-    uint32_t free_mb = 0;
+    free_mb = 0;
     {
         SdLock lock;
         if (!sdResolveDir(id, dir, sizeof dir)) {
@@ -2993,8 +3045,24 @@ static void handleSdSessionDelete() {
             }
         }
     }
-    if (result == NOT_FOUND)     { sdSendError(404, "not_found");     return; }
-    if (result == REMOVE_FAILED) { sdSendError(500, "remove_failed"); return; }
+    if (result == NOT_FOUND)     return "not_found";
+    if (result == REMOVE_FAILED) return "remove_failed";
+    return nullptr;
+}
+
+static void handleSdSessionDelete() {
+    noteHttpActivity();
+    if (!g_sd_active) { sdSendError(503, "sd_unavailable"); return; }
+    uint32_t id;
+    if (!sdParseIdArg(id)) { sdSendError(404, "not_found"); return; }
+    uint32_t free_mb;
+    const char* err = sdDeleteSession(id, free_mb);
+    if (err) {
+        int code = !strcmp(err, "not_found") ? 404
+                 : !strcmp(err, "remove_failed") ? 500 : 409;
+        sdSendError(code, err);
+        return;
+    }
     server.send(200, "application/json",
                 String("{\"free_mb\":") + free_mb + "}");
 }
@@ -3049,6 +3117,112 @@ static bool tryModeCommand(const char* line) {
     return true;
 }
 
+// Recognizes a `wifi` line over the USB console. Wired into both the logging poll
+// and the SLCAN dispatch, so it works in any USB role. `wifi` alone reports the
+// station SSID and link state; `wifi clear` erases the stored STA credentials and
+// drops to a solid AP-only radio — the field reset when a stale/out-of-range STA
+// network keeps dragging the soft-AP beacon off-channel. Returns true if the line
+// was a wifi command, so the SLCAN handler consumes it before its own parsing.
+static bool tryWifiCommand(const char* line) {
+    if (strncmp(line, "wifi", 4) != 0) return false;
+#if defined(NO_WIFI)
+    Serial.printf("wifi: disabled in this build (-DNO_WIFI)\r\n");
+    return true;                            // never touch the radio in a silent build
+#else
+    const char* p = line + 4;
+    while (*p == ' ' || *p == '\t') p++;
+    if (strcmp(p, "clear") == 0) {
+        g_sta_ssid[0] = g_sta_pass[0] = '\0';
+        saveStaCreds(g_sta_ssid, g_sta_pass);   // persist blank -> AP-only after reboot too
+        // Tear down the live STA link *before* dropping to AP-only. Order matters:
+        // WiFi.mode(WIFI_AP) removes the STA interface, so a disconnect issued
+        // after it never deauths — the radio stays associated (sta=connected) until
+        // reboot. eraseap=true also wipes the driver's remembered AP so it can't
+        // silently reassociate.
+        WiFi.disconnect(/*wifioff=*/true, /*eraseap=*/true);
+        WiFi.mode(WIFI_AP);
+        Serial.printf("wifi: STA cleared -> AP-only\r\n");
+    } else if (*p == '\0') {
+        Serial.printf("wifi: ssid=\"%s\" sta=%s\r\n", g_sta_ssid,
+                      WiFi.status() == WL_CONNECTED ? "connected" : "down");
+    } else {
+        Serial.printf("wifi: unknown '%s' (try: wifi | wifi clear)\r\n", p);
+    }
+    return true;
+#endif
+}
+
+#if defined(HAS_SD)
+static bool sdUsbSink(void*, const uint8_t* p, size_t n) {
+    return Serial.write(p, n) == n;   // short write = host stopped reading (CDC tx timeout)
+}
+#endif
+
+// Recognizes an `sd` line over the USB console: the /sd/* HTTP API without WiFi,
+// for pulling sessions over the (much faster) USB cable. Wired into both the
+// logging poll and the SLCAN dispatch like `wifi`. Every reply starts with
+// "sd: " so a host can skip interleaved log lines. See esp32-s3/sd-pull.py.
+//   sd           -> sd: {status json}        (GET /sd/status)
+//   sd list      -> sd: {sessions json}      (GET /sd/sessions)
+//   sd get N     -> sd: tar N <bytes>\r\n then exactly <bytes> of USTAR
+//                   (GET /sd/sessions/N; a short stream = the same truncation)
+//   sd delete N  -> sd: deleted N free_mb=M  (DELETE /sd/sessions/N)
+//   errors       -> sd: error <tag>          (the HTTP API's tags)
+static bool trySdCommand(const char* line) {
+    if (strncmp(line, "sd", 2) != 0) return false;
+    if (line[2] != '\0' && line[2] != ' ' && line[2] != '\t') return false;
+#if !defined(HAS_SD)
+    Serial.printf("sd: error no_sd_reader\r\n");   // board has no card slot
+    return true;
+#else
+    const char* p = line + 2;
+    while (*p == ' ' || *p == '\t') p++;
+    JsonDocument doc;
+    String out;
+    if (*p == '\0') {
+        sdStatusJson(doc);
+        serializeJson(doc, out);
+        Serial.printf("sd: %s\r\n", out.c_str());   // one write: no log line can split it
+        return true;
+    }
+    if (!g_sd_active) { Serial.printf("sd: error sd_unavailable\r\n"); return true; }
+    if (strcmp(p, "list") == 0) {
+        if (!sdListJson(doc)) { Serial.printf("sd: error open_root\r\n"); return true; }
+        serializeJson(doc, out);
+        Serial.printf("sd: %s\r\n", out.c_str());
+        return true;
+    }
+    bool get = strncmp(p, "get ", 4) == 0, del = strncmp(p, "delete ", 7) == 0;
+    const char* num = p + (get ? 4 : 7);
+    char* end = nullptr;
+    uint32_t id = (get || del) ? strtoul(num, &end, 10) : 0;
+    if (!(get || del) || !end || *end != '\0' || end == num) {
+        Serial.printf("sd: error bad_command (try: sd | sd list | sd get N | sd delete N)\r\n");
+        return true;
+    }
+    if (del) {
+        uint32_t free_mb;
+        const char* err = sdDeleteSession(id, free_mb);
+        if (err) Serial.printf("sd: error %s\r\n", err);
+        else     Serial.printf("sd: deleted %lu free_mb=%lu\r\n",
+                               (unsigned long)id, (unsigned long)free_mb);
+        return true;
+    }
+    SdStreamGuard stream_guard(id);   // reaper must not delete it mid-stream
+    char dir[24];
+    std::vector<SdTarMember> members;
+    uint64_t total;
+    if (!sdTarPlan(id, dir, sizeof dir, members, total)) { Serial.printf("sd: error not_found\r\n"); return true; }
+    if (total > UINT32_MAX)             { Serial.printf("sd: error too_large\r\n"); return true; }
+    g_usb_sd_stream = true;            // mute log echo + SLCAN frames until done
+    Serial.printf("sd: tar %lu %lu\r\n", (unsigned long)id, (unsigned long)total);
+    sdTarStream(dir, members, sdUsbSink, nullptr);  // short stream = truncation, as HTTP
+    Serial.flush();
+    g_usb_sd_stream = false;
+    return true;
+#endif
+}
+
 // Runs each loop iteration while in LOGGING mode: accepts a `mode` command typed
 // over USB (other input discarded) and emits a ~10 s device-status heartbeat.
 void usbLoggingPoll() {
@@ -3057,7 +3231,11 @@ void usbLoggingPoll() {
     while (Serial.available()) {            // (a) line-buffered `mode` command
         char c = Serial.read();
         if (c == '\r' || c == '\n') {
-            if (len > 0) { buf[len] = '\0'; tryModeCommand(buf); len = 0; }
+            if (len > 0) {
+                buf[len] = '\0';
+                if (!tryModeCommand(buf) && !tryWifiCommand(buf)) trySdCommand(buf);
+                len = 0;
+            }
         } else if (len < sizeof(buf) - 1) {
             buf[len++] = c;
         } else {
@@ -3100,7 +3278,7 @@ void usbLoggingPoll() {
 // section runs at file scope.
 
 void slcanSendFrame(const twai_message_t& msg) {
-    if (!slcan_open) return;
+    if (!slcan_open || g_usb_sd_stream) return;
     char line[32];
     // 'T' + 8 hex ID digits for 29-bit frames, 't' + 3 for 11-bit.
     int n = msg.extd
@@ -3151,9 +3329,12 @@ static bool canTransmit0(uint32_t id, bool extd, uint8_t dlc, const uint8_t* dat
 #endif
 
 void slcanHandleCommand(const char* cmd) {
-    // A `mode …` line switches the USB role (never collides with SLCAN's
-    // single-letter commands, so python-can is unaffected).
+    // A `mode …`, `wifi …` or `sd …` line is consumed here first; none collides
+    // with SLCAN's single-letter commands (SLCAN's `s` takes hex, never `sd`),
+    // so python-can is unaffected.
     if (tryModeCommand(cmd)) return;
+    if (tryWifiCommand(cmd)) return;
+    if (trySdCommand(cmd)) return;
     switch (cmd[0]) {
         case 'O': slcan_open = true;  Serial.write('\r'); break;
         case 'C': slcan_open = false; Serial.write('\r'); break;
@@ -3628,11 +3809,12 @@ void setup() {
     // happens in the background; we don't block boot waiting on it.
     //
     // Only enable the station when a home network is actually configured. The
-    // AP and STA share one radio: if WIFI_SSID is empty the station would scan
-    // every channel forever looking for a network that doesn't exist, which
-    // makes the soft-AP beacon hop channels and drop out (it appears briefly
-    // then vanishes and won't accept clients). Build with an empty WIFI_SSID
-    // for a rock-solid AP-only setup; set it to join a bench network as before.
+    // AP and STA share one radio, so an absent home network must not be scanned
+    // for continuously — that drags the soft-AP beacon off-channel. staBeginJoin()
+    // disables auto-reconnect and staRetryTick() (in loop) fires one connect burst
+    // per STA_RETRY_INTERVAL_MS, so the AP only blips briefly during a scan
+    // instead of vanishing. Build with an empty WIFI_SSID for a pure AP-only setup
+    // (no blips at all); set it to also join a bench network.
     // Record STA join outcomes for /config and the serial log. Registered
     // before begin() so even the very first failure is captured. The callback
     // runs on the WiFi event task; it only writes the volatile g_sta_* words.
@@ -3657,7 +3839,7 @@ void setup() {
     const bool join_sta = staConfigured();
     WiFi.mode(join_sta ? WIFI_AP_STA : WIFI_AP);
     g_ap_running = WiFi.softAP(AP_SSID, AP_PASS);
-    if (join_sta) WiFi.begin(g_sta_ssid, g_sta_pass);
+    if (join_sta) staBeginJoin();
 
     if (join_sta)
         logLine("WiFi: AP \"%s\" %s; STA joining \"%s\" (pass %u chars)",
@@ -3844,6 +4026,7 @@ void loop() {
 
 #if !defined(NO_WIFI)
     socketcandPoll();
+    staRetryTick();
     dns_server.processNextRequest();
     server.handleClient();
 #endif

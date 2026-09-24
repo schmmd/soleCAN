@@ -56,8 +56,8 @@ The app shows the same dashboard without joining the tractor's WiFi, so your
 phone keeps its internet connection, there's no airplane-mode dance, and it
 connects a bit faster.
 
-1. Download `app-debug.apk` from the
-   [Releases page](https://github.com/schmmd/soleCAN/releases) onto the phone.
+1. Download the APK file from the
+   [Releases page](https://github.com/schmmd/soleCAN/releases) onto the Android phone.
 2. Open it. Android will ask you to allow installing from your browser or file
    manager — this is the normal sideloading prompt for an app that isn't from
    the Play Store. Allow it, then install.

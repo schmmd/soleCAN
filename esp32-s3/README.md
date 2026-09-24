@@ -307,27 +307,21 @@ docker build -f esp32-s3/Dockerfile \
 written in a single shot at offset `0x0`. That is the form a browser-based
 flasher wants — no toolchain install, just a USB cable:
 
-1. Open [esp.huhn.me](https://esp.huhn.me) or the
+1. Open
    [Adafruit ESPTool](https://adafruit.github.io/Adafruit_WebSerial_ESPTool/)
+   or [esp.huhn.me](https://esp.huhn.me)
    in **desktop Chrome or Edge** (WebSerial is not available in Safari,
    Firefox, or any mobile browser).
-2. Click **Connect** and pick the board's USB serial port.
-3. Load `firmware-merged.bin` at address `0x0` and flash. If you got the image
+3. Click **Connect** and pick the board's USB serial port.
+4. Load `firmware-merged.bin` at address `0x0` and flash. If you got the image
    from a GitHub Release rather than a local build, it's the same file under a
    versioned name, `solecan-firmware-rejsacan-<version>-merged.bin` — load that
    one at `0x0` instead.
 
-If the browser can't connect, hold **BOOT-0**, tap **RST**, release **BOOT-0**
-to force download mode, then retry.
-
 Pre-built merged images are attached to every
 [GitHub Release](https://github.com/schmmd/soleCAN/releases) (as
 `solecan-firmware-rejsacan-<version>-merged.bin`), so flashing a board needs no
-build at all. That build carries the firmware's stock AP-only defaults — see
-"Customizing the WiFi AP and mDNS hostname" below — and no station
-credentials, so the board joins no network on its own after flashing; join its
-`tractor` AP and set a station network at runtime through the `/wifi` form (see
-"Changing the station WiFi at runtime" below) if you want it on your network.
+build at all.
 
 ## Customizing the WiFi AP and mDNS hostname (optional)
 
@@ -383,6 +377,11 @@ Change it two ways, no reflash needed:
   into the serial console. This works even on `-DNO_WIFI` builds. In `kelly` mode
   the USB port is the bridge, so switch back over HTTP or by power-cycling.
 
+The console also accepts `wifi` / `wifi clear` (below) and, on the RejsaCAN,
+`sd` / `sd list` / `sd get N` / `sd delete N` (see
+[Pulling files over USB](#pulling-files-over-usb)) in the `logging` and `slcan`
+modes.
+
 ## Changing the station WiFi at runtime (`/wifi`)
 
 The station (home/shop network) credentials can also be changed **without
@@ -406,10 +405,18 @@ credentials through the form, they **take precedence over any baked-in
 re-enter them through the form or fully erase flash (`esptool erase_flash`, or
 `pio run -t erase`), which clears NVS.
 
+**Offline recovery — `wifi clear` over USB.** If a stale station SSID keeps the
+shared-radio AP flapping so badly you can't reach `/wifi`, type `wifi clear` into
+the USB serial console (`pio device monitor`, or any terminal). It blanks the
+stored credentials in NVS and drops the radio to solid AP-only immediately — no
+web form, no flash erase. `wifi` alone reports the current SSID and link state.
+Like `mode`, it works in any USB role; on `-DNO_WIFI` builds it just prints that
+WiFi is disabled and never touches the radio.
+
 > No pre-apply scan is done (deliberate simplicity): a mistyped SSID makes the
 > station scan endlessly and destabilizes the shared-radio AP, and because it
 > persists in NVS the degradation survives a reboot until you correct it via the
-> form. Type carefully.
+> form or `wifi clear` over USB. Type carefully.
 
 ## Endpoints
 
@@ -430,6 +437,7 @@ via mDNS.
 | `http://tractor.local/sd/status` | SD logging status + diagnostics (RejsaCAN only) |
 | `http://tractor.local/sd/sessions` | SD session/file inventory as JSON |
 | `http://tractor.local/sd/sessions/N` | `GET` whole session as a `.tar`; `DELETE` removes it |
+| USB console `sd` command | The same four SD operations over USB — see [Pulling files over USB](#pulling-files-over-usb) |
 
 ### Consuming raw frames with `python-can`
 
@@ -542,6 +550,50 @@ download or delete won't be cut off; but if the tractor has been off for more
 than 10 minutes the board is already asleep and won't answer until CAN traffic
 resumes. Build with `-DNO_AUTOSHUTDOWN` to keep it awake through bus silence.
 
+### Pulling files over USB
+
+The same four operations are available as the `sd` console command over the
+USB-CDC port, which is much faster than the shared-radio WiFi link and needs
+no network. `sd-pull.py` (pyserial, already a project dependency) drives it;
+`get` writes the identical USTAR archive `curl -O -J` would fetch:
+
+```bash
+python3 esp32-s3/sd-pull.py /dev/cu.usbmodem101 status      # = GET /sd/status
+python3 esp32-s3/sd-pull.py /dev/cu.usbmodem101 list        # = GET /sd/sessions
+python3 esp32-s3/sd-pull.py /dev/cu.usbmodem101 get 7       # = GET /sd/sessions/7 → s00007.tar
+python3 esp32-s3/sd-pull.py /dev/cu.usbmodem101 delete 7    # = DELETE /sd/sessions/7
+```
+
+No helper script needed — the port is a plain tty, so the shell can do it.
+Status and the inventory are one line each; a session is one text line then
+raw bytes, and bash's `read` consumes a non-seekable stream byte-by-byte, so
+`head -c` starts exactly where the tar does (bash, not fish):
+
+```bash
+PORT=/dev/cu.usbmodem101
+stty -f $PORT raw                      # no line discipline mangling (Linux: stty -F)
+exec 3<> $PORT
+printf 'sd list\r\n' >&3; grep -m1 '^sd: ' <&3     # sessions and their files
+
+printf 'sd get 7\r\n' >&3
+while IFS= read -r line <&3; do line=${line%$'\r'}    # skip log lines to the reply
+  case $line in "sd: tar "*) break;; "sd: error"*) echo "$line" >&2; break;; esac
+done
+head -c "${line##* }" <&3 > s00007.tar               # exactly <bytes>, then stop
+tar -tvf s00007.tar
+```
+
+Wire protocol, if you'd rather script it yourself: send `sd`, `sd list`,
+`sd get N` or `sd delete N` as a line. Every reply is one line starting with
+`sd: ` (skip anything else — log lines may arrive first). `sd` and `sd list`
+answer `sd: {json}`; `sd delete N` answers `sd: deleted N free_mb=M`; errors are
+`sd: error <tag>` with the HTTP API's tags (`sd_unavailable`, `not_found`,
+`active_session`, …). `sd get N` answers `sd: tar N <bytes>` followed by exactly
+`<bytes>` of raw tar; the device log echo and SLCAN frames are muted for the
+duration so nothing interleaves, and a card error mid-transfer truncates the
+stream (you get fewer than `<bytes>`), exactly like the HTTP `Content-Length`
+contract. The command works in the `logging` and `slcan` USB modes, not `kelly`.
+
 ## Pre-ship bench test
 
 `device-test.py` is an acceptance suite to run against each flashed device
@@ -608,6 +660,7 @@ esp32-s3/
 ├── copy_dashboard.py       # pre-build: copies repo-root dashboard.html → src/
 ├── inject_build_overrides.py # pre-build: injects AP_SSID / AP_PASS / MDNS_NAME
 ├── device-test.py          # bench acceptance suite for a flashed device
+├── sd-pull.py              # pull SD sessions over the USB console (`sd` command)
 ├── README.md               # this file
 └── src/
     ├── main.cpp            # all firmware code (decode, HTTP, SLCAN, socketcand, LED)
