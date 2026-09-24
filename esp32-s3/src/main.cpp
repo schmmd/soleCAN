@@ -631,6 +631,18 @@ extern const uint8_t dashboard_html_end[]   asm("_binary_src_dashboard_html_end"
 #ifndef SD_JSON_HZ
 #define SD_JSON_HZ          1                         // decoded-snapshot cadence
 #endif
+// SPI clock for the card. The SD library defaults to a very conservative 4 MHz;
+// the SD spec allows 25 MHz in SPI mode, and the ESP32-S3's integer divider of
+// 80 MHz makes 20 MHz the highest in-spec setting. The RejsaCAN wires the slot
+// straight to the module (no level shifter, no series resistors, short traces),
+// so nothing on the board limits it below the chip. GPIO39/40/41 go through the
+// GPIO matrix, which Espressif rates identical to IO_MUX up to 40 MHz; 40 MHz is
+// out of SD spec (relies on the card's MISO output delay being better than the
+// 14 ns it's allowed) — bench-verify before shipping it. Override with
+// -DSD_SPI_HZ=40000000.
+#ifndef SD_SPI_HZ
+#define SD_SPI_HZ           20000000
+#endif
 #define SD_MAX_PART_BYTES   (64ULL * 1024 * 1024)     // roll raw/json parts at this size
 #define SD_MIN_FREE_BYTES   (512ULL * 1024 * 1024)    // reap oldest sessions below this
 #define SD_FLUSH_MS         1000                      // fsync cadence → ≤~1 s lost on power cut
@@ -903,7 +915,7 @@ static void sdRecoverOrFail(const char* op) {
         g_sd_json.file.close();
         SD.end();
         vTaskDelay(pdMS_TO_TICKS(SD_RECOVER_DELAY_MS * attempt));
-        if (!SD.begin(SD_CS_PIN)) continue;
+        if (!SD.begin(SD_CS_PIN, SPI, SD_SPI_HZ)) continue;
         if (!sdOpenPart(g_sd_raw))  continue;
         if (!sdOpenPart(g_sd_json)) continue;
         g_sd.recoveries = g_sd.recoveries + 1;
@@ -994,7 +1006,7 @@ static void sdInit() {
     }
 
     SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
-    if (!SD.begin(SD_CS_PIN)) { g_sd.state = "no_card"; return; }
+    if (!SD.begin(SD_CS_PIN, SPI, SD_SPI_HZ)) { g_sd.state = "no_card"; return; }
     if (!sdStartSession()) {
         g_sd.fail_op = "start_session";
         g_sd.state   = "error";
