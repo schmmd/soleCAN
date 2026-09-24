@@ -14,28 +14,37 @@ Guards, all must pass before a single write frame goes out:
 Writes 16-bit values (every parameter in canopen_params.csv is <= 16 bit).
 Expect the Curtis may log fault 49/99 "Parameter Change Fault" for some
 parameters; that is a key-cycle-to-clear safety fault, not damage.
-The firmware poller keeps running; replies are matched by index/sub so its
-traffic can't be mistaken for ours.
+The firmware poller is paused (`canopen off` over the USB console) for the
+duration and resumed on exit; replies are matched by index/sub regardless.
 
 DEFAULT TARGET IN THE EXAMPLES: 0x3104, the R3 reverse speed cap (2240 rpm,
 range 0..6000). The VCL copies the table entry into 0x3011 Max_Speed when
 R3 + reverse is selected, so the effect shows there — not in 0x3104 alone.
 """
 import argparse, os, sys, time
-import can
+import can, serial
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from canopen_dump import switch_to_slcan, NODE, PORT
 
+def console(port, line):
+    """Send one USB console command (works in logging and slcan roles)."""
+    with serial.Serial(port, 115200, timeout=0.5) as s:
+        s.write((line + "\r\n").encode()); time.sleep(0.3)
+        return s.read(300).decode(errors="replace").strip()
+
 REQ, RESP = 0x600 + NODE, 0x580 + NODE
 
-def xfer(bus, data, timeout=0.3, tries=5):
+RETRIES = 0   # set from --retries; extra attempts after the first
+
+def xfer(bus, data, timeout=0.3):
     """Send one SDO request; return the matching reply's data (same index/sub).
 
-    Retries: the firmware poller shares the controller (~200 req/s) and the
-    Curtis services one SDO at a time, so a request can be dropped silently.
+    With the firmware poller paused, one attempt is enough. --retries N adds
+    N more attempts for a bus where something else contends for the Curtis's
+    single SDO server (an identical repeated request/write is idempotent).
     """
-    for attempt in range(tries):
+    for attempt in range(1 + RETRIES):
         bus.send(can.Message(arbitration_id=REQ, is_extended_id=False, data=data))
         end = time.monotonic() + timeout
         while time.monotonic() < end:
@@ -53,10 +62,8 @@ def read(bus, index, sub=0):
     return int.from_bytes(d[4:8 - n], "little")
 
 def write16(bus, index, value, sub=0):
-    # A write is retried too: the Curtis acks with 0x60 only once it has taken
-    # the value, and repeating an identical write is idempotent.
     d = xfer(bus, [0x2B, index & 0xFF, index >> 8, sub, value & 0xFF, (value >> 8) & 0xFF, 0, 0])
-    if d is None: return "no reply (5 tries)"
+    if d is None: return "no reply"
     if d[0] == 0x80: return f"abort 0x{int.from_bytes(d[4:8], 'little'):08X}"
     return "ok" if d[0] == 0x60 else f"unexpected scs 0x{d[0]:02X}"
 
@@ -75,9 +82,18 @@ def main():
     ap.add_argument("value", type=int, nargs="?")
     ap.add_argument("--apply", action="store_true", help="actually write")
     ap.add_argument("--port", default=PORT)
+    ap.add_argument("--retries", type=int, default=0, help="extra attempts per SDO transfer (default 0)")
     a = ap.parse_args()
+    global RETRIES; RETRIES = a.retries
 
+    print(console(a.port, "canopen off") or "(no console reply: older firmware, poller stays on)")
     switch_to_slcan(a.port)
+    try:
+        run(a)
+    finally:
+        print(console(a.port, "canopen on"))
+
+def run(a):
     with can.Bus(interface="slcan", channel=a.port, bitrate=250000) as bus:
         ee = read(bus, 0x332F)
         cur, lo, hi = read(bus, a.index), read(bus, a.index, 3), read(bus, a.index, 4)
@@ -95,7 +111,7 @@ def main():
             if rpm != 0: problems.append(f"motor turning ({rpm} rpm)")
             if fnr != 0: problems.append(f"lever not in neutral (data[7] low nibble 0x{fnr:X})")
         if problems:
-            print("REFUSED:\n  " + "\n  ".join(problems)); sys.exit(2)
+            print("REFUSED:\n  " + "\n  ".join(problems)); raise SystemExit(2)
         if not a.apply:
             print(f"dry run: would write {a.value} to 0x{a.index:04X} (RAM only). Add --apply."); return
         print(f"writing {a.value} -> 0x{a.index:04X} ... ", end="", flush=True)

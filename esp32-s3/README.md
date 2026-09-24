@@ -152,6 +152,12 @@ docker build -f esp32-s3/Dockerfile --build-arg CAN_ALLOW_TX=1 --build-arg CANOP
 Regenerate the object table after re-dumping the dictionary:
 `python3 canopen/gen_canopen_table.py`.
 
+Pause and resume the poller at runtime with `canopen off` / `canopen on` on the
+USB console (any USB role; `canopen` alone reports state and counters; not
+persisted across reboot). Host tools that need the controller's SDO server to
+themselves, such as `canopen/sdo_write.py`, do this automatically. The state
+is in `/json` as `canopen.enabled`.
+
 Add **`-DCANOPEN_FAST`** to poll the short hand-maintained table in
 `src/canopen_fast.h` instead (about 16 objects, back-to-back, roughly 15 Hz).
 Use it for experiments where the *order* in which objects change matters;
@@ -411,7 +417,8 @@ Change it two ways, no reflash needed:
   into the serial console. This works even on `-DNO_WIFI` builds. In `kelly` mode
   the USB port is the bridge, so switch back over HTTP or by power-cycling.
 
-The console also accepts `wifi` / `wifi clear` (below) and, on the RejsaCAN,
+The console also accepts `wifi` / `wifi clear` (below), `canopen` / `canopen off`
+/ `canopen on` (CANopen poller builds), and, on the RejsaCAN,
 `sd` / `sd list` / `sd get N` / `sd delete N` (see
 [Pulling files over USB](#pulling-files-over-usb)) in the `logging` and `slcan`
 modes.

@@ -485,6 +485,7 @@ uint32_t    g_slcan_tx_dropped = 0;   // frames dropped on a full USB-CDC TX buf
 // One SDO upload in flight at a time, advanced by the 0x5A8 reply (seen in
 // canServiceTick) or by timeout. Runs on the loop task; never blocks.
 static struct {
+    bool     enabled = true;   // runtime switch: USB console `canopen off|on`
     uint16_t idx     = 0;      // next kCanopenObjects[] entry to request
     bool     pending = false;
     uint32_t sent_ms = 0;
@@ -569,6 +570,7 @@ static bool usbModeFromName(const String& s, UsbMode& out) {
 static bool tryModeCommand(const char* line);
 static bool tryWifiCommand(const char* line);
 static bool trySdCommand(const char* line);
+static bool tryCanopenCommand(const char* line);
 void usbLoggingPoll();
 
 // NVS 'wifi' namespace overrides the compiled defaults; an absent 'ssid' key
@@ -2249,6 +2251,7 @@ String buildJson(bool pretty = true, bool minimal = false) {
 #if defined(CANOPEN_POLL)
     if (!minimal) {
         auto co = doc["canopen"].to<JsonObject>();
+        co["enabled"]  = g_canopen.enabled;
         co["objects"]  = (uint32_t)(sizeof kCanopenObjects / sizeof kCanopenObjects[0]);
         co["sweeps"]   = g_canopen.sweeps;
         co["sent"]     = g_canopen.sent;
@@ -3240,6 +3243,27 @@ static bool tryWifiCommand(const char* line) {
 #endif
 }
 
+// `canopen` / `canopen off` / `canopen on` over the USB console, in any USB
+// role. Pausing the poller frees the Curtis's single SDO server for a host tool
+// (canopen/sdo_write.py, canopen_dump.py) that needs undisturbed request/reply.
+// Not persisted: a reboot re-enables it.
+static bool tryCanopenCommand(const char* line) {
+    if (strncmp(line, "canopen", 7) != 0) return false;
+#if !defined(CANOPEN_POLL)
+    Serial.printf("canopen: poller not in this build (-DCANOPEN_POLL)\r\n");
+#else
+    const char* p = line + 7;
+    while (*p == ' ' || *p == '\t') p++;
+    if      (strcmp(p, "off") == 0) g_canopen.enabled = false;
+    else if (strcmp(p, "on")  == 0) g_canopen.enabled = true;
+    else if (*p != '\0') { Serial.printf("canopen: unknown '%s' (try: canopen | canopen off | canopen on)\r\n", p); return true; }
+    Serial.printf("canopen: %s  sent=%lu replies=%lu timeouts=%lu\r\n",
+                  g_canopen.enabled ? "on" : "off", (unsigned long)g_canopen.sent,
+                  (unsigned long)g_canopen.replies, (unsigned long)g_canopen.timeouts);
+#endif
+    return true;
+}
+
 #if defined(HAS_SD)
 // Never hand HWCDC more than its free ring space. Its SOF-watchdog "plugged"
 // state flaps for a few ms even on a healthy link, and a write that arrives
@@ -3341,7 +3365,7 @@ void usbLoggingPoll() {
         if (c == '\r' || c == '\n') {
             if (len > 0) {
                 buf[len] = '\0';
-                if (!tryModeCommand(buf) && !tryWifiCommand(buf)) trySdCommand(buf);
+                if (!tryModeCommand(buf) && !tryWifiCommand(buf) && !tryCanopenCommand(buf)) trySdCommand(buf);
                 len = 0;
             }
         } else if (len < sizeof(buf) - 1) {
@@ -3452,6 +3476,7 @@ static void canopenPollTick() {
         g_canopen.timeouts++;
     }
     if (now - g_canopen.sent_ms < CANOPEN_POLL_GAP_MS) return;
+    if (!g_canopen.enabled) return;
     if (!g_motor.last_seen_ms || now - g_motor.last_seen_ms > CANOPEN_ALIVE_MS) return;
     uint16_t index = kCanopenObjects[g_canopen.idx];
     uint8_t req[8] = { 0x40, (uint8_t)(index & 0xFF), (uint8_t)(index >> 8), 0x00, 0, 0, 0, 0 };
@@ -3472,6 +3497,7 @@ void slcanHandleCommand(const char* cmd) {
     // so python-can is unaffected.
     if (tryModeCommand(cmd)) return;
     if (tryWifiCommand(cmd)) return;
+    if (tryCanopenCommand(cmd)) return;
     if (trySdCommand(cmd)) return;
     switch (cmd[0]) {
         case 'O': slcan_open = true;  Serial.write('\r'); break;
