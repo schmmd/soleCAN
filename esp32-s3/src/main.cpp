@@ -103,6 +103,39 @@
   #define CAN_TX_ENABLED 0
 #endif
 
+// ── CANopen SDO poller (opt-in) ───────────────────────────────────────────────
+// -DCANOPEN_POLL sweeps the Curtis motor controller's CANopen dictionary
+// (node 0x28, table in canopen_objects.h) with expedited SDO uploads on
+// 0x628 while the controller is alive. The 0x5A8 replies are self-describing
+// (index/sub in bytes 1-3) and reach every RX consumer — SD raw log, SLCAN,
+// socketcand — timestamped alongside the J1939 traffic; no separate file.
+// TWAI does not loop back our own TX, so the requests themselves are not
+// logged. Requires CAN_ALLOW_TX.
+#if defined(CANOPEN_POLL)
+  #if !CAN_TX_ENABLED
+    #error "CANOPEN_POLL needs -DCAN_ALLOW_TX (the poller transmits SDO requests)"
+  #endif
+  #ifndef CANOPEN_NODE
+  #define CANOPEN_NODE          0x28
+  #endif
+  #define CANOPEN_SDO_REQ_ID    (0x600 + CANOPEN_NODE)
+  #define CANOPEN_SDO_RESP_ID   (0x580 + CANOPEN_NODE)
+  #ifndef CANOPEN_POLL_GAP_MS
+    #if defined(CANOPEN_FAST)
+    #define CANOPEN_POLL_GAP_MS 0     // back-to-back: short table, maximise sweep rate
+    #else
+    #define CANOPEN_POLL_GAP_MS 5     // pause after each reply/timeout; ~2 frames per poll
+    #endif
+  #endif
+  #ifndef CANOPEN_POLL_TIMEOUT_MS
+  #define CANOPEN_POLL_TIMEOUT_MS 50  // controller answers in a few ms; python tool used 60
+  #endif
+  #define CANOPEN_ALIVE_MS      2000  // poll only while FF21CA from SA 0xCA is this fresh
+  #ifndef CANOPEN_RELOCK_MISS
+  #define CANOPEN_RELOCK_MISS   16    // consecutive timeouts before scanning for a moved node
+  #endif
+#endif
+
 // Per-board pin map. Selected via -DBOARD_* in platformio.ini.
 #if defined(BOARD_ADAFRUIT_FEATHER_S3)
   #define CAN_TX_PIN       GPIO_NUM_8
@@ -335,7 +368,7 @@ struct MotorState {
     uint8_t  range    = 1;
     // LE u16: commanded effort magnitude; peaks past 255 under hard
     // acceleration (observed 262), so a single byte would wrap.
-    uint16_t torque_raw  = 0;
+    uint16_t current_a   = 0;   // motor RMS current, 1 A/bit (FF21CA bytes 0-1)
     int8_t   controller_temp_c = INT8_MIN;
     int8_t   motor_temp_c      = INT8_MIN;
     bool     valid             = false;
@@ -445,6 +478,25 @@ uint32_t    g_last_http_ms   = 0;   // millis() at last served HTTP request (def
 uint32_t    g_can_recoveries = 0;   // bus-off recoveries initiated since boot
 uint32_t    g_socketcand_tx_dropped = 0;   // frames dropped on full client TCP buffers
 uint32_t    g_slcan_tx_dropped = 0;   // frames dropped on a full USB-CDC TX buffer (stalled reader)
+
+#if defined(CANOPEN_POLL)
+#if defined(CANOPEN_FAST)
+#include "canopen_fast.h"       // ~16 objects at ~15 Hz (experiment table)
+#else
+#include "canopen_objects.h"    // full dictionary, ~8 s per sweep
+#endif
+// One SDO upload in flight at a time, advanced by the 0x5A8 reply (seen in
+// canServiceTick) or by timeout. Runs on the loop task; never blocks.
+static struct {
+    bool     enabled = true;      // runtime switch: USB console `canopen off|on`
+    uint8_t  node    = CANOPEN_NODE;  // current target node; relocks if it moves
+    uint16_t miss    = 0;         // consecutive timeouts (node-search trigger)
+    uint16_t idx     = 0;         // next kCanopenObjects[] entry to request
+    bool     pending = false;
+    uint32_t sent_ms = 0;
+    uint32_t sweeps = 0, sent = 0, replies = 0, timeouts = 0, tx_fail = 0;
+} g_canopen;
+#endif
 bool        g_can_initialized = false;
 bool        g_ap_running      = false;
 
@@ -523,6 +575,7 @@ static bool usbModeFromName(const String& s, UsbMode& out) {
 static bool tryModeCommand(const char* line);
 static bool tryWifiCommand(const char* line);
 static bool trySdCommand(const char* line);
+static bool tryCanopenCommand(const char* line);
 void usbLoggingPoll();
 
 // NVS 'wifi' namespace overrides the compiled defaults; an absent 'ssid' key
@@ -1509,7 +1562,7 @@ void decodeCAN(uint32_t can_id, const uint8_t* raw, uint8_t len) {
         g_motor.rpm_signed         = dir * rpm_mag;
         g_motor.direction          = dir;
         g_motor.range         = ((d[7] >> 4) & 0x0F) + 1;
-        g_motor.torque_raw       = le16(d[0], d[1]);
+        g_motor.current_a        = le16(d[0], d[1]);
         if (d[4]) g_motor.controller_temp_c = (int8_t)(d[4] - TEMP_OFFSET_C);
         if (d[5]) g_motor.motor_temp_c      = (int8_t)(d[5] - TEMP_OFFSET_C);
         g_motor.valid = true;
@@ -2049,7 +2102,7 @@ String buildJson(bool pretty = true, bool minimal = false) {
             mot["rpm_magnitude"] = g_motor.rpm_magnitude;
             mot["direction"]     = g_motor.direction;
             mot["range"]    = g_motor.range;
-            mot["torque_raw"] = g_motor.torque_raw;
+            mot["current_a"]  = g_motor.current_a;
             if (g_motor.controller_temp_c != INT8_MIN)
                 mot["controller_temp_c"] = g_motor.controller_temp_c;
             if (g_motor.motor_temp_c != INT8_MIN)
@@ -2198,6 +2251,19 @@ String buildJson(bool pretty = true, bool minimal = false) {
         }
         if (g_sd_raw.dropped)  sd["raw_dropped"]  = g_sd_raw.dropped;
         if (g_sd_json.dropped) sd["json_dropped"] = g_sd_json.dropped;
+    }
+#endif
+#if defined(CANOPEN_POLL)
+    if (!minimal) {
+        auto co = doc["canopen"].to<JsonObject>();
+        co["enabled"]  = g_canopen.enabled;
+        co["node"]     = g_canopen.node;
+        co["objects"]  = (uint32_t)(sizeof kCanopenObjects / sizeof kCanopenObjects[0]);
+        co["sweeps"]   = g_canopen.sweeps;
+        co["sent"]     = g_canopen.sent;
+        co["replies"]  = g_canopen.replies;
+        co["timeouts"] = g_canopen.timeouts;
+        if (g_canopen.tx_fail) co["tx_fail"] = g_canopen.tx_fail;
     }
 #endif
 
@@ -3183,6 +3249,28 @@ static bool tryWifiCommand(const char* line) {
 #endif
 }
 
+// `canopen` / `canopen off` / `canopen on` over the USB console, in any USB
+// role. Pausing the poller frees the Curtis's single SDO server for a host tool
+// (canopen/sdo_write.py, canopen_dump.py) that needs undisturbed request/reply.
+// Not persisted: a reboot re-enables it.
+static bool tryCanopenCommand(const char* line) {
+    if (strncmp(line, "canopen", 7) != 0) return false;
+#if !defined(CANOPEN_POLL)
+    Serial.printf("canopen: poller not in this build (-DCANOPEN_POLL)\r\n");
+#else
+    const char* p = line + 7;
+    while (*p == ' ' || *p == '\t') p++;
+    if      (strcmp(p, "off") == 0) g_canopen.enabled = false;
+    else if (strcmp(p, "on")  == 0) g_canopen.enabled = true;
+    else if (*p != '\0') { Serial.printf("canopen: unknown '%s' (try: canopen | canopen off | canopen on)\r\n", p); return true; }
+    Serial.printf("canopen: %s  node=%u sent=%lu replies=%lu timeouts=%lu\r\n",
+                  g_canopen.enabled ? "on" : "off", (unsigned)g_canopen.node,
+                  (unsigned long)g_canopen.sent, (unsigned long)g_canopen.replies,
+                  (unsigned long)g_canopen.timeouts);
+#endif
+    return true;
+}
+
 #if defined(HAS_SD)
 // Never hand HWCDC more than its free ring space. Its SOF-watchdog "plugged"
 // state flaps for a few ms even on a healthy link, and a write that arrives
@@ -3284,7 +3372,7 @@ void usbLoggingPoll() {
         if (c == '\r' || c == '\n') {
             if (len > 0) {
                 buf[len] = '\0';
-                if (!tryModeCommand(buf) && !tryWifiCommand(buf)) trySdCommand(buf);
+                if (!tryModeCommand(buf) && !tryWifiCommand(buf) && !tryCanopenCommand(buf)) trySdCommand(buf);
                 len = 0;
             }
         } else if (len < sizeof(buf) - 1) {
@@ -3379,12 +3467,53 @@ static bool canTransmit0(uint32_t id, bool extd, uint8_t dlc, const uint8_t* dat
 }
 #endif
 
+#if defined(CANOPEN_POLL)
+static inline void canopenOnFrame(const twai_message_t& msg) {
+    // Any SDO response (upload, or an abort for a missing object) from the
+    // current node counts as "node is here" and clears the search state.
+    if (!msg.extd && msg.identifier == (uint32_t)(0x580 + g_canopen.node) && g_canopen.pending) {
+        g_canopen.pending = false;
+        g_canopen.replies++;
+        g_canopen.miss = 0;
+    }
+}
+
+static void canopenPollTick() {
+    uint32_t now = millis();
+    if (g_canopen.pending) {
+        if (now - g_canopen.sent_ms < CANOPEN_POLL_TIMEOUT_MS) return;
+        g_canopen.pending = false;
+        g_canopen.timeouts++;
+        // The controller's CANopen node ID has been observed to change across a
+        // key cycle (40 -> 39). Once we lose it, walk every node ID (one poll
+        // each) until a response returns, then lock on. 11-bit SDO requests
+        // don't touch the 29-bit J1939 traffic, so scanning is harmless here.
+        if (++g_canopen.miss >= CANOPEN_RELOCK_MISS)
+            g_canopen.node = g_canopen.node >= 127 ? 1 : g_canopen.node + 1;
+    }
+    if (now - g_canopen.sent_ms < CANOPEN_POLL_GAP_MS) return;
+    if (!g_canopen.enabled) return;
+    if (!g_motor.last_seen_ms || now - g_motor.last_seen_ms > CANOPEN_ALIVE_MS) return;
+    uint16_t index = kCanopenObjects[g_canopen.idx];
+    uint8_t req[8] = { 0x40, (uint8_t)(index & 0xFF), (uint8_t)(index >> 8), 0x00, 0, 0, 0, 0 };
+    g_canopen.sent_ms = now;
+    if (!canTransmit0(0x600 + g_canopen.node, false, 8, req)) { g_canopen.tx_fail++; return; }
+    g_canopen.sent++;
+    g_canopen.pending = true;
+    if (++g_canopen.idx >= sizeof kCanopenObjects / sizeof kCanopenObjects[0]) {
+        g_canopen.idx = 0;
+        g_canopen.sweeps++;
+    }
+}
+#endif  // CANOPEN_POLL
+
 void slcanHandleCommand(const char* cmd) {
     // A `mode …`, `wifi …` or `sd …` line is consumed here first; none collides
     // with SLCAN's single-letter commands (SLCAN's `s` takes hex, never `sd`),
     // so python-can is unaffected.
     if (tryModeCommand(cmd)) return;
     if (tryWifiCommand(cmd)) return;
+    if (tryCanopenCommand(cmd)) return;
     if (trySdCommand(cmd)) return;
     switch (cmd[0]) {
         case 'O': slcan_open = true;  Serial.write('\r'); break;
@@ -4023,6 +4152,9 @@ static void canServiceTick() {
             sdEnqueueRaw(msg);
         }
 #endif
+#if defined(CANOPEN_POLL)
+        canopenOnFrame(msg);
+#endif
     }
 #if defined(HAS_MCP2515)
     if (g_mcp_initialized) {
@@ -4069,6 +4201,9 @@ static void canServiceTick() {
 void loop() {
     canServiceTick();
     canRecoveryTick();
+#if defined(CANOPEN_POLL)
+    canopenPollTick();
+#endif
 
     // USB port role (g_usb_mode). slcan parses USB as SLCAN; logging streams
     // device status + accepts a `mode` command; kelly is a transparent
