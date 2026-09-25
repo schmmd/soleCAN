@@ -507,10 +507,10 @@ download and delete endpoints still address a session by its plain number.
   in `/json`) rather than blocking the CAN receive path.
 
 If the card can't be mounted at boot, `sd.state` says why: `no_card` (nothing
-answered — empty slot, wiring, or clock too fast), `card_io_error` (card
-answered but sector reads failed), `no_fat` (no FAT volume — unformatted, or
-exFAT, which the Arduino core doesn't support; SDXC cards over 32 GB ship
-exFAT, so reformat them FAT32), or `mount_err_N` (any other FatFs `FRESULT`).
+answered — empty slot, wiring, or clock too fast), `disk_error` (card
+answered but sector reads failed), `no_filesystem` (no FAT volume —
+unformatted, or exFAT, which the Arduino core doesn't support; SDXC cards over
+32 GB ship exFAT, so reformat them FAT32), or `mount_err_N` (any other FatFs `FRESULT`).
 
 Logging status shows in `/json` under `sd` (state, session, KB written, free MB,
 drops) and on the dashboard footer; full diagnostics (`raw_part`, `json_part`,

@@ -660,7 +660,7 @@ extern const uint8_t dashboard_html_end[]   asm("_binary_src_dashboard_html_end"
 #define SD_WRITE_CHUNK_BYTES 8192                     // batch writes into bursts this size
 
 struct SdState {
-    const char* state = "no_card";     // no_card | card_io_error | no_fat | mount_err_N
+    const char* state = "no_card";     // no_card | disk_error | no_filesystem | mount_err_N
                                        // | waiting | logging | error
     uint32_t          session   = 0;
     char              dir[24]   = "";  // active session dir, e.g. "/s00001" or
@@ -1074,7 +1074,8 @@ static bool sdInitRing(SdStream& s) {
 // SD.begin() collapses every failure into `false`. Re-run the mount by hand
 // to get FatFs's FRESULT and tell "nothing answered" apart from a card that
 // answers but can't be read or has no FAT volume. exFAT isn't compiled into
-// the Arduino core, so factory-formatted SDXC (>32 GB) cards land on no_fat.
+// the Arduino core, so factory-formatted SDXC (>32 GB) cards land on
+// no_filesystem. State names follow the FRESULT (FR_DISK_ERR → disk_error).
 // Returns nullptr if the mount succeeds on this second try.
 static const char* sdProbeFailure() {
     static char other[16];
@@ -1088,8 +1089,8 @@ static const char* sdProbeFailure() {
     switch (r) {
         case FR_OK:            return nullptr;          // mounted this time — retry SD.begin
         case FR_NOT_READY:     return "no_card";        // card init failed / no card
-        case FR_DISK_ERR:      return "card_io_error";  // answered, sector read failed
-        case FR_NO_FILESYSTEM: return "no_fat";         // unformatted or exFAT
+        case FR_DISK_ERR:      return "disk_error";     // answered, sector read failed
+        case FR_NO_FILESYSTEM: return "no_filesystem";  // unformatted or exFAT
         default:
             snprintf(other, sizeof other, "mount_err_%d", (int) r);
             return other;

@@ -427,7 +427,7 @@ function update(d){
     } else if(sd.state==='waiting'){
       sdTxt='<span class="ok">●</span> SD waiting for CAN';
     } else {
-      sdTxt='<span class="bad">●</span> SD '+sd.state;   // no_card / card_io_error / no_fat / mount_err_N / error
+      sdTxt='<span class="bad">●</span> SD '+sd.state;   // no_card / disk_error / no_filesystem / mount_err_N / error
     }
   }
   document.getElementById('foot').innerHTML=
