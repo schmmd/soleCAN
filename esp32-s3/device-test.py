@@ -407,6 +407,14 @@ def stage_sd(args, j: dict) -> bool:
               f"latched error: fail_op={op!r} after "
               f"{st.get('fail_kb', 0)} KB — {hint}")
         return False
+    if state in ("card_io_error", "no_fat") or str(state).startswith("mount_err_"):
+        hint = {"card_io_error": "card answered but sector reads failed — "
+                                 "reseat or replace it, or lower SD_SPI_HZ",
+                "no_fat": "no FAT volume — format the card FAT32 "
+                          "(exFAT, the SDXC factory default, is unsupported)"
+                }.get(state, "unexpected FatFs mount error")
+        check(False, "card mounted", f"state={state} — {hint}")
+        return False
     if state == "no_card":
         if args.expect_sd:
             check(False, "card mounted", "state=no_card — insert a card and "
