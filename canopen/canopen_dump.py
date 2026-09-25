@@ -30,7 +30,7 @@ def discover_node(bus, candidates=None, timeout=0.08):
     """Find the controller's live CANopen node by reading 0x1000 from each
     candidate until one answers. The Curtis picks its node ID at key-on from
     the range-switch position (Sw5/Sw6), so it varies 38..41 (R1..R3) — see
-    canopen/README.md "CAN NODE ID IS RANGE-SWITCH SELECTED". Returns the node
+    canopen/README.md "Node ID". Returns the node
     or None. Tries the common ones (40=R3, 39=R2, 38=R1, 41) before a full sweep.
     """
     import can

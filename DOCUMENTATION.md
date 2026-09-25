@@ -874,7 +874,7 @@ dictionary alongside the J1939 stream showed OEM object `0x33EA` equal to
 `data[0..1]` to within ±2 over a 14-minute drive/chip session, and Curtis
 `0x3209 Current_RMS` (0.1 A) equal to 10× that. So "262" is 262 A RMS motor
 current, and the effort reading below holds because RMS current tracks torque.
-See `canopen/README.md` "SD SESSION 137". CONFIRMED.
+See `canopen/NOTES.md` "SD SESSION 137". CONFIRMED.
 
 Two observations that establish the "effort, not pedal" reading:
 
@@ -974,7 +974,7 @@ data:
 > **Controller change, 2026-09-24:** the Curtis per-range RPM caps for
 > *reverse* in R1 and R2 were raised from 80 % of forward to equal forward
 > (1600→2000 and 2000→2500 rpm) via a persistent CANopen parameter write.
-> R3 reverse stays 2240. Details and undo in `canopen/README.md`
+> R3 reverse stays 2240. Details and undo in `canopen/README.md` (Writing parameters)
 > "SPEED-LIMIT PARAMETER BLOCK".
 
 | Mechanical range | km/h per 1000 motor RPM | km/h at 2800 RPM (max) |

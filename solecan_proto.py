@@ -107,7 +107,7 @@ LIMIT_POWER_EXTRA_LSB_W = 10              # F107F3 bytes 6-7 BE, W above 100A ch
 # Current_RMS monitor variable in whole amps (1 A/bit), i.e. the actual motor
 # phase current, NOT pedal position. CONFIRMED by CANopen cross-validation:
 # OEM object 0x33EA equals this field to +-2 and Curtis 0x3209 Current_RMS
-# (0.1 A) is exactly 10x it (canopen/README.md "SD SESSION 137"). Unsigned:
+# (0.1 A) is exactly 10x it (canopen/NOTES.md "SD SESSION 137"). Unsigned:
 # it rises under drive and regen alike; direction of work comes from the sign
 # of F100F3 pack current. Maxima observed in the corpus:
 #   - asc/full-throttle-*.asc (pedal floored, no load): 105 A

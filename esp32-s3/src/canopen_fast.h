@@ -1,4 +1,4 @@
-// Short CANopen poll table for -DCANOPEN_FAST (see canopen/README.md,
+// Short CANopen poll table for -DCANOPEN_FAST (see canopen/NOTES.md "SEAT / OPC TIMING",
 // "STATIONARY SWITCH SWEEP"): the seat-limp / max-speed / flag objects, polled
 // at ~15 Hz instead of once per 8 s. 0x1000 stays first so the capture tools'
 // sweep-boundary detection works unchanged. Hand-maintained.

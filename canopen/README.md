@@ -1,765 +1,453 @@
-CANopen decode notes — Curtis 1238E motor controller (SA 0xCA)
-================================================================
-
-WHAT THIS IS
-------------
-The motor controller answers CANopen SDO on the main 250 kbit/s bus, in
-parallel with its J1939 broadcasts. This file records what we can decode from
-that CANopen dictionary using the captures taken 2026-09-24.
-
-  CANopen node ID : range-switch selected at key-on: R1=38, R2=39, R3=40,
-                    both=41 (see "CAN NODE ID IS RANGE-SWITCH SELECTED").
-                    Dumps below were taken in R3 = node 0x28 (40).
-  SDO request     : 0x600 + node   response: 0x580 + node  (R3: 0x628/0x5A8)
-  Transfer        : expedited only (all objects <= 4 bytes; no segmented/strings)
-  Vendor          : 0x1018:01 = 0x4349 = ASCII "CI" = Curtis Instruments (CONFIRMED)
-  Model family    : Curtis E/SE series (CONFIRMED) — 0x3207 reads Motor RPM per
-                    the E/SE map, while the F-series objects (0x3536 Motor Temp,
-                    0x3538 Motor Torque, 0x34C1 Cap Volts) are ABSENT here.
-  Access seen     : SDO read-only (upload). No writes attempted.
-
-
-STATIC IDENTITY  (from canopen.txt)
------------------------------------
-  0x1009:00   "3079"  manufacturer hardware version (ASCII)          CONFIRMED
-  0x100A:00   "3178"  manufacturer software version (ASCII)          CONFIRMED
-  0x1017:00   25      producer heartbeat time (ms)                   CONFIRMED
-  0x1018:01   0x4349  vendor ID "CI" (Curtis)                        CONFIRMED
-  0x1018:04   15198   serial number                                  TENTATIVE
-  Note: TPDO mappings (0x1A00..) are configured but no PDOs are transmitted
-  (controller not in operational/SYNC mode) — telemetry is poll-only for now.
-
-DECODED OBJECTS
----------------
-
-0x33E6 — PACKED TRANSMISSION STATE (range + F/N/R)             CONFIRMED
-  value = (range << 12) | (dir << 10)
-    range: R1=0, R2=1, R3=2   (from range_r1/r2/r3 = 0x0000/0x1000/0x2000)
-    dir  : N=0,  F=1,  R=2    (from N/F/R = +0x000/+0x400/+0x800)
-  Cross-validated by two independent stages (direction sweep AND range sweep).
-  This is the CANopen analog of the J1939 data[7] packed state (DOCUMENTATION.md),
-  though the bit layout differs (dir here is 0/1/2, not the J1939 4/8).
-    baseline/neutral 0x2000  forward 0x2400  reverse 0x2800
-    R1 0x0000  R2 0x1000  R3 0x2000
-
-0x3211 / 0x3521 (and near-twins 0x3216, 0x3402) — COMMANDED TORQUE  TENTATIVE
-  Signed int16, full-scale ~±32767. Sign follows direction, magnitude follows
-  throttle:  Forward no-throttle = +1, Reverse no-throttle = -1 (0xFFFF),
-  1/4 throttle ~ +9100 (~28%), FULL throttle ~ +32670 (~100%), released -> 0/1.
-  Reads as the controller's commanded torque/current demand (% of max effort).
-
-NAMED OBJECTS — Victron curtis_e.c cross-reference
---------------------------------------------------
-Source: victronenergy/dbus-canopen-motordrive, src/drivers/curtis_e.c
-(readRoutine()). These are the Curtis E-series objects that driver polls, with
-its scalings, checked against our staged captures:
-
-  obj      name                   scaling        our reading           verdict
-  0x3207   Motor RPM              sn16, 1:1      0/776/2792/0          CONFIRMED
-  0x359E   Battery Current        sn16 * 0.1 A   0 / 2.75 A / 13.35 A  CONFIRMED
-  0x320B   Motor Temperature      sn16 * 0.1 C   18.0 C                CONFIRMED
-  0x322A   Controller Temperature sn16 * 0.1 C   19.0 -> 19.8 C        CONFIRMED
-  0x306C   Swap_Two_Phases        bit 3 (&0b1000) 211 -> bit3=0 (off)  TENTATIVE
-  0x324C   Capacitor_Voltage      u16 / 64  V    raw 4634 = 72.4 V     CONFIRMED
-
-  0x324C: the Curtis E-manual names it Capacitor_Voltage (raw 0-12800 = 0-200 V,
-  i.e. /64 — the same scale Victron uses). Raw 4634 (bytes 1a 12) / 64 = 72.4 V,
-  matching the 72 V nominal pack (DOCUMENTATION.md: 73.0 V observed). An earlier
-  revision of these notes claimed "463 V, needs /384": that was an analysis error
-  (a x0.1 scale applied by mistake, then a raw back-derived from the wrong
-  number). Victron's scaling was right all along.
-  0x324D Keyswitch_Voltage uses a DIFFERENT scale: manual range 0-10500 =
-  0.0-105.0 V, i.e. /100 (not /64). Raw 7233 / 100 = 72.3 V — matches the pack
-  and the capacitor reading. CONFIRMED. (Lesson: each Curtis monitor variable
-  carries its own scale; take it from the manual's raw-vs-display range pair.)
-
-  Battery Current (0x359E) rising 0 -> 2.75 A -> 13.35 A with throttle and
-  returning to 0 is consistent with spinning the motor unloaded in mechanical
-  neutral. Controller temperature rising monotonically 19.0 -> 19.8 C across the
-  session is independent corroboration that the scaling is right.
-
-  SUPPLEMENTAL VALUE: Battery Current (0x359E) and Battery Voltage (0x324C) are
-  NOT in the J1939 FF21CA broadcast — these are genuinely new quantities from the
-  controller's own sense, and together give controller DC power draw. Motor RPM
-  and both temperatures duplicate J1939 fields (useful as cross-validation).
-
-0x3207 — MOTOR RPM                                              CONFIRMED
-  0 at rest, 1/4 throttle 776, FULL throttle 2792, released -> 0.
-  Triple-validated: (a) 0x3207 is the published Curtis E/SE-series "Motor RPM"
-  index in victronenergy/dbus-canopen-motordrive; (b) the value is physically
-  plausible; (c) the throttle test ran in R3, and 2792 lands on the documented
-  R3 cap of 2800 RPM (DOCUMENTATION.md). Unlike J1939 FF21CA (magnitude only),
-  this is the same quantity but poll-addressable.
-
-0x3594 / 0x3595 / 0x35D1 / 0x35C8 — MOTOR RPM MIRRORS            TENTATIVE
-  Same 0 -> ~776 -> ~2792 profile as 0x3207 (0x35C8 slightly higher: 952/2832,
-  possibly commanded vs actual speed). Curtis mirrors values at several indices.
-  CORRECTION: an earlier pass here mislabelled these as "motor current" — the
-  RPM cross-reference shows they track speed, not current. We currently have
-  NO confirmed motor-current object; 0x33EF (below) is the only current-like one.
-
-0x35B7 (and 0x35AA/0x3591; also 0x3590/0x35FC/0x35FF) — INVERSE-WITH-LOAD  TENTATIVE
-  Constant at rest (0x35B7 = 9192), DROPS under throttle (FULL ~ 2460),
-  independent of direction/range/PTO. Candidate: capacitor/KSI voltage sag,
-  or an available-current / max-available-torque headroom that shrinks as
-  commanded torque rises.
-
-0x33EF — LOAD / CURRENT (load-sensitive)                        TENTATIVE
-  Responds to EVERY load path — throttle, hydraulics, PTO — so it is a
-  pack/capacitor current-type reading, not a per-function flag.
-  High byte tracks load: rest ~0x10, 1/4 throttle 0x28, FULL 0x8f,
-  hydraulics-on 0xD6, PTO 0x36. Low byte pinned at 0x7d (possible second
-  packed field). Values > 32767 suggest signed (bipolar charge/discharge).
-  *** This is the object that proves hydraulics (a SEPARATE Kelly controller)
-      is visible on the Curtis only INDIRECTLY, via shared-pack current. ***
-
-0x3226 — SWITCHES (digital-input word, Sw_1..Sw_16)             CONFIRMED
-  The manual lists every Sw_N monitor bit at 0x3226:00 ("Switches [Bit N-1]").
-  Our values are bit patterns, consistent across the direction AND range stage
-  sets (bit n <-> Sw_(n+1), pin numbers from the manual's monitor table):
-      bit 6  Sw_7   pin 22   FORWARD  (set only in the forward stages)
-      bit 7  Sw_8   pin 33   REVERSE  (set only in the reverse stage)
-      bit 3  Sw_4   pin 10   range R1 (turtle)
-      bit 4  Sw_5   pin 11   range R2
-      bit 5  Sw_6   pin 12   range R3 (rabbit)
-      bit 2  Sw_3   pin 9    always on  } enables / interlock-type inputs,
-      bit 10 Sw_11  pin 4    always on  } (Driver 3 input) — not exercised
-    e.g. neutral+R3 = 0x424 (bits 2,5,10); forward+R3 = 0x464 (+bit 6);
-         reverse+R3 = 0x4A4 (+bit 7); neutral+R1 = 0x40C (bits 2,3,10).
-  0x3224 = the low byte (Sw_1-8) and 0x3225 = the high byte (Sw_9-16) of the
-  same word (0x3225 = 4 = bit 2 = Sw_11, matching bit 10 above).
-
-  This is the hardware answer to "how does the F/N/R lever reach the bus": the
-  lever and range switch close discrete switch inputs on the Curtis 35-pin
-  connector (pins 22/33 and 10/11/12); the controller latches them here, and
-  the OEM VCL program derives the packed 0x33E6 state and the J1939 data[7]
-  nibbles from them.
-
-HYDRAULICS ON/OFF  (hyd_test.csv, deleted)                     TENTATIVE
-  16 objects moved beyond noise; dominant is 0x33EF (see above). The Kelly
-  hydraulic pump has no direct Curtis object — its footprint is the extra
-  pack current it draws, seen via 0x33EF and its 0x33Ex/0x33Fx neighbours.
-
-OFFICIAL OBJECT NAMES — Curtis E-series manual (OS 30)
---------------------------------------------------------
-Source: Curtis "1232E/34E/36E/38E & 1232SE/34SE/36SE Enhanced AC Controllers"
-manual, OS 30 (p/n 53134). Every parameter and monitor variable is printed
-with its CAN object index + subindex, e.g.
-      Max Speed          100 - 8000 rpm
-      Max_Speed_SpdM     100 - 8000
-      0x3011 0x00
-so the manual IS the object dictionary. Parsed into:
-  canopen/curtis_e_od_map.csv 308 indices -> VCL name / display name / ranges
-                             (display_name is best-effort; vcl_name is reliable)
-  canopen_named.csv          all 1420 of our sub0 objects joined to that map:
-                             284 carry an official Curtis name (20%).
-
-Scaling rule: each monitor variable has its own scale, read off the manual's
-raw-range vs display-range pair. Confirmed against our data:
-  0x3207 Motor_RPM               1:1 rpm, signed (sign = direction)
-  0x320B Motor_Temperature       /10 C     18.0 C
-  0x322A Controller_Temperature  /10 C     19.0-19.8 C
-  0x324C Capacitor_Voltage       /64 V     72.4 V   (0-12800 = 0-200 V)
-  0x324D Keyswitch_Voltage       /100 V    72.3 V   (0-10500 = 0-105 V)
-  0x3209 Current_RMS             /10 A     3.0 -> 24.0 -> 34.4 A with throttle
-                                            (motor RMS current, unloaded spin)
-  0x3208 Modulation_Depth        0-1182    9 -> 145 -> 693 with throttle
-  0x3206 Frequency               ~2 x rpm  (electrical speed; 4-pole motor)
-  0x3211 Mapped_Throttle         +-32767 = +-100 %   (was "torque cmd" here)
-  0x3216 Throttle_Command        +-32767 = +-100 %
-  0x3308 BDI_Percentage          0-100 %   37 %  (= BMS shown SOC, relayed by
-                                            the VCL; see SUB-INDEX WALK)
-  0x3559 Max_Speed_Controller_Limit  8000  constant; the controller ceiling,
-                                            NOT the range cap
-  0x3581/0x35F3/0x3604/0x3605    cutbacks (motor-temp / ctrl-temp / over-V /
-                                 under-V); 4096 = 100 % = no cutback
-  0x3223 Main_State              5         main-contactor state machine
-  0x3892 EMBrakeState            2
-  0x3160 Master_Timer            the monotonic counter excluded below — now
-                                 confirmed as the OS master timer
-  0x35D1/0x35D2 MotorspeedA/B    encoder phase A/B speed (the "RPM mirrors")
-  0x306C Swap_Two_Phases         (Victron reads bit 3 as swap-direction)
-  0x3011 Max_Speed_SpdM = 2800   the stock Curtis Max Speed (speed mode)
-  0x3021 Max_Speed_TrqM = 4000   Max Speed (torque mode)
-
-Our earlier behavioral labels were right in kind but the official names are
-sharper: the "commanded torque" cluster is Mapped_Throttle / Throttle_Command
-(a throttle %, not torque), and the "current" cluster was really RPM/encoder
-speed. Motor current proper is 0x3209 Current_RMS.
-
-STOCK CONFIG SNAPSHOT (static params, named by the manual)      CONFIRMED
-  0x3010 Control_Mode_Select      1      = Speed Mode (0 speed-express, 2 torque)
-  0x3011 Max_Speed_SpdM           2800 rpm  (the R3 cap is the stock max; VCL
-                                            lowers it for R1/R2 via 0x3103-08)
-  0x3012 Kp_SpdM / 0x3015 Ki_SpdM 2458 / 300
-  0x305B Drive_Current_Limit      16384  = 50 % of controller rated current
-  0x305C Regen_Current_Limit      32767  = 100 %
-  0x305D Brake_Current_Limit      32767  = 100 %
-  0x3000 Throttle_Type            2      0x300A Brake_Type 2
-  0x3001..0x3008 Forward/Reverse Deadband/Map/Max/Offset (throttle shaping)
-  Full list with values: canopen_named.csv (filter vcl_name != "").
-
-UNNAMED BLOCK = OEM (Solectrac) VCL VARIABLES                     TENTATIVE
-  0x33E6 (packed range+dir), 0x33EF (load), 0x3521 (throttle copy), 0x35B7
-  cluster, and the 0x3103-0x3108 speed table are NOT in the Curtis manual. The
-  manual documents VCL RAM variables User1-User120 / AutoUser1-300 but does not
-  publish their CAN indices, so these are almost certainly variables of the
-  Solectrac VCL application program running on the controller. That fits: the
-  per-range speed table and the tractor-specific packed state are OEM logic,
-  not stock Curtis parameters. Decoding them stays behavioral.
-
-WRITING PARAMETERS (from the manual's CAN section)
-  SDO writes ARE supported and take effect in RAM immediately. They are
-  VOLATILE across a key-cycle unless CAN_EE_Writes_Enabled (0x332F:00) is set
-  non-zero first, which makes every subsequent write hit EEPROM at once. Manual
-  CAUTION: do not leave 0x332F non-zero during normal operation (EEPROM wear).
-  Practical upshot: with 0x332F = 0, an experimental SDO write is self-reverting
-  on the next key cycle — the safer way to test anything.
-
-  FIRST WRITE (2026-09-24, canopen/sdo_write.py, RAM only):      CONFIRMED
-    0x3104 (R3 reverse cap) 2240 -> 2000: expedited download 0x2B acked with
-    0x60, read back 2000, UserFault1 stayed 0, no cluster fault. Tractor
-    stationary, neutral, post-power-up hold (0x3011 = 1200 at the time).
-    The write needed 4 tries: the firmware poller (~200 SDO/s) contends for
-    the controller's single SDO server and requests get dropped silently;
-    sdo_write.py retries every transfer. Whether the VCL picks the new
-    table value up live (0x3011 -> 2000 on R3+reverse) is the follow-up
-    check; see sdo_write.py for the guards (0x332F must be 0, motor
-    stopped, lever neutral, value within sub 3/4 min..max).
-
-SPEED-LIMIT PARAMETER BLOCK (0x3103-0x3108)                    CONFIRMED
-------------------------------------------------------------------------
-  0x3103 = 2800   0x3104 = 2240      R3 (rabbit)  forward / reverse
-  0x3105 = 2000   0x3106 = 1600      R1 (turtle)  forward / reverse
-  0x3107 = 2500   0x3108 = 2000      R2           forward / reverse
-
-  All three documented RPM caps (2000/2500/2800, DOCUMENTATION.md) are present
-  here as STATIC parameters, each paired with exactly 80% of itself. That 0.8
-  ratio independently corroborates the "controller-side reverse-effort limiter"
-  already documented for the J1939 decode.
-
-  These do NOT change when the range switch moves: all three caps are stored
-  simultaneously and the switch merely SELECTS among them. That is why a
-  diff-across-range-stages analysis finds only 0x33E6 (the selector position)
-  and never the limits themselves. Duplicates of the same constants also appear
-  at 0x3011/0x3016/0x306E/0x3077/0x3089/0x309E.
-
-  RESOLVED: 0x3011/0x306E are the ACTIVE limit, rewritten by the VCL per
-  range+direction — see "ACTIVE SPEED LIMIT + RANGE MECHANISM" below.
-
-  NOTE FOR WRITES: this block is the obvious target if anyone ever wants to
-  change the speed caps — and therefore also the most safety-relevant.
-
-  *** CHANGED FROM STOCK on 2026-09-24 (owner decision, canopen/sdo_write.py
-  --persist, committed to EEPROM, verified after a key cycle): ***
-      0x3106  R1 reverse cap  1600 -> 2000  (= R1 forward)
-      0x3108  R2 reverse cap  2000 -> 2500  (= R2 forward)
-  0x3104 (R3 reverse, 2240) is unchanged. The stock values are recorded above
-  and in canopen_full.txt; undo is the same command with the old values.
-  Any analysis of reverse behaviour after this date must account for it.
-
-ACTIVE SPEED LIMIT + RANGE MECHANISM                            CONFIRMED
---------------------------------------------------------------------------
-Capture: canopen/limit.csv (FORWARD held, range stepped R1->R2->R3).
-
-  0x33D1  active speed limit   2000 / 2500 / 2800 rpm for R1 / R2 / R3
-  0x3011  Max_Speed_SpdM       2000 / 2500 / 2800  (stock Curtis parameter!)
-  0x306E, 0x3593, 0x3840 (Max_Speed_SpdMx)  same three values
-  0x3103-0x3108  static table  UNCHANGED (2800/2240, 2000/1600, 2500/2000)
-
-Full chain, end to end:
-  range knob closes Sw_4/Sw_5/Sw_6 (pins 10/11/12)
-    -> OEM VCL reads the switch word 0x3226
-    -> looks up the static per-range table at 0x3103-0x3108
-    -> WRITES Max_Speed_SpdM (0x3011) + mirrors; active limit shows at 0x33D1
-    -> publishes packed state 0x33E6, the source of the J1939 data[7] nibbles
-
-So the range switch is implemented by the OEM VCL program rewriting the stock
-Curtis Max Speed parameter at runtime. This is why the original guided session
-found no object that "changed with the knob": direction was NEUTRAL throughout
-those stages, and the limit only updates when a direction is selected. 0x33D1
-latches on direction change (Forward -> fwd cap, Reverse -> 80% cap) and holds
-through neutral.
-
-Re-confirmed independently in this capture with direction held constant:
-  0x33E6 = 0x400/0x1400/0x2400 = (range<<12)|(dir<<10), dir=1 Forward
-  0x3226 = 1100/1108/1124 = Sw_4/Sw_5/Sw_6 set, Sw_7 (Forward) set throughout
-
-PARKING BRAKE — NOT VISIBLE TO THE CURTIS                       CONFIRMED
---------------------------------------------------------------------------
-Capture: canopen/pbrake.csv (brake set vs released). Every candidate object is
-byte-identical across the two states:
-  0x3226 Switches 1124 -> 1124, 0x322B System_Flags1 5 -> 5,
-  0x3892 EMBrakeState 2, 0x3223 Main_State 5,
-  0x321A Brake_Command 0, 0x3212 Mapped_Brake 0
-The only movers are known idle-noise objects, 0x3160 Master_Timer, and
-0x322A Controller_Temperature (11.5 C -> 11.65 C; it read 19 C the previous
-evening — overnight cooling, and incidental corroboration of the /10 scaling).
-
-Matches the wiring: DOCUMENTATION.md:1310 puts PARKING BRAKE (-) on the CLUSTER
-connector (J23/ID18), not the controller — same as PTO. Do not re-test this on
-the Curtis; look at the cluster's J1939 traffic instead (DOCUMENTATION.md:1205
-notes the F100D0 OPC-state byte is consistent with park brake).
-Caveat: a null diff cannot distinguish "no signal" from "not actually toggled";
-the cluster wiring is what makes the first reading the likely one.
-
-Brake_Command / Mapped_Brake read 0 throughout: the Curtis brake-PEDAL (regen)
-input is not driven on this machine at all.
-
-PDO CONFIGURATION — CONFIGURED BUT DORMANT                      CONFIRMED
---------------------------------------------------------------------------
-*** Curtis packs PDO mapping entries BYTE-REVERSED from the CANopen standard.
-Decode a mapping entry value v as:  index = v & 0xFFFF,
-sub = (v>>16) & 0xFF, bits = (v>>24) & 0xFF   -- NOT the standard
-(index<<16)|(sub<<8)|len, which yields nonsense (211-bit entries). ***
-16-bit values are mapped as two 8-bit halves (sub 00 + sub 01).
-
-  TPDO0  CAN 0x1A8 (=0x180+node)  event-driven(254), 64 bits:
-           0x33D3(OEM) | 0x3226 Switches | 0x3207 Motor_RPM | 0x3209 Current_RMS
-  TPDO1  CAN 0x2A8 (=0x280+node)  event-driven(254), 64 bits:
-           0x3204 Analog1 | 0x322A Ctrl_Temp | 0x320B Motor_Temp |
-           0x3217 Pot2_Raw | 0x3215 Throttle_Pot_Raw
-  RPDO0  CAN 0x228 (=0x200+node)  40 bits: 0x33D1 | 0x3218 | 0x33D2
-  RPDO1  CAN 0x328  empty
-
-RPDO0 means Solectrac designed a CAN command path INTO the Curtis (speed limit
-0x33D1 + throttle 0x3218) that this tractor does not use -- it is driven by the
-hardwired switch inputs instead. No 11-bit frames are on the bus at all.
-
-*** DO NOT casually NMT-Start this node to enable the TPDOs. ***
-  0x3328 CAN_NMT_State         = 127 = Pre-operational (so PDOs are off)
-  0x3149 CAN_PDO_Timeout_Period = 25  (range 0-50; 0 = disabled)
-PDO timeout monitoring is ENABLED while RPDO0 is never transmitted, so going
-Operational risks fault Code 72 (PDO Timeout) on the traction controller. The
-gain would only be RATE -- every object in TPDO0/TPDO1 is already SDO-readable.
-Not worth it unless sub-100 ms transients are needed, and then only after
-setting 0x3149 = 0, which is a parameter write on a safety path.
-
-THROTTLE PEDAL (new quantity, not on J1939)                     CONFIRMED
---------------------------------------------------------------------------
-  0x3215 Throttle_Pot_Raw  0-36044 = 0.0-5.5 V at the pedal wiper
-         rest 4000 = 0.61 V | 1/4 throttle 10110 = 1.54 V | full 29204 = 4.46 V
-  0x3217 Pot2_Raw    5280 constant (unused input)
-  0x3204 Analog1     5 constant (unused input)
-  0x3218 OEM throttle copy, +-32767 signed, sign = direction (mirrors 0x3211/
-         0x3216 Mapped_Throttle / Throttle_Command); it is the RPDO0 input.
-
-0x322B System_Flags1 — OPERATOR INTERLOCK (bit 5)               CONFIRMED
---------------------------------------------------------------------------
-  bit 5 (0x20) = INTERLOCK. Set = controller accepts the throttle; clear =
-                 pedal is ignored entirely.
-  bit 2 (0x04) = at-rest / not-driving flag; clears while throttle is applied.
-  bit 0 (0x01) = set in every capture so far (unknown).
-
-Evidence (three captures, two states):
-  guided session, at rest      0x322B = 37 = 0b00100101  bit5 SET   motor responds
-  guided session, full throttle        = 33 = 0b00100001  bit5 SET   2792 rpm
-  fault test                           =  5 = 0b00000101  bit5 CLEAR motor dead
-
-In the fault test the pedal swept its full range (Throttle_Pot_Raw 4000 ->
-29174, i.e. 0.61 V -> 4.46 V at the wiper) yet Throttle_Command stayed 0 and
-Motor_RPM stayed 0. Bit 5 is the only state difference between that capture and
-the guided session, where an identical pedal press produced Throttle_Command
-32669 and 2792 rpm. The Curtis map's display name for 0x322B is "Interlock".
-
-Practical consequence: the interlock gates the whole drive path. With it open
-the controller does not evaluate the throttle sequence at ALL, so interlock-
-dependent faults (HPD / sequencing, code 47) cannot be provoked. Any drive-
-related test must first confirm 0x322B bit 5 is set.
-
-FAULT CHANNELS — BASELINE ESTABLISHED, FAULT NOT YET PROVOKED   TENTATIVE
---------------------------------------------------------------------------
-Capture: canopen/fault.csv (60 s; pedal pressed in an attempt to provoke HPD).
-Attempt was VOID because the interlock was open (see above) — recorded here for
-the baseline it established, not for a fault result.
-
-  J1939 DM1 (PGN 0xFECA): broadcast at ~1 Hz, payload 000000000000ffff
-                          = the NO-ACTIVE-FAULTS idle pattern. Useful baseline
-                          for the DM1 decoder.
-  CANopen EMCY (0x80+node = 0x0A8): ZERO frames seen.
-  No 11-bit frames of any kind on the bus (consistent with Pre-operational,
-  0x3328 CAN_NMT_State = 127, and with PDOs being dormant).
-
-Still OPEN: whether a real fault raises EMCY on this node, and whether the
-acolomb bit->code table (EMCY code 0x1000 = Status1-5, 0x1001 = Status6-9;
-HPD = Status2 bit 0) matches the J1939 DM1 code for the same event. Retry with
-the interlock engaged: confirm 0x322B = 37, then press the pedal in NEUTRAL.
-Tool: canopen/fault_capture.py (logs EMCY + DM1 + a 10-object SDO poll; its SDO
-reader logs rather than discards non-SDO frames, so nothing is lost).
-
-SD SESSION 137 — 14 min OF REAL WORK (driving + woodchipping), 2026-09-24
---------------------------------------------------------------------------
-  Source: first run of the firmware poller (-DCANOPEN_POLL). 106,011 SDO
-  replies = ~75 full sweeps of all 1420 sub0 objects, interleaved with 47,552
-  FF21CA frames, so every CANopen sample has a J1939 motor state within ~20 ms.
-  Phases (from FF21CA rpm): idle 14-90 s; driving 90-200 s (F and R seen);
-  gap 210-420 s (controller silent, poller paused); 420-820 s steady ~2860 rpm
-  forward R3 = the chipping run. Tool: canopen/analyze_asc.py (per-object
-  correlation + linear fit vs J1939 rpm and FF21CA bytes 0-1). 1241 objects
-  were constant for the whole run; 179 moved.
-
-  *** HEADLINE: the J1939 FF21CA "torque" field IS MOTOR RMS CURRENT ***  CONFIRMED
-    0x33EA == FF21CA bytes 0-1 exactly   (fit b=1.0006, a=0.00, worst residual 2
-                                          over 75 samples spanning 2..123)
-    0x3209 Current_RMS (0.1 A) == 10 x 0x33EA  (b=10.04, worst residual 49 =
-                                          sampling skew on a moving value)
-    => FF21CA bytes 0-1 are Current_RMS in whole amps (1 A/bit), i.e. the
-    controller's actual motor phase current, not a % effort. The corpus maxima
-    in solecan_proto.py (105 / 204 / 262) are therefore 105 / 204 / 262 A RMS,
-    and the "effort" reading in DOCUMENTATION.md holds only in the sense that
-    RMS current is proportional to torque. Peak seen this run: 143 A chipping.
-
-  0x33FC == |rpm| + 3200                                              CONFIRMED
-    b=1.0006 a=3199.93 worst residual 18. 3200 = 0x0C80 = RPM_BIAS, so 0x33FC
-    is the very variable the VCL copies into FF21CA bytes 2-3. 0x33EA/0x33FC
-    (OEM block) are the FF21CA staging variables.
-
-  Named Curtis monitor variables, now confirmed under real load:
-    0x320A Vehicle_Speed   = 0.0394 x rpm (worst residual 0.9; 112 at 2800
-                             rpm = 11.2 mph = 18.0 km/h). Unit 0.1 mph, from a
-                             FIXED ratio configured for HIGH mechanical range
-                             (DOCUMENTATION.md: H/Agri 17.5 km/h at 2800 rpm;
-                             owner confirms ~11 mph is the high-gear top
-                             speed). Correct only in H; over-reads by the gear
-                             ratio in M and L (Curtis cannot see the range
-                             lever).                                 CONFIRMED
-    0x3206 Frequency       = 2.008 x signed rpm (worst residual 108). Electrical
-                             speed = rpm x pole pairs, so a 4-pole motor. CONFIRMED
-    0x3208 Modulation_Depth 0..1235 (manual 0-1182 = 0-100 %), r=.97 with rpm,
-                             saturates around 2800 rpm.               CONFIRMED
-    0x3215 Throttle_Pot_Raw 4000..29134 (0-36044 = 0-5.5 V): 0.61 V foot off,
-                             4.45 V floored. 0x30D2 is an identical copy.
-    0x393A                 = |rpm| (unsigned copy, residual 49)     CONFIRMED
-    0x35D1/0x35D2/0x35D6   ~ |rpm| but with up to 1000 rpm of lag/noise —
-                             filtered or encoder-phase speeds, not the same
-                             sample as 0x3207.
-    0x355E                 ~ 2 x rpm, noisy (Frequency's filtered twin?)
-    0x354E/0x35D3/0x3553/0x35AC  ~ 10-14 x Current_RMS, noisy: current mirrors
-                             on different filters (0x35D3 slope 13.7 — maybe a
-                             different phase or a peak, not RMS).      TENTATIVE
-    0x359E Battery_Current = 6.45 x FF21CA current - 47 (r=.76): pack current
-                             is motor current x modulation, as physics says.
-    0x324C Capacitor_Voltage 4634 -> 4497 (72.4 -> 70.3 V) sag under load,
-                             r=-0.78 with current.                    CONFIRMED
-    0x35BF Time_to_Capture_Speed_1  0 idle, 3363 (33.6 s) after the first
-                             drive, small values later: a stopwatch.
-
-  Load-inverse cluster (0x35B7/0x35B8/0x35B9/0x35EA/0x3590/0x3591/0x35FC/0x35FF):
-    all fit value = a - b x |rpm| with b 0.3..1.6 and large residuals; still
-    "headroom that shrinks with speed". Unchanged: TENTATIVE.
-
-  Status / flag objects that switch with motion (all OEM block):     TENTATIVE
-    0x3602   5 at rest, 640 whenever rpm != 0 (51 of 55 moving samples)
-    0x3540   1 at rest, 0 whenever moving  (a "stationary"/interlock bit)
-    0x3228   256 at rest; 384 (=256|128) and 448 (=256|128|64) while moving —
-             a bitfield, bits 6/7 set by activity.
-    0x33E6   0x2400 (F, R3) for the whole chipping run; 0x2800 (R) glimpses
-             while manoeuvring. Consistent with the earlier decode.
-
-  REVISED: 0x33EF is NOT a load/current reading.
-    At rest it sits near 5500-6500 and drifts slowly; whenever the motor turns
-    it takes values across the full +-32k range with no correlation to rpm or
-    current (r < 0.3). That is the signature of a wrapping u16 rotor/electrical
-    angle (or an instantaneous AC sample), not a current. The earlier
-    "responds to every load path" was the shaft creeping. Now TENTATIVE
-    "motor position/angle".
-
-  Free-running counters (uniform distributions, no phase dependence):
-    0x3332 0..99, 0x3338 0..9, 0x3339 0..19, 0x3330 397..499, 0x3336 9986..9999,
-    0x3510 265..7231. Timers / modulo counters; exclude from state analysis.
-  Zero-centred small dither (0x350E, 0x3554, 0x3555, 0x38CC, 0x35C1, 0x35C6,
-    +-150..700): instantaneous phase quantities, not state.
-
-STATIONARY SWITCH SWEEP (canopen_stages.csv, 2026-09-24)
---------------------------------------------------------
-  Tool: canopen/canopen_stages.py (passive: listens to the firmware poller
-  over SLCAN, one stage per input change, 2 sweeps per stage) and
-  canopen/analyze_stages.py (last full sweep per stage vs baseline). Key on,
-  motor stopped throughout, so the ~150 rpm/current-driven objects were quiet.
-  Stages seat_empty and lever_f are VOID: the first version of the script did
-  not flush the serial backlog, and those two stages were consumed entirely
-  from replies buffered before the input changed (fixed since).
-
-  NOT VISIBLE TO THE CURTIS (no object moved beyond idle drift):    CONFIRMED
-    brake pedal, parking brake, hydraulics switch, PTO switch.
-    0x3226 Switches did not change for any of them, so none is wired to a
-    Curtis switch input. Consistent with DOCUMENTATION.md: the PTO indicator
-    lands on the cluster, and the hydraulic pump is the Kelly's business.
-
-  SEAT (operator presence) -> "LIMP" = POWER-UP STATE   (superseded, see
-  "SEAT / OPC TIMING" below: leaving the seat powers the Curtis DOWN after
-  7 s; what follows is its restart defaults, held until the lever moves)
-    Standing up (seen from the seat_back stage onward, since seat_empty is
-    void) left the controller in a reduced state that PERSISTED after sitting
-    back down, through hyd/pto stages, and cleared only once the lever was
-    moved:
-      0x3011 Max_Speed_SpdM     2240 -> 1200 rpm   (also mirrored in 0x306E,
-      0x3593, 0x3840 Max_Speed_SpdMx, and 0x33D1 the RPDO speed-limit input)
-      0x3213 Throttle_Multiplier 128 -> 0          (throttle scaled to zero)
-      0x3228 (OEM flag word)    384 -> 256         (bit 7 cleared)
-      0x38C7 Rotor Position      58 -> 0
-      0x35AA                   9192 -> 200, 0x35AB 0 -> 200
-    0x322B Interlock stayed 37 (bit 5 set) throughout: the seat is NOT the
-    Curtis interlock input; the VCL learns of it some other way and enforces
-    it by rewriting the speed/throttle parameters. 0x35AA collapsing to 200
-    supports reading the 0x35B7/0x35AA cluster as "available headroom":
-    it is a limit, and the limp slammed it.
-
-  0x3011 Max_Speed_SpdM is REWRITTEN BY THE VCL                     TENTATIVE
-    2240 rpm for the whole stationary session, in every range (the stock
-    snapshot read 2800; session 137 reached 2860 rpm), 1200 during the seat
-    limp. So the 2800 cap is not a fixed parameter but something the VCL
-    computes; 2240 = 80 % of 2800 may be a "no throttle / stationary" value.
-    Watch it against throttle in a future drive capture.
-
-  Re-confirmed: 0x3226 bit 7 (reverse), bits 3/4/5 (R1/R2/R3), 0x3224 low
-  byte mirror, 0x33E6 packed state (R1=0x0000 R2=0x1000 R3=0x2000, +0x800 R),
-  and the throttle cluster (0x3211/0x3216/0x3218/0x3521 ...) reading -1 in
-  reverse at zero throttle.
-
-  0x3228 OEM flag word, observed values: 384 rest, 256 seat-limp, 320 lever R,
-  448 after returning to N, 496 in R1, 504 in R2/R3. Bits 3-6 came on during
-  the lever/range stages and never went off again: latching "seen" bits
-  rather than live state. Still TENTATIVE.
-
-SEAT / OPC TIMING AT 15 Hz (fast table, seat_10s.csv + fast run, 2026-09-24)
------------------------------------------------------------------------------
-  Firmware -DCANOPEN_FAST (src/canopen_fast.h, 16 objects, ~15 sweeps/s),
-  canopen_stages.py --stages seat --secs 10, analyze_stages.py --order.
-
-  LEAVING THE SEAT POWERS THE CURTIS DOWN after the 7 s OPC timer   CONFIRMED
-    Stand-up at ~1.5 s into the stage; nothing at all changes until 8.33 s
-    (= the service manual's 7 s OPC timer, DOCUMENTATION.md §F100D0). Then,
-    within 100 ms, in this order:
-      8.33  0x3226 Switches   1060 -> 36 -> 0    bit 10 (Sw_11, pin 4) drops
-                                                 FIRST, then every input
-      8.35  0x3011 Max_Speed  2000 -> 0          (0x3840 likewise)
-      8.36  0x306E/0x3593     2000 -> 1994 -> ... decaying ramps
-      8.38  0x3228 flag word   376 -> 1404
-      8.39  0x322B Interlock    37 -> 4 -> 68
-      8.40  0x33E6             8192 -> 0
-    and then the controller stops answering and its J1939 stops: the OPC
-    relay cuts the Curtis's keyswitch. So Sw_11 (previously "always on, not
-    exercised") is the OPC enable input, and the "seat limp" seen in the
-    stationary sweep was simply the controller's POWER-UP state after this
-    shutdown and the re-key.
-
-  POWER-UP / NEUTRAL-START SEQUENCE (fast run, seat_back + lever_f)  CONFIRMED
-    On (re)start: Switches 1316, Interlock 69 -> 5 -> 37, Max_Speed 1200,
-    Throttle_Multiplier 0, 0x35B7 ramps 4656 -> 9192 over ~1 s. The 1200 rpm
-    cap and zero throttle multiplier HOLD until the lever leaves neutral:
-    lever F -> 0x3213 0 -> 128, 0x3011 1200 -> 2800 at once, 0x306E/0x3593
-    ramp 1200 -> 2800 in ~200 rpm steps (~1 s). 0x306E/0x3593 are therefore
-    the RAMPED speed limit that follows 0x3011; 0x3840 and 0x33D1 are copies.
-
-  0x3011 Max_Speed_SpdM at rest = the LAST SELECTED range+direction entry of
-    the 0x3103-0x3108 table (2240 = R3 reverse in the switch sweep, 2000 = R1
-    forward / R2 reverse in the seat run, 2800 = R3 forward after lever F),
-    and 1200 after power-up until the lever first leaves neutral. Nothing
-    new; see "ACTIVE SPEED LIMIT + RANGE MECHANISM".
-
-  0x33EF (rotor angle hypothesis) — DROPPED. At rest it dithers in 256 steps
-    around a slowly drifting value; under throttle it sweeps +-25k within a
-    second. Not a clean angle at 15 Hz. Unknown; low priority.
-
-  0x35AA/0x35B7 behave as a ramping limit: 9192 at rest, converging to ~3670
-    under throttle in every range, reset-ramp on power-up. Consistent with an
-    available-current / headroom ramp. TENTATIVE.
-
-0x3160 MASTER_TIMER — KEY-ON RUN-TIME COUNTER, NOT A CLOCK        CONFIRMED
---------------------------------------------------------------------------
-  Rate: 9.57 ticks/s while the controller is powered, measured two ways
-  (session 137 poll timebase 9.575; canopen_ts.csv wall clock 9.560). Not
-  10 Hz: either an odd tick period or a ~4 % slow Curtis clock.
-  Stops when off: 21:05 (2026-09-23) -> 08:59 (2026-09-24) advanced 6,095
-  ticks = ~10.6 min of key-on time in a 12 h interval. Did not count while
-  parked/charging overnight.
-  Persists across key cycles and the OPC power-down (EEPROM-backed).
-  Value at end of session 137: 6,520,553 ticks = ~189 h of controller-on
-  time, vs 118.1 h on the dashboard hour meter at the same time. The two
-  meters count different things; most likely the dash counts a narrower
-  condition (motor turning / OPC active) while the Curtis counts every
-  powered second. Check: note both, use the tractor a few hours, compare
-  increments (9.57 ticks per dash-second => dash counts key-on time).
-  Use: monotonic run-time stamp to order sessions and measure controller-on
-  time between them. Cannot give wall-clock time.
-
-REFERENCE HUNT (2026-09-24): PUBLIC SOURCES ARE EXHAUSTED AT ~300 NAMES
-------------------------------------------------------------------------
-  Searched for a Curtis E-series EDS / full object dictionary. Findings:
-  - Curtis publishes NO EDS. The python-canopen wrapper gist (acolomb) imports
-    Curtis_1232E.eds but says to request it from Curtis support; EDS files are
-    per OS version and variant. Our controller: SW 3178 (OS 31.78?), HW 3079,
-    serial 15198 — quote these if asking Curtis.
-  - The OS 30 manual (bintelli mirror) lists 308 indices; the OS 31 manual
-    (May 2017, noco-evco mirror, saved as
-    docs/Curtis_1232E-38E_manual_OS31_2017-05.pdf) lists 314. Merged the OS 31
-    names into canopen_named.csv: 269 -> 299 named. New and useful:
-      0x3238/0x3239 UserFault1/2 (OEM VCL fault bits; both 0 in our dumps),
-      0x3231/0x3232 Hist_UserFault1/2, 0x389A/0x389B UserFault*_History
-      (0x389A = 1: a user fault HAS been logged historically),
-      0x323B-0x324A User_Fault_Action_01..16, 0x303E Interlock_Type,
-      0x38C5/0x38C6 encoder sin/cos compensated, 0x38C7 rotor_position_raw.
-  - The VCL manual section lists the variable classes (User1-120,
-    AutoUser1-300, NVUser1-15, P_User1-150, P_User_Bit1-10) but gives NO CAN
-    indices for them. So the ~1100 unnamed objects (0x33xx-0x3Cxx OEM block)
-    cannot be named from public material; that needs Curtis's EDS for this OS
-    or Solectrac's VCL project. Behavioural decoding remains the only route.
-  - Victron dbus-canopen-motordrive curtis_e.c: already mined (see above).
-
-SUB-INDEX WALK (canopen_full.txt, 2026-09-24)                       CONFIRMED
---------------------------------------------------------------------------
-  Tool: canopen/subindex_walk.py -> canopen_params.csv. 2,261 non-zero subs
-  across 378 objects. The layout is systematic:
-
-  PARAMETER (EEPROM-writable):  sub 0 = value, sub 3 = MIN, sub 4 = MAX
-  MONITOR variable:             sub 0 only
-  (sub 5 = 0 on every object: the known quirk. Subs 1/2 appear only on the
-  comm-profile records 0x1003/0x1018/0x14xx/0x16xx/0x18xx/0x1Axx and on
-  0x2000/0x2001/0x20D0/0x373D/0x57xx.)
-  Verified against named objects: 0x3011 Max_Speed 2800 [100..8000],
-  0x305B Drive_Current_Limit 16384 [1638..32767], 0x3000 Throttle_Type 2
-  [1..5], 0x3103 speed table 2800 [0..6000]; monitors 0x3207/0x3209/0x3226/
-  0x33E6/0x3160 have no sub 3/4.
-
-  So the dictionary splits: 366 parameters (178 unnamed) and 1040 monitors
-  (929 unnamed). The unnamed OEM block 0x33xx-0x36xx is almost entirely
-  MONITORS (VCL RAM: User/AutoUser variables) — only 0x330F and 0x3529-0x352E
-  there are parameters. 87 of the unnamed parameters sit in 0x38xx (Curtis
-  motor-characterization / dealer parameters absent from the public manual).
-
-  The min/max pair types an unnamed parameter without knowing its name:
-    0..1 = boolean (6 of them), 0..32767 = percent (26), 100..8000 / 0..6000 =
-    rpm, 0..4096 = cutback-style fraction, 1408..12800 = volts/64.
-  Notable unnamed parameters with a live-looking value:
-    0x3806 = 4619 [1408..12800] = 72.2 V in /64 units: a nominal-pack-voltage
-             parameter (equals Capacitor_Voltage at rest)          TENTATIVE
-    0x3826 = 4973 [0..10000]: the rest value of monitor 0x35EA (session 137:
-             4973 -> 510 under load) — 0x35EA tracks a limit whose ceiling is
-             this parameter                                        TENTATIVE
-    0x330F = 39 [1..127]: the only OEM-block parameter; node-ID-like range
-             (node is 40 = 0x28)                                   UNKNOWN
-    0x3529-0x352E: a coherent six-parameter set (111/44/1124/200/40/1500)
-    0x38A6 = 70 [45..90]: a temperature threshold (C)              TENTATIVE
-    0x3858 = 4 [1..6], 0x3827 = 1301 [178..2364], 0x381E = 1792 [150..8000]:
-             motor-characterization values (poles? rated rpm? base speed?)
-  Records/arrays: 0x2000 (8 subs, sub 7 = ASCII "CUR ", a Curtis manufacturer
-  record), 0x2001 (22 subs, all 0), 0x5702/0x5740/0x5742 (8/11/24 subs, all
-  0: reserved or empty history arrays). No segmented objects anywhere.
-
-  NEXT: with the parameter/monitor split known, the 929 unnamed monitors are
-  the behavioural-decode target (they are the VCL's live variables) and the
-  178 unnamed parameters can be typed from their ranges.
-  Checked 2026-09-24: the Solectrac/Farmtrac FT25G service manual (docs/) has
-  NO Curtis parameter listing — only troubleshooting steps that refer to the
-  handheld's "Battery Parameter" menu (under-voltage 70 % = 62 V) and live
-  values (capacitor voltage < 84 V). No value-matching possible from it.
-
-  Battery-side Curtis parameters, from canopen_params.csv (named, CONFIRMED
-  values; interpretation TENTATIVE):
-    0x3048 Nominal_Voltage          4864 /64 = 76 V   (pack nominal is 73 V)
-    0x3049 User_Overvoltage          321
-    0x3170/71/72 BDI_Reset/Full/Empty_Volts_Per_Cell 2090/2040/1730 mV
-    0x3174 BDI_Reset_Percent 75, 0x3173 BDI_Discharge_Time 34
-  The BDI per-cell thresholds (2.09/2.04/1.73 V) are lead-acid-style
-  numbers and would put a 71 V pack at ~80 %. Yet 0x3308 BDI_Percentage
-  tracked the BMS's SHOWN SOC (F100F3, the dashboard value) to within 1 point
-  for all of session 137: BDI 36/35/34/33 vs BMS 35.2 -> 32.8 %. So the
-  Curtis is NOT computing BDI from its lead-acid thresholds; the OEM VCL
-  reads the BMS SOC off J1939 and writes it into BDI_Percentage. 0x3308 is
-  therefore a relay of the dashboard SOC, not an independent estimate —
-  useful only as a cross-check that the VCL is receiving F100F3.  CONFIRMED
-
-PACK CURRENT ATTRIBUTION (session 137: BMS F100F3 vs Curtis 0x359E vs Kelly)
------------------------------------------------------------------------------
-  The SD data_00.jsonl carries the BMS pack current and the Kelly pump
-  telemetry at 1 Hz next to the CANopen sweeps, so pack = traction + rest:
-    state              pack (BMS)  Curtis Battery_Current  other   Kelly
-    key-on, pump off      2.2 A          0.0 A              2.2 A   0 rpm
-    pump on, stationary  23-33 A        0-3 A             20-33 A   ~2750 rpm, 24-33 A phase
-    chipping @2800 rpm   58-73 A       34-47 A            18-28 A   ~2790 rpm
-  - 0x359E sign/scale cross-validated against the BMS: it is the traction
-    controller's DC draw alone; BMS current (negative = discharge on
-    F100F3) is the whole pack.                                    CONFIRMED
-  - The remainder, 20-33 A (~1.5-2.4 kW at 72 V), is the Kelly e-hydraulic
-    pump, which ran at ~2750 rpm for the entire session whenever the
-    hydraulics switch was on — including the stationary idle before the
-    chipping run. The base load with the pump off is ~2 A (aux/cluster).
-    Kelly phase current (AC) vs the DC remainder correlate at r=0.57; the
-    magnitudes agree.                                             CONFIRMED
-  Practical: the hydraulic pump is a constant ~25 A parasitic whenever it is
-  switched on; for chipping (PTO from the traction motor) it contributed
-  ~35 % of the pack draw.
-
-RESIDUAL MINING OF THE UNNAMED MOVERS (session 137)
----------------------------------------------------
-  69 unnamed, undiscussed objects varied. Fitted each as a linear combination
-  of rpm, |rpm|, motor current, battery current, Vcap, throttle, modulation:
-  23 fit with R2 >= 0.9 (mirrors / filtered copies). The poorly-fitted rest
-  are NOT new dynamics — they are slow drifts and dithers:
-    0x33E8 56..61, 0x33E9 53..57, 0x33F1 83..90, 0x361A 207..212,
-    0x373E 185..188, 0x361B/0x361C/0x361F 7855..7865, 0x35F5 782..813:
-        slow monotonic drift over the session — temperatures or filtered
-        analog inputs in unknown units.                          TENTATIVE
-    0x354B 1200/5000/10000/13000/30008: steps between Max_Speed-like values,
-        13 distinct — a speed-ramp target or limit selector.     TENTATIVE
-    0x3508/0x350F 610 at rest, dips to 4..9 briefly when moving off — a
-        countdown/timer (the pair is identical).                 TENTATIVE
-    0x35EB -1..1, 0x350A 997..1023, 0x360A 68..72, 0x3285 (wraps around 0),
-    0x324F +-32k: dither / AC-sample noise. Exclude.
-  Conclusion: session 137 has no undiscovered fast-moving quantity; what the
-  full-table poller can still find is in slow variables (long sessions,
-  thermal) and in event responses (faults), not in more of the same driving.
-
-CAN NODE ID IS RANGE-SWITCH SELECTED AT KEY-ON                   CONFIRMED
---------------------------------------------------------------------------
-  The controller's CANopen node ID is NOT fixed. The Curtis picks it at every
-  KSI (key) turn-on from the state of Sw5/Sw6 (manual "CAN Node ID 1", 0x3140),
-  and Sw5/Sw6 are the R2/R3 range switches (see 0x3226 Switches). Four stored
-  slots, read from this controller:
-      0x3140 CAN_Node_ID_1  Sw6=off Sw5=off  = 38   -> R1 (Sw4)
-      0x3141 CAN_Node_ID_2  Sw6=off Sw5=on   = 39   -> R2 (Sw5)
-      0x3146 CAN_Node_ID_3  Sw6=on  Sw5=off  = 40   -> R3 (Sw6)
-      0x3147 CAN_Node_ID_4  Sw6=on  Sw5=on   = 41   -> (both)
-      0x3145 active/selected node id (monitor)
-  So: key on in R1 -> node 38, R2 -> 39, R3 -> 40. SDO request/response IDs
-  shift with it: R3 = 0x628/0x5A8 (our original dumps, taken in R3), R2 =
-  0x627/0x5A7. The J1939 side (SA 0xCA, FF21CA etc.) is unaffected.
-
-  This resolves the "silent controller" scare of 2026-09-24: after the persist
-  writes the tractor was keyed on in R2, so the controller answered as node 39
-  while every tool still queried node 40. Nothing was broken and no write
-  caused it — it is a designed Solectrac scheme (a diagnostic can read the
-  boot range from the node ID, or run up to 4 controllers).
-
-  TOOLING: both sides now auto-discover instead of hardcoding 40.
-    - Firmware poller (-DCANOPEN_POLL): after CANOPEN_RELOCK_MISS (16)
-      consecutive timeouts it walks node IDs 1..127 (one poll each) until an
-      SDO response returns, then locks on. /json and `canopen` console show
-      canopen.node. Verified: keyed on in R2 it relocked 40->39; in R3 it
-      stays 40 with ~0 timeouts.
-    - Python: canopen_dump.discover_node(bus) probes 40/39/38/41 then sweeps;
-      canopen/sdo_write.py calls it and prints the node it found. The NODE
-      constant (40) is only the first guess now.
-
-EXCLUDED / ARTIFACTS
---------------------
-  0x35C6   FALSE positive: signed value dithering around 0 (+24 -> -24),
-           only looked large when read unsigned (0xFFE8). Not a real signal.
-  0x3160   ~6.5M monotonic counter (hour-meter / accumulator). Drifts across
-           the whole session regardless of action — a time artifact, not state.
-  Idle-noise objects (0x3334, 0x3564-0x3569, 0x3573, 0x3588, 0x3601 ...):
-           wiggle at rest; treat only changes exceeding their resting spread.
-  Sub-index 0x05 of EVERY object returns a constant 0 (broken-dictionary
-           quirk) — excluded from all analysis.
-
-NEXT STEPS TO RAISE CONFIDENCE
-------------------------------
-  - More sweeps per state (>= 10) to firm up the small movers and get signedness.
-  - Drive under real mechanical load (not just neutral spin) to separate the
-    actual-current (0x35C8) from commanded-torque (0x32xx) objects.
-  - Cross-map against the Victron dbus-canopen-motordrive Curtis object list.
-  - Rename FF21CA "torque" to motor RMS current (A) in solecan_proto.py, the
-    stream/analyze tools, the ESP32 decode and dashboard (see SESSION 137).
-  - If the controller can be put in operational/SYNC mode, PDOs would give the
-    live telemetry passively at high rate instead of SDO polling.
+# Curtis 1238E CANopen interface — Solectrac e25G
+
+The traction motor controller on the Solectrac e25G is a Curtis 1238E
+(E-series AC controller, OEM VCL program by Solectrac). Besides its J1939
+broadcasts (source address `0xCA`, see `DOCUMENTATION.md`) it runs a CANopen
+SDO server on the **same** 250 kbit/s main bus. Every parameter and monitor
+variable of the controller is readable, and parameters are writable, through
+that server. This document is the reference for that interface.
+
+Everything here is empirical. Each decode carries a confidence marker:
+**CONFIRMED** (cross-validated against a second source, an official name, or
+a physical check), **TENTATIVE** (consistent behaviour, one line of
+evidence), **UNKNOWN**. The evidence trail, in chronological order, is in
+[`NOTES.md`](NOTES.md); this file states only the current conclusions.
+
+Contents
+
+1. [Bus and node parameters](#1-bus-and-node-parameters)
+2. [Object dictionary layout](#2-object-dictionary-layout)
+3. [Identity and communication profile](#3-identity-and-communication-profile)
+4. [Decoded objects](#4-decoded-objects)
+5. [Mechanisms](#5-mechanisms)
+6. [Writing parameters](#6-writing-parameters)
+7. [PDOs](#7-pdos)
+8. [Tools and data files](#8-tools-and-data-files)
+9. [Open questions](#9-open-questions)
+10. [Sources](#10-sources)
+
+---
+
+## 1. Bus and node parameters
+
+| Item | Value | Confidence |
+|---|---|---|
+| Bus | Main vehicle bus, 250 kbit/s, shared with J1939 | CONFIRMED |
+| Frames | 11-bit standard IDs (all J1939 traffic is 29-bit) | CONFIRMED |
+| Node ID | **Range-switch selected at key-on**: R1 = 38, R2 = 39, R3 = 40, both = 41 (see [Node ID](#node-id)) | CONFIRMED |
+| SDO request / response | `0x600 + node` / `0x580 + node` (R3: `0x628` / `0x5A8`) | CONFIRMED |
+| Transfer type | Expedited only; every object is ≤ 4 bytes, no segmented or string objects | CONFIRMED |
+| Heartbeat | `0x1017` producer heartbeat time = 25 ms, but no heartbeat frames are seen | CONFIRMED |
+| NMT state | Pre-operational (`0x3328 CAN_NMT_State` = 127); PDOs configured but dormant | CONFIRMED |
+| EMCY | `0x80 + node`; none observed yet (no fault provoked, see §9) | — |
+| SDO server capacity | One outstanding request; a ~200 SDO/s poller silently drops contended requests. Retry. | CONFIRMED |
+
+### Node ID
+
+The Curtis picks its node ID at every key (KSI) turn-on from switch inputs
+Sw5/Sw6 (manual: "CAN Node ID 1..4"), and on this tractor Sw5/Sw6 are the R2/R3
+range switches. The four stored slots read from this controller:
+
+| Object | Name | Sw6 / Sw5 | Value | Range position |
+|---|---|---|---|---|
+| `0x3140` | CAN_Node_ID_1 | off / off | 38 | R1 |
+| `0x3141` | CAN_Node_ID_2 | off / on | 39 | R2 |
+| `0x3146` | CAN_Node_ID_3 | on / off | 40 | R3 |
+| `0x3147` | CAN_Node_ID_4 | on / on | 41 | (both) |
+| `0x3145` | active node ID (monitor) | | | |
+
+The J1939 side (SA `0xCA`) is unaffected. All tools here and the firmware
+poller auto-discover the node (probe 40, 39, 38, 41, then sweep 1..127) rather
+than hard-coding 40. The dumps in this directory were taken in R3 (node 40).
+
+## 2. Object dictionary layout
+
+| Index range | Contents |
+|---|---|
+| `0x1000`–`0x1A03` | CiA 301 communication profile: identity, heartbeat, SDO/PDO parameters and mappings |
+| `0x2000`, `0x2001` | Curtis manufacturer records (`0x2000` sub 7 = ASCII `"CUR "`; `0x2001` 22 subs, all zero) |
+| `0x3000`–`0x32FF` | Curtis stock parameters and monitor variables, named in the E-series manual |
+| `0x3300`–`0x36FF` | **OEM block**: almost entirely unnamed monitors, i.e. the Solectrac VCL program's RAM variables (User/AutoUser) plus a few named Curtis CAN/VCL objects (`0x3308`, `0x332F`, `0x3328`, …) |
+| `0x3800`–`0x3CFF` | Curtis motor-characterisation / dealer parameters and encoder monitors; partly named in the OS 31 manual |
+| `0x5700`–`0x5742` | Empty history arrays (all zero) |
+
+Counts (full walk, `canopen_full.txt`): 1420 objects with a sub 0; 2261
+non-zero sub-indices across 378 objects; 299 objects carry an official Curtis
+name (OS 30 + OS 31 manuals merged).
+
+**Parameter vs monitor.** The sub-index layout distinguishes the two kinds of
+object without needing a name (CONFIRMED against every named object):
+
+| Kind | Sub 0 | Sub 3 | Sub 4 | Writable |
+|---|---|---|---|---|
+| Parameter (EEPROM-backed) | value | minimum | maximum | yes (RAM; EEPROM if `0x332F` set) |
+| Monitor variable | value | — | — | no |
+
+This splits the dictionary into 366 parameters (178 unnamed) and 1040 monitors
+(929 unnamed). Sub-index 5 of **every** object returns 0 (a firmware quirk;
+ignore it). Subs 1/2 appear only on the communication-profile records and the
+`0x2000`/`0x2001`/`0x57xx` arrays.
+
+The min/max pair types an unnamed parameter: 0..1 boolean, 0..32767 percent,
+100..8000 or 0..6000 rpm, 0..4096 cutback fraction (4096 = 100 %),
+1408..12800 volts in 1/64 V.
+
+**Scaling rule.** Each Curtis monitor variable carries its own scale; take it
+from the manual's raw-range / display-range pair for that object. Do not
+assume a common scale across objects (capacitor voltage is /64 V, keyswitch
+voltage is /100 V).
+
+## 3. Identity and communication profile
+
+| Object | Value | Meaning | Confidence |
+|---|---|---|---|
+| `0x1009:00` | `"3079"` | manufacturer hardware version | CONFIRMED |
+| `0x100A:00` | `"3178"` | manufacturer software version (OS 31.78) | CONFIRMED |
+| `0x1017:00` | 25 | producer heartbeat time, ms | CONFIRMED |
+| `0x1018:01` | `0x4349` | vendor ID, ASCII `"CI"` = Curtis Instruments | CONFIRMED |
+| `0x1018:04` | 15198 | serial number | TENTATIVE |
+
+Quote SW 3178 / HW 3079 / serial 15198 when asking Curtis for the EDS of this
+OS version.
+
+## 4. Decoded objects
+
+All values are little-endian. `s16` = signed 16-bit, `u16` = unsigned 16-bit.
+"J1939" notes the equivalent field in the `FF21CA` broadcast where one exists.
+
+### 4.1 Drive state and switch inputs
+
+| Object | Name | Encoding | Confidence |
+|---|---|---|---|
+| `0x3226` | Switches | u16 bitfield, bit n = Sw_(n+1) (see below) | CONFIRMED |
+| `0x3224` / `0x3225` | Switches low / high byte | Sw_1–8 / Sw_9–16 | CONFIRMED |
+| `0x33E6` | OEM packed range + direction | `(range << 12) \| (dir << 10)`; range R1=0 R2=1 R3=2; dir N=0 F=1 R=2 | CONFIRMED |
+| `0x322B` | System_Flags1 ("Interlock") | bit 5 = interlock closed (throttle accepted); bit 2 = at rest; bit 0 always set | CONFIRMED |
+| `0x3223` | Main_State | main-contactor state machine; 5 while driving-ready | CONFIRMED |
+| `0x3328` | CAN_NMT_State | 127 = pre-operational | CONFIRMED |
+| `0x3892` | EMBrakeState | 2 in every capture | CONFIRMED (name) |
+| `0x3228` | OEM flag word | bits 6/7 set while moving; bits 3–6 latch once lever/range have been used; 1404 during OPC power-down | TENTATIVE |
+| `0x3540` | OEM stationary flag | 1 at rest, 0 while moving | TENTATIVE |
+| `0x3602` | OEM motion flag | 5 at rest, 640 whenever rpm ≠ 0 | TENTATIVE |
+
+Switch word bits (`0x3226`), pin numbers from the manual's 35-pin connector table:
+
+| Bit | Input | Pin | Function on the e25G |
+|---|---|---|---|
+| 2 | Sw_3 | 9 | always on (enable/interlock-type input) |
+| 3 | Sw_4 | 10 | range R1 (turtle) |
+| 4 | Sw_5 | 11 | range R2 (also selects node ID) |
+| 5 | Sw_6 | 12 | range R3 (rabbit) (also selects node ID) |
+| 6 | Sw_7 | 22 | FORWARD lever |
+| 7 | Sw_8 | 33 | REVERSE lever |
+| 10 | Sw_11 | 4 | OPC (operator presence) enable; drops first at seat power-down |
+
+Examples: neutral + R3 = `0x424`, forward + R3 = `0x464`, reverse + R3 =
+`0x4A4`, neutral + R1 = `0x40C`.
+
+**Not wired to the Curtis** (no object changes when they are toggled,
+CONFIRMED by stationary sweep): brake pedal, parking brake, hydraulics switch,
+PTO switch. These land on the cluster (`DOCUMENTATION.md`, J23/ID18) or the
+Kelly hydraulic controller. `0x321A Brake_Command` and `0x3212 Mapped_Brake`
+read 0 always: the Curtis brake-pedal (regen) input is unused on this machine.
+
+### 4.2 Speed limits
+
+| Object | Name | Value / encoding | Confidence |
+|---|---|---|---|
+| `0x3103` / `0x3104` | OEM table, R3 forward / reverse | 2800 / 2240 rpm | CONFIRMED |
+| `0x3105` / `0x3106` | OEM table, R1 forward / reverse | 2000 / **2000** rpm (stock 1600, see §6) | CONFIRMED |
+| `0x3107` / `0x3108` | OEM table, R2 forward / reverse | 2500 / **2500** rpm (stock 2000, see §6) | CONFIRMED |
+| `0x3011` | Max_Speed_SpdM | the **active** cap, rewritten by the VCL per range + direction; 1200 after power-up until the lever first leaves neutral | CONFIRMED |
+| `0x306E`, `0x3593` | ramped copies of `0x3011` | follow `0x3011` in ~200 rpm steps over ~1 s | CONFIRMED |
+| `0x3840`, `0x33D1` | Max_Speed_SpdMx / RPDO speed-limit input | direct copies of `0x3011` | CONFIRMED |
+| `0x3021` | Max_Speed_TrqM | 4000 (torque-mode cap, unused: `0x3010 Control_Mode_Select` = 1 speed mode) | CONFIRMED |
+| `0x3559` | Max_Speed_Controller_Limit | 8000, the controller ceiling, not the range cap | CONFIRMED |
+| `0x3213` | Throttle_Multiplier | 128 normal; 0 after power-up until the lever leaves neutral | CONFIRMED |
+| `0x354B` | OEM speed-ramp target / limit selector | steps between Max_Speed-like values | TENTATIVE |
+
+The stock table pairs each forward cap with exactly 80 % of itself in reverse,
+which is the controller-side reverse limiter documented for the J1939 decode.
+
+### 4.3 Motor and electrical monitors
+
+| Object | Name | Scale | Typical | J1939 | Confidence |
+|---|---|---|---|---|---|
+| `0x3207` | Motor_RPM | s16, 1 rpm, sign = direction | 0 / 2792 at R3 full throttle | bytes 2–3 = \|rpm\| + 3200 | CONFIRMED |
+| `0x3209` | Current_RMS | s16 × 0.1 A, motor phase current | 3 A idle spin, 143 A peak chipping | bytes 0–1 = whole amps | CONFIRMED |
+| `0x3206` | Frequency | ≈ 2.0 × rpm (electrical speed; 4-pole motor) | | | CONFIRMED |
+| `0x3208` | Modulation_Depth | 0–1182 = 0–100 % (observed up to 1235) | saturates near 2800 rpm | | CONFIRMED |
+| `0x320A` | Vehicle_Speed | 0.1 mph, = 0.0394 × rpm, fixed ratio for HIGH mechanical range; over-reads in M/L | 112 = 11.2 mph at 2800 rpm | | CONFIRMED |
+| `0x320B` | Motor_Temperature | s16 × 0.1 °C | | yes | CONFIRMED |
+| `0x322A` | Controller_Temperature | s16 × 0.1 °C | | yes | CONFIRMED |
+| `0x3581`, `0x35F3`, `0x3604`, `0x3605` | cutbacks (motor temp / ctrl temp / over-V / under-V) | 4096 = 100 % = no cutback | | | CONFIRMED |
+| `0x306C` | Swap_Two_Phases | bit 3 = swap direction (Victron reading) | 211, bit 3 clear | | TENTATIVE |
+| `0x393A` | \|rpm\| copy | u16 | | | CONFIRMED |
+| `0x33FC` | OEM staging: \|rpm\| + 3200 | the variable the VCL copies into J1939 bytes 2–3 | | | CONFIRMED |
+| `0x33EA` | OEM staging: Current_RMS in whole amps | = J1939 bytes 0–1 exactly | | | CONFIRMED |
+| `0x35D1`, `0x35D2`, `0x35D6` | MotorspeedA/B and a third encoder-phase speed | ≈ \|rpm\| with up to 1000 rpm lag | | | TENTATIVE |
+| `0x355E` | filtered ≈ 2 × rpm | | | | TENTATIVE |
+| `0x354E`, `0x35D3`, `0x3553`, `0x35AC` | current mirrors on other filters (≈ 10–14 × Current_RMS) | | | | TENTATIVE |
+| `0x38C7` | rotor_position_raw | | | | CONFIRMED (name) |
+
+The headline result: the J1939 `FF21CA` bytes 0–1, previously read as
+"torque/effort", **are motor RMS current in amps** (`0x33EA` fits with slope
+1.0006, zero offset, worst residual 2 over 75 samples). Torque is
+proportional, so the older reading is not wrong, only unscaled.
+
+### 4.4 Battery and DC side
+
+| Object | Name | Scale | Typical | Confidence |
+|---|---|---|---|---|
+| `0x324C` | Capacitor_Voltage | u16 / 64 V (0–12800 = 0–200 V) | 4634 = 72.4 V; sags to 70.3 V under load | CONFIRMED |
+| `0x324D` | Keyswitch_Voltage | u16 / 100 V (0–10500 = 0–105 V) | 7233 = 72.3 V | CONFIRMED |
+| `0x359E` | Battery_Current | s16 × 0.1 A, the traction controller's DC draw only | 0 idle, 34–47 A chipping | CONFIRMED |
+| `0x3308` | BDI_Percentage | 0–100 %; **a relay of the BMS SOC** written by the VCL from J1939 `F100F3`, not an independent estimate | tracks dashboard SOC within 1 point | CONFIRMED |
+| `0x3048` | Nominal_Voltage | /64 V | 4864 = 76 V | CONFIRMED (value) |
+| `0x3170`–`0x3172` | BDI_Reset/Full/Empty_Volts_Per_Cell | mV | 2090 / 2040 / 1730 (lead-acid defaults, unused) | CONFIRMED (value) |
+| `0x3806` | unnamed parameter, 1408..12800 | /64 V | 4619 = 72.2 V, a nominal-pack-voltage setting | TENTATIVE |
+
+Neither Battery_Current nor Capacitor_Voltage is in the J1939 broadcast, so
+these are genuinely new quantities; together they give controller DC power.
+Pack current (BMS) = Curtis Battery_Current + Kelly hydraulic pump (~20–33 A
+whenever the hydraulics switch is on) + ~2 A auxiliaries (CONFIRMED, session
+137).
+
+### 4.5 Throttle
+
+| Object | Name | Scale | Typical | Confidence |
+|---|---|---|---|---|
+| `0x3215` | Throttle_Pot_Raw | 0–36044 = 0.0–5.5 V at the pedal wiper | 4000 = 0.61 V rest, 29204 = 4.46 V floored | CONFIRMED |
+| `0x30D2` | copy of Throttle_Pot_Raw | | | CONFIRMED |
+| `0x3211` | Mapped_Throttle | s16, ±32767 = ±100 %, sign = direction | | CONFIRMED |
+| `0x3216` | Throttle_Command | s16, ±32767 = ±100 % | ±1 at zero throttle with a direction selected | CONFIRMED |
+| `0x3218`, `0x3521`, `0x3402` | OEM copies of Throttle_Command; `0x3218` is the RPDO0 input | | | CONFIRMED |
+| `0x3217` | Pot2_Raw | unused input | 5280 constant | CONFIRMED |
+| `0x3204` | Analog1 | unused input | 5 constant | CONFIRMED |
+| `0x3000` / `0x300A` | Throttle_Type / Brake_Type | 2 / 2 | | CONFIRMED |
+| `0x3001`–`0x3008` | Forward/Reverse Deadband, Map, Max, Offset | throttle shaping parameters | | CONFIRMED (names) |
+
+### 4.6 Stock configuration of note
+
+| Object | Name | Value | Meaning |
+|---|---|---|---|
+| `0x3010` | Control_Mode_Select | 1 | speed mode (0 speed-express, 2 torque) |
+| `0x3012` / `0x3015` | Kp_SpdM / Ki_SpdM | 2458 / 300 | speed-loop gains |
+| `0x305B` | Drive_Current_Limit | 16384 | 50 % of controller rated current |
+| `0x305C` / `0x305D` | Regen / Brake_Current_Limit | 32767 / 32767 | 100 % |
+| `0x3149` | CAN_PDO_Timeout_Period | 25 | PDO timeout monitoring **enabled** (see §7) |
+| `0x332F` | CAN_EE_Writes_Enabled | 0 | SDO writes go to RAM only (see §6) |
+
+Full list: `canopen_named.csv` (filter `vcl_name != ""`) and
+`canopen_params.csv`.
+
+### 4.7 Faults
+
+| Object | Name | Observed | Confidence |
+|---|---|---|---|
+| `0x3238` / `0x3239` | UserFault1 / 2 (OEM VCL fault bits) | 0 | CONFIRMED (name) |
+| `0x3231` / `0x3232` | Hist_UserFault1 / 2 | | CONFIRMED (name) |
+| `0x389A` / `0x389B` | UserFault1/2_History | `0x389A` = 1: a user fault has been logged at some point | CONFIRMED (name) |
+| `0x323B`–`0x324A` | User_Fault_Action_01..16 | | CONFIRMED (name) |
+| `0x3472` | Last_VCL_Error | | CONFIRMED (name) |
+| `0x3897` | Supervision_Error | | CONFIRMED (name) |
+
+No fault has yet been provoked while polling; whether the node emits EMCY and
+how EMCY codes map to the J1939 DM1 codes is open (§9). The idle DM1 pattern
+from `0xCA` is `00 00 00 00 00 00 FF FF` at ~1 Hz.
+
+### 4.8 Counters and timers
+
+| Object | Name | Behaviour | Confidence |
+|---|---|---|---|
+| `0x3160` | Master_Timer | key-on run-time counter, 9.57 ticks/s while powered, EEPROM-backed, stops when off. 6,520,553 ticks ≈ 189 h at end of session 137 vs 118.1 h on the dash hour meter (they count different conditions). Not a clock. | CONFIRMED |
+| `0x35BF` | Time_to_Capture_Speed_1 | stopwatch, 0.01 s (3363 = 33.6 s after first drive) | CONFIRMED (name) |
+| `0x3508` / `0x350F` | OEM countdown | 610 at rest, dips to 4..9 when moving off | TENTATIVE |
+| `0x3332`, `0x3338`, `0x3339`, `0x3330`, `0x3336`, `0x3510` | free-running modulo counters | exclude from state analysis | CONFIRMED |
+
+### 4.9 Other OEM-block monitors
+
+| Object | Behaviour | Confidence |
+|---|---|---|
+| `0x35B7`, `0x35AA`, `0x3591`, `0x3590`, `0x35FC`, `0x35FF`, `0x35B8`, `0x35B9`, `0x35EA` | "headroom" cluster: 9192 at rest, drops with throttle (to ~2460–3670), ramps up from ~4656 over ~1 s at power-up, collapses to 200 in the power-up state. Reads as an available-current / torque-headroom limit. `0x35EA`'s ceiling is parameter `0x3826` (4973). | TENTATIVE |
+| `0x33EF` | ±32k sweeps under motion, dithering in steps of 256 at rest; uncorrelated with rpm or current. Earlier "load current" and "rotor angle" hypotheses both dropped. | UNKNOWN |
+| `0x33E8`, `0x33E9`, `0x33F1`, `0x361A`, `0x373E`, `0x361B`–`0x361F`, `0x35F5` | slow monotonic drifts over a session: temperatures or filtered analog inputs, units unknown | TENTATIVE |
+| `0x330F` | the only OEM-block *parameter*, 39 [1..127], node-ID-like range | UNKNOWN |
+| `0x3529`–`0x352E` | a coherent six-parameter set (111 / 44 / 1124 / 200 / 40 / 1500) | UNKNOWN |
+| `0x38A6` | 70 [45..90], a temperature threshold in °C | TENTATIVE |
+| `0x3858`, `0x3827`, `0x381E` | 4 [1..6], 1301 [178..2364], 1792 [150..8000]: motor-characterisation values | TENTATIVE |
+
+### 4.10 Excluded / artifacts
+
+- `0x35C6`, `0x350E`, `0x3554`, `0x3555`, `0x38CC`, `0x35C1`, `0x35EB`,
+  `0x350A`, `0x360A`, `0x3285`, `0x324F`: zero-centred dither or AC samples.
+  `0x35C6` only looked large when read unsigned.
+- Idle-noise objects (`0x3334`, `0x3564`–`0x3569`, `0x3573`, `0x3588`,
+  `0x3601`, …): compare only changes larger than their resting spread.
+- Sub-index 5 of every object: constant 0.
+
+## 5. Mechanisms
+
+### 5.1 Range switch → speed cap (CONFIRMED)
+
+```
+range knob closes Sw_4 / Sw_5 / Sw_6           (pins 10 / 11 / 12)
+  → OEM VCL reads the switch word 0x3226
+  → looks up the static per-range table 0x3103–0x3108
+  → writes Max_Speed_SpdM 0x3011 (+ mirrors 0x306E/0x3593 ramped, 0x3840, 0x33D1)
+  → publishes packed state 0x33E6, the source of the J1939 data[7] nibbles
+```
+
+The table itself never changes with the knob; the VCL only selects from it.
+The active cap latches on a direction change (forward → forward cap, reverse
+→ reverse cap) and holds through neutral, so in a neutral-only sweep nothing
+but `0x33E6` moves. After power-up `0x3011` = 1200 and `0x3213` = 0 until the
+lever first leaves neutral.
+
+### 5.2 Operator presence (seat) → power-down (CONFIRMED)
+
+Leaving the seat does nothing for 7 s (the service manual's OPC timer). Then,
+within 100 ms: `0x3226` bit 10 (Sw_11) drops, then all inputs; `0x3011` → 0;
+`0x322B` → 4 → 68; `0x33E6` → 0; the controller stops answering and its J1939
+stops. The OPC relay cuts the Curtis keyswitch. Sitting back down restarts the
+controller in its power-up state (§5.1). The seat is therefore not the Curtis
+interlock input; it acts through KSI power.
+
+### 5.3 Interlock gates the drive path (CONFIRMED)
+
+With `0x322B` bit 5 clear the controller ignores the pedal entirely:
+`Throttle_Pot_Raw` sweeps its full range while `Throttle_Command` and
+`Motor_RPM` stay 0, and no throttle-sequencing fault (HPD, code 47) can be
+provoked. Any drive-related test must first confirm `0x322B` = 37.
+
+### 5.4 Relationship to the J1939 broadcast
+
+`FF21CA` bytes 0–1 = `0x33EA` = Current_RMS in amps; bytes 2–3 = `0x33FC` =
+|rpm| + 3200; data[7] packed state derives from `0x33E6`. Motor and controller
+temperatures are duplicated. Battery current/voltage, throttle position,
+switch inputs, speed caps and all parameters exist only on CANopen.
+`solecan_proto.py` already decodes bytes 0–1 as motor current
+(`MOTOR_CURRENT_A_PER_BIT`).
+
+## 6. Writing parameters
+
+Source: Curtis E-series manual, CAN section. SDO downloads are accepted and
+take effect in RAM at once. They are **volatile across a key cycle** unless
+`0x332F CAN_EE_Writes_Enabled` is non-zero, in which case every subsequent
+write is committed to EEPROM immediately. The manual cautions against leaving
+`0x332F` set during normal operation (EEPROM wear). A RAM-only write is
+therefore self-reverting and the safe way to experiment.
+
+`sdo_write.py` is the only writer in this repository. Before a single write
+frame goes out it requires: `0x332F` = 0, motor stopped (`0x3207` = 0), lever
+in neutral (`0x33E6` direction bits 0), the target has sub 3/4 (is a
+parameter) and the value is within its min..max, and `--apply` on the command
+line. `--persist` wraps one write in `0x332F` := 1 … := 0. The firmware poller
+is paused for the duration; expect to retry, as the controller drops contended
+requests. Some parameters may raise fault 49/99 "Parameter Change Fault",
+cleared by a key cycle.
+
+**Deviations from stock on this tractor** (owner decision, 2026-09-24,
+committed to EEPROM and verified after a key cycle):
+
+| Object | Meaning | Stock | Now |
+|---|---|---|---|
+| `0x3106` | R1 reverse cap | 1600 rpm | 2000 rpm (= R1 forward) |
+| `0x3108` | R2 reverse cap | 2000 rpm | 2500 rpm (= R2 forward) |
+
+`0x3104` (R3 reverse, 2240) is unchanged. Undo is a `--persist` write of the
+stock value. Any analysis of reverse behaviour after that date must account
+for it. The stock dump is `canopen_full.txt`.
+
+## 7. PDOs
+
+**Curtis packs PDO mapping entries byte-reversed from CiA 301.** Decode a
+mapping value `v` as `index = v & 0xFFFF`, `sub = (v >> 16) & 0xFF`,
+`bits = (v >> 24) & 0xFF`. 16-bit values are mapped as two 8-bit halves
+(sub 00 + sub 01).
+
+| PDO | COB-ID (node 40) | Transmission | Contents |
+|---|---|---|---|
+| TPDO0 | `0x1A8` | event-driven (254), 64 bits | `0x33D3` (OEM), `0x3226` Switches, `0x3207` Motor_RPM, `0x3209` Current_RMS |
+| TPDO1 | `0x2A8` | event-driven (254), 64 bits | `0x3204` Analog1, `0x322A` Ctrl_Temp, `0x320B` Motor_Temp, `0x3217` Pot2_Raw, `0x3215` Throttle_Pot_Raw |
+| RPDO0 | `0x228` | 40 bits | `0x33D1` speed limit, `0x3218` throttle, `0x33D2` |
+| RPDO1 | `0x328` | empty | |
+
+RPDO0 is a designed CAN command path into the controller (speed limit and
+throttle) that this tractor does not use; it is driven by the hard-wired
+switch inputs instead.
+
+**Do not NMT-Start this node.** PDO timeout monitoring is enabled
+(`0x3149` = 25) while RPDO0 is never transmitted, so going Operational risks
+fault code 72 (PDO Timeout) on the traction controller. Every TPDO object is
+already SDO-readable; the only gain would be rate.
+
+## 8. Tools and data files
+
+All tools talk to the bus through the ESP32 firmware's USB SLCAN mode
+(`switch_to_slcan` in `canopen_dump.py`) and auto-discover the node. Only
+`sdo_write.py` transmits anything other than SDO upload requests.
+
+| Script | Purpose |
+|---|---|
+| `canopen_dump.py` | Dump the whole dictionary (expedited SDO upload, one line per sub-index). Exports `discover_node`. |
+| `canopen_snapshot.py` | Render one full sweep from a capture with names, scaling and confidence markers. |
+| `canopen_timeseries.py` | Poll a fixed object set in a loop, log a time-series. |
+| `canopen_capture.py` | Capture one labelled window of values to CSV. |
+| `canopen_session.py` / `analyze_canopen_session.py` | Guided active capture through machine states, and its per-stage mover analysis. |
+| `canopen_stages.py` / `analyze_stages.py` | Guided **passive** capture: listen to the firmware poller (`-DCANOPEN_POLL`, or `-DCANOPEN_FAST` for ~15 Hz on a short table) and tag replies by stage; then diff stages against baseline. |
+| `analyze_asc.py` | Correlate SDO replies from an SD-card `can_NN.asc` against J1939 rpm/current (linear fits per object). |
+| `fault_capture.py` | Log CANopen EMCY, J1939 DM1 and a fast state poll to one CSV while a fault is provoked. |
+| `subindex_walk.py` | Split `canopen_full.txt` into parameters (sub 3/4 present) and monitors; write `canopen_params.csv`. |
+| `sdo_write.py` | Guarded single-parameter SDO write (see §6). |
+| `gen_canopen_table.py` | Emit `esp32-s3/src/canopen_objects.h` (the firmware poll table) from a dump. |
+
+Data files (untracked, regenerate from captures):
+
+| File | Contents |
+|---|---|
+| `canopen.txt`, `canopen_full.txt` | Dictionary dumps, sub 0 only / all sub-indices (stock configuration, R3, node 40) |
+| `curtis_e_od_map.csv` | 308 indices → VCL name / display name / ranges parsed from the OS 30 manual |
+| `canopen_named.csv` | all 1420 sub-0 objects joined to the manual names (OS 30 + OS 31) |
+| `canopen_params.csv` | index, name, value, min, max for every parameter |
+| `canopen_stages.csv`, `seat_10s.csv`, `limit.csv`, `pbrake.csv`, `fault.csv`, `s137.csv` | stage and session captures referenced in `NOTES.md` |
+
+## 9. Open questions
+
+- Whether a real fault raises EMCY on this node, and how EMCY codes map to
+  J1939 DM1 codes. Retry `fault_capture.py` with the interlock closed
+  (`0x322B` = 37), pedal pressed in neutral.
+- Names for the ~1100 unnamed OEM-block objects. Public sources are exhausted
+  at ~300 names; the remainder needs Curtis's EDS for OS 31.78 or Solectrac's
+  VCL project. Behavioural decoding is the only route.
+- Identity of `0x33EF` and the headroom cluster (`0x35B7` …).
+- What the dashboard hour meter counts relative to `0x3160` (note both, drive,
+  compare increments).
+- Long-session and thermal behaviour of the slow-drift monitors; session 137
+  showed no undiscovered fast-moving quantity.
+
+## 10. Sources
+
+1. Curtis Instruments, *1232E/34E/36E/38E & 1232SE/34SE/36SE Enhanced AC
+   Controllers* manual, OS 30, p/n 53134. Every parameter and monitor
+   variable is printed with its CAN index and sub-index, so the manual is the
+   object dictionary. Parsed into `curtis_e_od_map.csv`.
+2. Same manual, OS 31 revision, May 2017:
+   `docs/Curtis_1232E-38E_manual_OS31_2017-05.pdf`. Adds the UserFault,
+   Interlock_Type and encoder objects. Neither revision names the OEM block.
+3. Victron Energy, `dbus-canopen-motordrive`, `src/drivers/curtis_e.c`
+   (`readRoutine()`): the E-series objects and scalings Victron polls
+   (`0x3207`, `0x359E`, `0x320B`, `0x322A`, `0x306C`, `0x324C`). All
+   confirmed here. <https://github.com/victronenergy/dbus-canopen-motordrive>
+4. acolomb, python-canopen wrapper for the Curtis 1232E (GitHub gist): source
+   of the EMCY bit-to-code table (`0x1000` = Status1–5, `0x1001` = Status6–9,
+   HPD = Status2 bit 0). Its EDS is not public; request from Curtis support.
+5. CiA 301, CANopen application layer and communication profile: SDO
+   expedited transfer, COB-ID conventions, NMT states, PDO mapping (which
+   Curtis deviates from, §7).
+6. Solectrac / Farmtrac FT25G service manual
+   (`docs/FT_25G_Service_manual-10-08-2023.pdf`): OPC 7 s timer, cluster
+   connector wiring (parking brake, PTO). Contains no Curtis parameter list.
+7. This repository: `DOCUMENTATION.md` (J1939 decode, range caps, wiring),
+   `solecan_proto.py`, and the captures listed in §8. Chronological findings
+   and superseded hypotheses: [`NOTES.md`](NOTES.md).
