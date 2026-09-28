@@ -51,6 +51,8 @@
   // Onboard microSD session logging (see the "SD-card session logging" section).
   #include <SPI.h>
   #include <SD.h>
+  #include <sd_diskio.h>   // sdcard_init/uninit for the boot-failure probe
+  #include "ff.h"
   #include <esp_timer.h>
   #include <esp_heap_caps.h>
   #include "freertos/stream_buffer.h"
@@ -658,7 +660,8 @@ extern const uint8_t dashboard_html_end[]   asm("_binary_src_dashboard_html_end"
 #define SD_WRITE_CHUNK_BYTES 8192                     // batch writes into bursts this size
 
 struct SdState {
-    const char* state = "no_card";     // no_card | waiting | logging | error
+    const char* state = "no_card";     // no_card | disk_error | no_filesystem | mount_err_N
+                                       // | waiting | logging | error
     uint32_t          session   = 0;
     char              dir[24]   = "";  // active session dir, e.g. "/s00001" or
                                        // "/s00001-42" once the SOC suffix lands
@@ -1068,6 +1071,32 @@ static bool sdInitRing(SdStream& s) {
     return s.sb != nullptr;
 }
 
+// SD.begin() collapses every failure into `false`. Re-run the mount by hand
+// to get FatFs's FRESULT and tell "nothing answered" apart from a card that
+// answers but can't be read or has no FAT volume. exFAT isn't compiled into
+// the Arduino core, so factory-formatted SDXC (>32 GB) cards land on
+// no_filesystem. State names follow the FRESULT (FR_DISK_ERR → disk_error).
+// Returns nullptr if the mount succeeds on this second try.
+static const char* sdProbeFailure() {
+    static char other[16];
+    uint8_t pdrv = sdcard_init(SD_CS_PIN, &SPI, SD_SPI_HZ);
+    if (pdrv == 0xFF) return "no_card";
+    FATFS* fs = (FATFS*) malloc(sizeof(FATFS));   // ~4.6 KB: keep off setup's stack
+    FRESULT r = FR_NOT_ENOUGH_CORE;
+    char drv[3] = {(char)('0' + pdrv), ':', 0};
+    if (fs) { r = f_mount(fs, drv, 1); f_mount(nullptr, drv, 0); free(fs); }
+    sdcard_uninit(pdrv);
+    switch (r) {
+        case FR_OK:            return nullptr;          // mounted this time — retry SD.begin
+        case FR_NOT_READY:     return "no_card";        // card init failed / no card
+        case FR_DISK_ERR:      return "disk_error";     // answered, sector read failed
+        case FR_NO_FILESYSTEM: return "no_filesystem";  // unformatted or exFAT
+        default:
+            snprintf(other, sizeof other, "mount_err_%d", (int) r);
+            return other;
+    }
+}
+
 // Probe the card once and, only on success, mount + spawn the writer
 // (the session itself opens on the first CAN frame — see g_sd_session_wanted).
 // Called from setup(); leaves the feature dormant (g_sd_active stays false) on
@@ -1083,7 +1112,13 @@ static void sdInit() {
     }
 
     SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
-    if (!SD.begin(SD_CS_PIN, SPI, SD_SPI_HZ)) { g_sd.state = "no_card"; return; }
+    if (!SD.begin(SD_CS_PIN, SPI, SD_SPI_HZ)) {
+        const char* why = sdProbeFailure();
+        if (why || !SD.begin(SD_CS_PIN, SPI, SD_SPI_HZ)) {
+            g_sd.state = why ? why : "no_card";
+            return;
+        }
+    }
 
     g_sd.state = "waiting";
     xTaskCreatePinnedToCore(sdWriterTask, "sdwriter", 8192, nullptr, 1, nullptr, 0);
