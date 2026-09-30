@@ -210,9 +210,9 @@ mowing, all at the low speed setpoint) — TENTATIVE:
   reverse doesn't appear here at all: the pump direction is fixed, and travel
   direction is the separate traction motor on the CAN bus.)
 - **The motor is the thermally-limited part.** Under continuous running the
-  controller temperature levels off near 18 °C, while the motor temperature
-  keeps climbing (past 40 °C over the run, still rising) — where it plateaus is
-  not yet captured.
+  controller temperature settles low (seen up to ~34 °C), while the motor
+  temperature climbs much higher and plateaus around **91 °C** (TENTATIVE:
+  observation during extended wood chipping).
 
 ## The monitor tool
 

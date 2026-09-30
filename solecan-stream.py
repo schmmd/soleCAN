@@ -66,11 +66,12 @@ from solecan_proto import (
     DM1_LAMP_NAMES, VC_STATE_NAMES,
     NUM_CELLS, NUM_TEMPS, PACK_CAPACITY_WH,
     CHGR_FLAG_NAMES, CHGR_FLAGS_DELIVERING,
-    TORQUE_DEAD_LOW, TORQUE_PCT_PER_BIT,
     derive_bms_fault_codes,
     c_to_f,
     decode as proto_decode,
 )
+
+MOTOR_CURRENT_BAR_A = 300   # TUI bar full scale for motor RMS current (display only)
 
 
 # --- script-local protocol tables -----------------------------------------
@@ -265,7 +266,7 @@ class State:
     # motor controller (FF21CA)
     motor_rpm: Channel = field(default_factory=Channel)        # signed (dir * |rpm|)
     motor_rpm_mag: Channel = field(default_factory=Channel)    # |rpm| magnitude
-    motor_torque: Channel = field(default_factory=Channel)
+    motor_current: Channel = field(default_factory=Channel)
     motor_direction: Channel = field(default_factory=Channel)  # -1 R / 0 N / +1 F (byte 7 low nibble)
     motor_range: Channel = field(default_factory=Channel)      # R1/R2/R3 (byte 7 high nibble; RPM cap selector)
     # FF21CA bytes 4 and 5 are both J1939 +40 C-offset temps; byte 4 is
@@ -423,7 +424,7 @@ _NAME_TO_ATTR = {
     "motor.rpm_magnitude": "motor_rpm_mag",
     "motor.direction": "motor_direction",
     "motor.range": "motor_range",
-    "motor.torque_raw": "motor_torque",
+    "motor.current_a": "motor_current",
     "motor.controller_temp_c": "controller_temp_c",
     "motor.motor_temp_c": "motor_temp_c",
     # FF21 dashboard heartbeat
@@ -1119,19 +1120,16 @@ def render_motor(state: State, now: float) -> Panel:
             rpm_text = Text(f"{sign}{mag:>5d}  (stale)", style="yellow dim")
     t.add_row("RPM", rpm_text)
 
-    tq = state.motor_torque.value
-    if tq is None:
-        t.add_row("torque", Text("---", style="dim"))
+    amps = state.motor_current.value
+    if amps is None:
+        t.add_row("motor I", Text("---", style="dim"))
     else:
-        # Raw 0..0xFF mapped to 0..100% with a 3-unit idle dead-low
-        # subtracted (sensor noise with foot off). No upper clamp: peak
-        # forward acceleration reaches raw ~262 and renders as ~103%.
-        pct = max(0.0, (int(round(tq)) - TORQUE_DEAD_LOW) * TORQUE_PCT_PER_BIT)
+        # Motor RMS current in A; bar spans 0..MOTOR_CURRENT_BAR_A (corpus
+        # peak 262 A under hard acceleration).
         bar_w = 20
-        filled = max(0, min(bar_w, int(round(pct * bar_w / 100))))
+        filled = max(0, min(bar_w, int(round(amps * bar_w / MOTOR_CURRENT_BAR_A))))
         bar = Text("█" * filled + "░" * (bar_w - filled))
-        t.add_row("torque",
-                  Text.assemble(bar, Text(f"  {pct:>5.1f}%  (raw {int(tq)})")))
+        t.add_row("motor I", Text.assemble(bar, Text(f"  {int(amps):>4d} A")))
 
     di = state.motor_direction.value
     if di is None:
@@ -1514,8 +1512,8 @@ def state_to_json(state: State, now: float, mode: str) -> dict:
         mot["rpm_magnitude"] = int(state.motor_rpm_mag.value)
         if state.motor_direction.value is not None:
             mot["direction"] = int(state.motor_direction.value)
-        if state.motor_torque.value is not None:
-            mot["torque_raw"] = int(state.motor_torque.value)
+        if state.motor_current.value is not None:
+            mot["current_a"] = int(state.motor_current.value)
         if state.motor_range.value is not None:
             mot["range"] = int(state.motor_range.value)
         if state.controller_temp_c.value is not None:

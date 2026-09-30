@@ -314,15 +314,15 @@ function update(d){
   setGauge(m.rpm_magnitude,3000,'sprog');
   document.getElementById('sval').textContent=m.rpm_magnitude!=null?m.rpm_magnitude:'–';
   document.getElementById('sunit').textContent='RPM';
-  var eff=m.torque_raw;
+  var amps=m.current_a;
   var ebar=document.getElementById('ebar');
-  if(eff!=null){
-    var efrac=Math.max(0,Math.min(eff/255,1));
+  if(amps!=null){
+    var efrac=Math.max(0,Math.min(amps/300,1));
     var eh=efrac*80;
     ebar.setAttribute('y',(100-eh).toFixed(1));
     ebar.setAttribute('height',eh.toFixed(1));
-    ebar.setAttribute('fill',eff>=0x14?'#1976d2':'#bdbdbd');
-    document.getElementById('eval').textContent=Math.round(efrac*100)+'%';
+    ebar.setAttribute('fill',amps>=14?'#1976d2':'#bdbdbd');
+    document.getElementById('eval').textContent=amps+'A';
   }else{
     ebar.setAttribute('height',0);
     document.getElementById('eval').textContent='–';

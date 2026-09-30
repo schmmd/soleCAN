@@ -835,7 +835,7 @@ telemetry) and FECA (DM1, fault codes). FF21CA is suppressed entirely
 while charging — the controller goes silent when traction contactors
 (Albright SW200) are open.
 
-#### FF21CA — Motor telemetry — CONFIRMED (RPM, torque, temps, state)
+#### FF21CA — Motor telemetry — CONFIRMED (RPM, motor current, temps, state)
 
 Broadcast at ~85 Hz. Full 29-bit ID is `0x0CFF21CA` (priority 3, not
 the default 6 — higher priority than BMS broadcasts, consistent with a
@@ -843,7 +843,7 @@ real-time inverter feed).
 
 | Byte | data[]        | Meaning                                                          |
 |------|---------------|------------------------------------------------------------------|
-| 1..2 | data[0..1] LE | **Torque** — unsigned magnitude of motor effort, little-endian u16, observed 0..262 |
+| 1..2 | data[0..1] LE | **Motor RMS current**, 1 A/bit, little-endian u16, unsigned, observed 0..262 A |
 | 3..4 | data[2..3] LE | **Motor RPM**: rpm = (le16) − 0x0C80                       |
 | 5    | data[4]       | **Controller temperature**: °C = raw − 40                          |
 | 6    | data[5]       | **Motor temperature**: °C = raw − 40                               |
@@ -856,16 +856,25 @@ Reverse is signaled separately by data[7]. Physical source is the
 2-channel A/B quadrature encoder on the motor shaft — see "Motor
 speed encoder" below for the MC-side pinout.
 
-**Torque (data[0..1], little-endian u16).** This field is **not pedal
-position** but rather the controller's unsigned magnitude of commanded motor
-torque / current — what fraction of motor max effort the controller is asking
-the inverter to apply. Symmetric across drive and regen: the value
+**Motor current (data[0..1], little-endian u16).** This field is **not pedal
+position** but the controller's unsigned motor RMS current in amps, 1 A per
+bit. It was first read as a commanded torque / effort magnitude, which is the
+same thing up to a scale factor since RMS current tracks torque. Symmetric
+across drive and regen: the value
 rises whether the motor is being driven *or* being used as a
 generator. The direction of work (drive vs regen) is **not encoded
 anywhere in FF21CA** — derive it from the sign of `F100F3` pack
 current. Observed range 0..262 (peak forward acceleration pushes past
 the 8-bit boundary — see below); idle resting offset ~3 (sensor noise); below
 raw ~14 the controller's dead band keeps motor RPM near 0. CONFIRMED.
+
+**Update (2026-09-24, CANopen cross-validation):** this field is the Curtis
+`Current_RMS` monitor variable in whole amps. Polling the controller's CANopen
+dictionary alongside the J1939 stream showed OEM object `0x33EA` equal to
+`data[0..1]` to within ±2 over a 14-minute drive/chip session, and Curtis
+`0x3209 Current_RMS` (0.1 A) equal to 10× that. So "262" is 262 A RMS motor
+current, and the effort reading below holds because RMS current tracks torque.
+See `canopen/NOTES.md` "SD SESSION 137". CONFIRMED.
 
 Two observations that establish the "effort, not pedal" reading:
 
@@ -883,7 +892,7 @@ The forward/reverse ceiling asymmetry noted historically (raw ceilings of ~262
 vs ~0x96) is a controller-side reverse-effort limiter applied before the value
 goes on the wire.
 
-**data[1] is the torque high byte — CONFIRMED.** Two phenomena that were
+**data[1] is the current high byte — CONFIRMED.** Two phenomena that were
 documented separately turned out to be the same thing viewed through an 8-bit
 lens: (a) data[1]'s rare `0x01` excursions, briefly mis-read as a coast /
 freewheel flag, and (b) "brief 0x00 transients in data[0] under heavy load,"
@@ -962,6 +971,12 @@ recorded here as reference if the mechanical gear is known by other
 means (e.g. operator input), but they are unsafe to apply to live CAN
 data:
 
+> **Controller change, 2026-09-24:** the Curtis per-range RPM caps for
+> *reverse* in R1 and R2 were raised from 80 % of forward to equal forward
+> (1600→2000 and 2000→2500 rpm) via a persistent CANopen parameter write.
+> R3 reverse stays 2240. Details and undo in `canopen/README.md` (Writing parameters)
+> "SPEED-LIMIT PARAMETER BLOCK".
+
 | Mechanical range | km/h per 1000 motor RPM | km/h at 2800 RPM (max) |
 |------------------|-------------------------|------------------------|
 | L (Low, Agri)    | 1.64                    | 4.6                    |
@@ -1003,7 +1018,7 @@ unlatch when DM1 returns to empty. Standard J1939 prescribes DTCs going
 screen until a key cycle.
 
 FF21CA data[6] remains an unknown non-DM1 status candidate — it is `0x00` in
-every one of 425,941 corpus frames. data[1] is the torque high byte, not a
+every one of 425,941 corpus frames. data[1] is the current high byte, not a
 status field; see above.
 Injection of non-zero values into FF21CA byte 7 flashed dashboard lamps but
 never produced a numeric code.
