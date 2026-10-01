@@ -427,7 +427,7 @@ via mDNS.
 |---|---|
 | `http://tractor.local/` | Auto-refreshing dashboard |
 | `http://tractor.local/json` | Decoded state as JSON |
-| `http://tractor.local/config` | Build + WiFi diagnostics as JSON (board, firmware version, features, STA/AP status) |
+| `http://tractor.local/config` | Build + WiFi diagnostics as JSON (board, firmware version, features, STA/AP status; `wifi.sta.source` is `nvs` or `compiled`, `wifi.sta.compiled` is true when the image was built with a `WIFI_SSID`) |
 | `http://tractor.local/wifi` | Web form to set the station WiFi SSID/password at runtime (AP-password gated) |
 | `http://tractor.local/usb` | USB-mode control page; `POST /usb?mode=<logging\|slcan\|kelly>` sets it (see [USB port mode](#usb-port-mode)) |
 | `http://tractor.local/logs` | Recent device log as text (works in any USB mode) |
@@ -651,6 +651,13 @@ Bench notes:
 
 - **Test one device at a time.** Every unit broadcasts the same AP SSID and
   mDNS name.
+- **No WiFi credentials may ship.** The ship-clean stage fails if any station
+  SSID/password is active (NVS or compiled) or if the image was built with
+  `WIFI_SSID` set — a device carrying the builder's home network keeps hunting
+  for it at the customer's house. Clear NVS with `flash.py --erase` (or an
+  empty SSID on `/wifi`) and build release images without `WIFI_SSID`/
+  `WIFI_PASS`. `--allow-sta` downgrades the stored-credentials check to a
+  warning for dev runs over a bench network; a baked-in SSID always fails.
 - **The injection stage needs an ACK node on the bench bus.** The device
   under test is listen-only and never ACKs, so a lone injector goes
   error-passive and retransmits its *first* frame forever while the rest

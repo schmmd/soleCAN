@@ -461,6 +461,7 @@ volatile uint8_t  g_sta_last_disconnect_reason = 0;   // 0 = never disconnected
 // defaults. Written by the /wifi POST handler.
 char g_sta_ssid[33] = "";
 char g_sta_pass[64] = "";
+static bool g_sta_from_nvs = false;   // true when NVS 'wifi/ssid' overrode the compiled defaults
 static Preferences g_prefs;
 
 static inline bool staConfigured() { return g_sta_ssid[0] != '\0'; }
@@ -533,6 +534,7 @@ void usbLoggingPoll();
 static void loadStaCreds() {
     g_prefs.begin("wifi", /*readOnly=*/true);
     if (g_prefs.isKey("ssid")) {
+        g_sta_from_nvs = true;
         g_prefs.getString("ssid", g_sta_ssid, sizeof(g_sta_ssid));
         g_prefs.getString("pass", g_sta_pass, sizeof(g_sta_pass));
     } else {
@@ -547,6 +549,7 @@ static void saveStaCreds(const char* ssid, const char* pass) {
     g_prefs.putString("ssid", ssid);
     g_prefs.putString("pass", pass);
     g_prefs.end();
+    g_sta_from_nvs = true;
 }
 
 // Length-independent compare so a wrong AP password can't be timing-probed.
@@ -2384,6 +2387,8 @@ void handleConfig() {
     const bool join_sta = staConfigured();
     sta["ssid"]     = g_sta_ssid;                   // active STA SSID (NVS or default)
     sta["pass_set"] = (g_sta_pass[0] != '\0');      // presence only, never the password
+    sta["source"]   = g_sta_from_nvs ? "nvs" : "compiled";
+    sta["compiled"] = (WIFI_SSID[0] != '\0');       // a WIFI_SSID is baked into this image
     sta["enabled"]  = join_sta;
     const bool sta_connected = join_sta && WiFi.status() == WL_CONNECTED;
     sta["status"] = !join_sta ? "disabled"

@@ -18,6 +18,9 @@ interface of the firmware against real hardware:
     failure, drop/recovery counters; plus an optional sustained-write soak
     (--sd-soak) that streams frames and checks bytes land on the card
   - BLE (optional, needs `bleak`): NUS notify stream reassembles to valid JSON
+  - Ship-clean WiFi: no station credentials active (NVS or compiled) and no
+    WIFI_SSID baked into the image, so the device never tries to join the
+    builder's home network from a customer's house
   - LEDs (optional, --interactive): operator visual checks, run FIRST so the
     operator only has to be present at the start, then can walk away
 
@@ -706,6 +709,35 @@ def stage_wifi(args) -> None:
     if check(restored, "restored STA SSID reconnects",
              f"sta={sta!r} (want ssid={orig_ssid!r}, status=connected)"):
         report("INFO", f"restored STA SSID to {orig_ssid!r}")
+
+
+def stage_ship_clean(args) -> None:
+    """No STA credentials may ship: neither stored in NVS nor baked into the
+    image. A device that leaves the bench with the builder's home network
+    configured keeps trying to join it from the customer's house, dragging
+    the soft-AP beacon off-channel (see the STA retry note in main.cpp)."""
+    section("Ship-clean WiFi (no STA credentials)")
+    status, _, body = http_get(args.host, "/config")
+    if not check(status == 200, "GET /config", f"HTTP {status}"):
+        return
+    sta = json.loads(body).get("wifi", {}).get("sta", {})
+    if "compiled" not in sta:
+        report("SKIP", "firmware predates /config wifi.sta.compiled/source — "
+                       "cannot verify; reflash a current build")
+        return
+    report("INFO", f"active STA: ssid={sta.get('ssid')!r} "
+                   f"pass_set={sta.get('pass_set')} source={sta.get('source')}")
+
+    has_sta = bool(sta.get("ssid")) or bool(sta.get("pass_set"))
+    if has_sta and args.allow_sta:
+        report("WARN", "STA credentials active (--allow-sta): clear them "
+                       "via /wifi or flash.py --erase before shipping")
+    else:
+        check(not has_sta, "no STA credentials active (NVS or compiled)",
+              f"source={sta.get('source')} — clear via /wifi (empty SSID) "
+              "or reflash with flash.py --erase")
+    check(not sta.get("compiled"), "no WIFI_SSID baked into the image",
+          "rebuild without WIFI_SSID/WIFI_PASS; an NVS erase would revive it")
 
 
 def stage_socketcand(args) -> None:
@@ -1399,6 +1431,10 @@ def main() -> int:
                          "(--host 192.168.4.1) with --wifi-restore-pass set — "
                          "running it over the STA/bench host tears down the "
                          "very connection the test uses")
+    ap.add_argument("--allow-sta", action="store_true",
+                    help="downgrade the ship-clean STA-credentials check to "
+                         "WARN (dev runs over a bench network); a baked-in "
+                         "WIFI_SSID still fails")
     ap.add_argument("--mdns-name", default="tractor",
                     help="mDNS hostname / BLE device name the build advertises")
     ap.add_argument("--skip-mdns", action="store_true",
@@ -1469,6 +1505,7 @@ def main() -> int:
     stage_sd_files(args, sd_ok)
     stage_mdns(args)
     stage_wifi(args)
+    stage_ship_clean(args)
     stage_socketcand(args)
     stage_slcan(args)
     stage_inject(args)
