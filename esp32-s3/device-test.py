@@ -51,8 +51,9 @@ Examples (from the repo root, where the uv project lives):
 
   # Full pre-ship run: USB serial + bench injector + ACK adapter + BLE +
   # LED prompts. Pass --expect-vin only when the board is powered from a
-  # 12 V supply — on USB power the rail sense reads ~4.6 V.
-  uv run python esp32-s3/device-test.py \
+  # 12 V supply — on USB power the rail sense reads ~4.6 V. The `bench`
+  # extra pulls in canalystii (ACK adapter) and bleak (BLE stage).
+  uv run --extra bench python esp32-s3/device-test.py \
       --serial /dev/cu.usbmodem101 \
       --inject-interface slcan --inject-channel /dev/cu.usbserial-A50 \
       --ack-interface canalystii --ack-channel 0 \
@@ -1287,7 +1288,7 @@ def stage_ble(args) -> None:
         import asyncio
         from bleak import BleakClient, BleakScanner
     except ImportError:
-        check(False, "import bleak", "install with: uv pip install bleak")
+        check(False, "import bleak", "run with: uv run --extra bench ...")
         return
 
     async def run() -> dict:

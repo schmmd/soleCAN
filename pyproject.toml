@@ -13,6 +13,8 @@ dependencies = [
 [project.optional-dependencies]
 ble = ["bless>=0.3"]
 canalyst = ["canalystii>=0.1"]
+# esp32-s3/device-test.py bench run: CANalyst-II ACK node + BLE stage client
+bench = ["canalystii>=0.1", "bleak>=0.22"]
 all = ["bless>=0.3", "canalystii>=0.1"]
 
 # bless pulls Windows-only pre-release winrt-* packages. We don't run on

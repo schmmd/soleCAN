@@ -617,8 +617,8 @@ the raw-frame taps, and that `motor.alive` latches and goes stale correctly.
 uv run python esp32-s3/device-test.py
 
 # Full pre-ship run: USB serial + bench injector + ACK adapter + BLE +
-# operator LED checks
-uv run python esp32-s3/device-test.py \
+# operator LED checks (the `bench` extra pulls in canalystii + bleak)
+uv run --extra bench python esp32-s3/device-test.py \
     --serial /dev/cu.usbmodem101 \
     --inject-interface slcan --inject-channel /dev/cu.usbserial-A50 \
     --ack-interface canalystii --ack-channel 0 \
