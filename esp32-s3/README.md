@@ -623,7 +623,7 @@ uv run --extra bench python esp32-s3/bench-test.py \
     --inject-interface slcan --inject-channel /dev/cu.usbserial-A50 \
     --ack-interface canalystii --ack-channel 0 \
     --expect-version $(git rev-parse --short HEAD) \
-    --expect-sd --sd-soak 30 --sd-delete-test \
+    --expect-sd --sd-soak 30 --sd-delete-test --sd-clean \
     --ble --interactive
 ```
 
@@ -661,7 +661,10 @@ Bench notes:
   `--sd-soak SECONDS` streams frames flat-out during injection and checks
   the bytes land on the card; use 30 or more. `--sd-delete-test` deletes the
   oldest non-active session to exercise `DELETE /sd/sessions/{id}` — it is
-  destructive, so only use it on a bench card.
+  destructive, so only use it on a bench card. `--sd-clean` runs last: it
+  resets the board over `--serial` (the test's own session is active and
+  can't be deleted otherwise), then deletes every session so the card ships
+  empty. Leave the bench bus idle so no new session opens after the reset.
 - `--ble` needs the `bleak` package, which the `bench` extra installs
   (`uv run --extra bench ...`).
 - On a T-2CAN pass `--channels 2` so the socketcand channel checks match the

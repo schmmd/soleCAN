@@ -17,7 +17,8 @@ interface of the firmware against real hardware:
   - SD session logging (RejsaCAN): card mounted and logging, no latched
     failure, drop/recovery counters; plus an optional sustained-write soak
     (--sd-soak) that streams frames and checks bytes land on the card, and
-    an optional destructive session delete (--sd-delete-test)
+    an optional destructive session delete (--sd-delete-test) and
+    end-of-run card wipe (--sd-clean)
   - BLE (optional, needs `bleak`): NUS notify stream reassembles to valid JSON
   - Ship-clean WiFi: no station credentials stored in NVS, so the device
     never tries to join the builder's home network from a customer's house
@@ -59,7 +60,7 @@ Examples (from the repo root, where the uv project lives):
       --inject-interface slcan --inject-channel /dev/cu.usbserial-A50 \
       --ack-interface canalystii --ack-channel 0 \
       --expect-version $(git rev-parse --short HEAD) \
-      --expect-sd --sd-soak 30 --sd-delete-test \
+      --expect-sd --sd-soak 30 --sd-delete-test --sd-clean \
       --ble --interactive
 
 Exit code 0 when every executed check passes, 1 otherwise.
@@ -1346,6 +1347,67 @@ def stage_ble(args) -> None:
           "BLE payload has expected fields", f"keys: {sorted(j.keys())}")
 
 
+def stage_sd_clean(args) -> None:
+    """Leave the card empty for shipping. The session the test itself opened
+    is active and can't be deleted, so hard-reset the board over USB (the
+    native USB-Serial/JTAG reset line — no firmware support needed), wait for
+    it to come back in `waiting` (no CAN on an idle bench bus, so no new
+    session opens), then delete every session on the card."""
+    section("SD ship-clean")
+    if not args.sd_clean:
+        report("SKIP", "pass --sd-clean (with --serial) to reboot and wipe "
+                       "the test's sessions so the card ships empty")
+        return
+    if not args.serial:
+        check(False, "SD clean", "--sd-clean needs --serial to reset the board")
+        return
+
+    import serial  # pyserial — project dependency
+    try:
+        with serial.Serial(args.serial) as ser:
+            ser.dtr = False      # DTR low: plain reboot, not download mode
+            ser.rts = True       # RTS high: chip reset
+            time.sleep(0.2)
+            ser.rts = False
+    except Exception as e:  # noqa: BLE001
+        check(False, "reset board over USB", str(e))
+        return
+
+    # WiFi drops with the reboot; the host may need a moment to rejoin.
+    time.sleep(3)
+    j = None
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        try:
+            j = fetch_json(args.host, retries=0)
+            break
+        except RuntimeError:
+            time.sleep(2)
+    if not check(j is not None, "device back after reset", "no /json within 60 s"):
+        return
+    uptime = j.get("uptime", 1e9)
+    if not check(uptime < 60, "board actually rebooted", f"uptime={uptime:.0f} s"):
+        return
+    state = jget(j, "sd.state")
+    if not check(state == "waiting", "no session active after reboot",
+                 f"state={state} — is something still transmitting on the bench bus?"):
+        return
+
+    try:
+        _, _, body = http_get(args.host, "/sd/sessions")
+        ids = [s["id"] for s in json.loads(body).get("sessions", [])]
+        for sid in ids:
+            status, _, _ = http_request(args.host, f"/sd/sessions/{sid}",
+                                        method="DELETE")
+            check(status == 200, f"DELETE /sd/sessions/{sid}", f"HTTP {status}")
+        _, _, body = http_get(args.host, "/sd/sessions")
+        left = [s["id"] for s in json.loads(body).get("sessions", [])]
+    except Exception as e:  # noqa: BLE001
+        check(False, "card wiped", str(e))
+        return
+    check(not left, "card ships with no sessions", f"remaining={left}")
+
+
 def stage_interactive(args) -> None:
     """Operator visual checks, front-loaded so the operator only needs to be
     present at the very start of the run — then they can walk away for the
@@ -1467,6 +1529,10 @@ def main() -> int:
     ap.add_argument("--sd-delete-test", action="store_true",
                     help="exercise DELETE /sd/sessions/{id} by removing the "
                          "oldest non-active session (destructive)")
+    ap.add_argument("--sd-clean", action="store_true",
+                    help="last stage: reset the board over --serial and "
+                         "delete every session so the card ships empty "
+                         "(destructive)")
     ap.add_argument("--vin-tol", type=float, default=0.8,
                     help="VIN sense tolerance in volts")
     ap.add_argument("--channels", type=int, default=1,
@@ -1505,6 +1571,7 @@ def main() -> int:
     stage_slcan(args)
     stage_inject(args)
     stage_ble(args)
+    stage_sd_clean(args)
 
     counts = {s: sum(1 for st, _ in RESULTS if st == s)
               for s in ("PASS", "FAIL", "WARN", "SKIP")}
