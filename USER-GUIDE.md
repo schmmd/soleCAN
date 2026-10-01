@@ -1,5 +1,7 @@
 # SoleCAN — user guide
 
+<img width="400" alt="solecan" src="https://github.com/user-attachments/assets/8781f2c8-9bbd-4283-81e0-f34f309b883a" />
+
 SoleCAN is a small box that plugs into your Solectrac e25G's diagnostic port
 and shows you what the tractor is actually doing: battery state of charge,
 pack voltage and current, motor RPM and power, charger status, cell voltages,
@@ -18,6 +20,10 @@ To view the dashboard, you can either use:
 The tractor's diagnostic port is the OBD-II connector (the trapezoid-shaped
 16-pin socket) under the hood. Push the plug in until it seats.
 
+<img width="600" alt="odb2" src="https://github.com/user-attachments/assets/c72fe918-dad0-4e34-a73d-e28f17e7bd66" />
+
+
+
 The device is powered by the tractor, and is on whenever the 12V system is
 live. On my tractor the 12V system is live during in key off, but not when the
 shutoff switch is turned off.
@@ -27,6 +33,8 @@ with CAN traffic. The device draws around 0.04 A when active and 0.001 A when
 asleep, which is entered after a period of CAN inactivity.
 
 ## 2. Connect your phone or laptop
+
+<img width="400" alt="dashboard" src="https://github.com/user-attachments/assets/d965db1c-4ce0-4e2f-9cad-b684efff2772" />
 
 ### Over WiFi
 
