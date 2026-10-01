@@ -599,7 +599,7 @@ contract. The command works in the `logging` and `slcan` USB modes, not `kelly`.
 
 ## Pre-ship bench test
 
-`device-test.py` is an acceptance suite to run against each flashed device
+`bench-test.py` is an acceptance suite to run against each flashed device
 before it ships. From a bench Mac it exercises every external interface: the
 HTTP dashboard and `/json` (including firmware version, CAN health counters,
 and the RejsaCAN 12 V sense), the captive-portal redirect, mDNS, socketcand
@@ -614,15 +614,16 @@ the raw-frame taps, and that `motor.alive` latches and goes stale correctly.
 ```bash
 # WiFi-only smoke test: join the device's AP (SSID `tractor`), then from the
 # repo root:
-uv run python esp32-s3/device-test.py
+uv run python esp32-s3/bench-test.py
 
-# Full pre-ship run: USB serial + bench injector + ACK adapter + BLE +
-# operator LED checks (the `bench` extra pulls in canalystii + bleak)
-uv run --extra bench python esp32-s3/device-test.py \
+# Full pre-ship run: USB serial + bench injector + ACK adapter + microSD +
+# BLE + operator LED checks (the `bench` extra pulls in canalystii + bleak)
+uv run --extra bench python esp32-s3/bench-test.py \
     --serial /dev/cu.usbmodem101 \
     --inject-interface slcan --inject-channel /dev/cu.usbserial-A50 \
     --ack-interface canalystii --ack-channel 0 \
     --expect-version $(git rev-parse --short HEAD) \
+    --expect-sd --sd-soak 30 --sd-delete-test \
     --ble --interactive
 ```
 
@@ -655,8 +656,14 @@ Bench notes:
 - **Pass `--expect-vin` only when the board is powered from a 12 V supply.**
   On USB power the RejsaCAN rail sense reads ~4.6 V (5 V minus the
   protection-diode drop), which would fail a 12 V expectation.
-- `--ble` needs the `bleak` package (`uv pip install bleak`); it is not a
-  project dependency.
+- **SD flags (RejsaCAN).** `--expect-sd` fails the run if no card is
+  mounted and logging (without it a missing card is only a warning).
+  `--sd-soak SECONDS` streams frames flat-out during injection and checks
+  the bytes land on the card; use 30 or more. `--sd-delete-test` deletes the
+  oldest non-active session to exercise `DELETE /sd/sessions/{id}` — it is
+  destructive, so only use it on a bench card.
+- `--ble` needs the `bleak` package, which the `bench` extra installs
+  (`uv run --extra bench ...`).
 - On a T-2CAN pass `--channels 2` so the socketcand channel checks match the
   board.
 
@@ -667,7 +674,7 @@ esp32-s3/
 ├── platformio.ini          # board envs + build configuration
 ├── copy_dashboard.py       # pre-build: copies repo-root dashboard.html → src/
 ├── inject_build_overrides.py # pre-build: injects AP_SSID / AP_PASS / MDNS_NAME
-├── device-test.py          # bench acceptance suite for a flashed device
+├── bench-test.py          # bench acceptance suite for a flashed device
 ├── sd-pull.py              # pull SD sessions over the USB console (`sd` command)
 ├── README.md               # this file
 └── src/

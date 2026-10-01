@@ -16,7 +16,8 @@ interface of the firmware against real hardware:
   - VIN sense (RejsaCAN): 12 V rail reading
   - SD session logging (RejsaCAN): card mounted and logging, no latched
     failure, drop/recovery counters; plus an optional sustained-write soak
-    (--sd-soak) that streams frames and checks bytes land on the card
+    (--sd-soak) that streams frames and checks bytes land on the card, and
+    an optional destructive session delete (--sd-delete-test)
   - BLE (optional, needs `bleak`): NUS notify stream reassembles to valid JSON
   - Ship-clean WiFi: no station credentials stored in NVS, so the device
     never tries to join the builder's home network from a customer's house
@@ -47,18 +48,18 @@ mDNS name.
 Examples (from the repo root, where the uv project lives):
 
   # WiFi-only smoke test, Mac joined to the device's `tractor` AP
-  uv run python esp32-s3/device-test.py
+  uv run python esp32-s3/bench-test.py
 
-  # Full pre-ship run: USB serial + bench injector + ACK adapter + BLE +
-  # LED prompts. Pass --expect-vin only when the board is powered from a
+  # Full pre-ship run: USB serial + bench injector + ACK adapter + microSD +
+  # BLE + LED prompts. Pass --expect-vin only when the board is powered from a
   # 12 V supply — on USB power the rail sense reads ~4.6 V. The `bench`
   # extra pulls in canalystii (ACK adapter) and bleak (BLE stage).
-  uv run --extra bench python esp32-s3/device-test.py \
+  uv run --extra bench python esp32-s3/bench-test.py \
       --serial /dev/cu.usbmodem101 \
       --inject-interface slcan --inject-channel /dev/cu.usbserial-A50 \
       --ack-interface canalystii --ack-channel 0 \
       --expect-version $(git rev-parse --short HEAD) \
-      --expect-sd --sd-soak 60 \
+      --expect-sd --sd-soak 30 --sd-delete-test \
       --ble --interactive
 
 Exit code 0 when every executed check passes, 1 otherwise.

@@ -4009,7 +4009,7 @@ void setup() {
 // server.handleClient(), so it is single-threaded and not reentrant.
 //
 // The per-tick drain cap is a runaway-safety bound, not the fix for the
-// device-test --sd-soak starvation — that was slcanSendFrame() blocking on a
+// bench-test --sd-soak starvation — that was slcanSendFrame() blocking on a
 // full USB-CDC buffer, now dropped non-blockingly like the other taps. The cap
 // only guarantees the loop always returns to server.handleClient()/bleTick()
 // even if a future per-frame consumer turns slow again. It equals the driver

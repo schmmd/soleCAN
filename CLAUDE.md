@@ -155,7 +155,7 @@ gradle wrapper --gradle-version 8.7   # one-time; wrapper JAR is not checked in
 There are no unit tests. CI (`.github/workflows/docker-builds.yml`) only
 builds the three Docker images; the Python one runs `py_compile` and `--help`
 as a smoke check. The tools are validated against real captures and live
-injection on the tractor. The one test suite is `esp32-s3/device-test.py`, a
+injection on the tractor. The one test suite is `esp32-s3/bench-test.py`, a
 hardware-in-the-loop acceptance suite run against a flashed, powered device
 before it ships. It needs bench hardware: the device itself, and for the CAN
 decode stage a bench injector adapter plus an ACK node (the device under test
