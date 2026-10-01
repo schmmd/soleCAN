@@ -211,19 +211,7 @@ The LilyGo T-2CAN has no user LED, so its LED calls are no-ops.
    cd solectrac/esp32-s3
    ```
 
-3. *(Optional)* **Set a bench WiFi network** to also join. Leave these unset to
-   build AP-only — the board still broadcasts its own hotspot (the stable
-   default for field use), so this step isn't required:
-
-   ```bash
-   export WIFI_SSID="your-network"
-   export WIFI_PASS="your-password"
-   ```
-
-   Add these to your shell profile (`~/.zshrc`, `~/.config/fish/config.fish`)
-   if you'd like them to persist.
-
-4. **Plug the board in via USB-C.** On macOS the serial port appears as
+3. **Plug the board in via USB-C.** On macOS the serial port appears as
    `/dev/cu.usbmodemXXXXX`; PlatformIO auto-detects it.
 
 ## Common commands
@@ -296,7 +284,6 @@ set -a; source esp32-s3/.env; set +a
 docker build -f esp32-s3/Dockerfile \
     --build-arg AP_SSID="$AP_SSID" --build-arg AP_PASS="$AP_PASS" \
     --build-arg MDNS_NAME="$MDNS_NAME" \
-    --build-arg WIFI_SSID="$WIFI_SSID" --build-arg WIFI_PASS="$WIFI_PASS" \
     --build-arg GIT_SHA=$(git rev-parse --short HEAD) \
     -t solectrac-fw .
 ```
@@ -330,14 +317,13 @@ By default the hotspot is **SSID `tractor` / password `electricity`** and the
 board advertises itself as **`tractor.local`** — if you don't do anything here,
 the build is unchanged.
 
-If you also set `WIFI_SSID` / `WIFI_PASS`, the board additionally joins that
-network as a station for bench use (dual AP+STA mode). Leave them empty for an
-AP-only build — the recommended field setup, since the AP and station share one
-radio and a station endlessly scanning for an out-of-range network makes the
-hotspot drop in and out.
+A home/bench network for the board to also join (dual AP+STA mode) is **not a
+build setting** — set it at runtime on the `/wifi` page (see "Changing the
+station WiFi at runtime" below). Builds are always AP-only, so no release image can
+carry a builder's network out the door.
 
-To override the AP credentials, mDNS hostname (and/or set a bench network), copy
-the template to a gitignored `.env` and set values:
+To override the AP credentials or mDNS hostname, copy the template to a
+gitignored `.env` and set values:
 
 ```bash
 cp .env.example .env
@@ -394,16 +380,13 @@ recovery path if you mistype. Only the station credentials are settable here —
 the AP SSID/password and mDNS name stay compile-time. An empty SSID disables the
 station (AP-only).
 
-**Persistence and precedence — read this before you get surprised.** The
-credentials are stored in **NVS**, a separate flash partition, so they **survive
-a normal reflash** (`pio run -t upload` rewrites only the app partition). At boot
-the firmware reads NVS **first** and falls back to the compiled
-`WIFI_SSID`/`WIFI_PASS` only when NVS is unprovisioned. So once you set
-credentials through the form, they **take precedence over any baked-in
-`WIFI_SSID`/`WIFI_PASS`** — reflashing with *different* compiled credentials will
-**not** change the network the board joins. To return to the compiled defaults,
-re-enter them through the form or fully erase flash (`esptool erase_flash`, or
-`pio run -t erase`), which clears NVS.
+**Persistence — read this before you ship a device.** The credentials are
+stored in **NVS**, a separate flash partition, so they **survive a normal
+reflash** (`pio run -t upload` rewrites only the app partition). NVS is the
+*only* source of station credentials — nothing is compiled in — so a freshly
+erased board is AP-only. To clear them, submit an empty SSID on the form, type
+`wifi clear` over USB, or fully erase flash (`flash.py --erase`,
+`esptool erase_flash`, or `pio run -t erase`).
 
 **Offline recovery — `wifi clear` over USB.** If a stale station SSID keeps the
 shared-radio AP flapping so badly you can't reach `/wifi`, type `wifi clear` into
@@ -427,7 +410,7 @@ via mDNS.
 |---|---|
 | `http://tractor.local/` | Auto-refreshing dashboard |
 | `http://tractor.local/json` | Decoded state as JSON |
-| `http://tractor.local/config` | Build + WiFi diagnostics as JSON (board, firmware version, features, STA/AP status; `wifi.sta.source` is `nvs` or `compiled`, `wifi.sta.compiled` is true when the image was built with a `WIFI_SSID`) |
+| `http://tractor.local/config` | Build + WiFi diagnostics as JSON (board, firmware version, features, STA/AP status) |
 | `http://tractor.local/wifi` | Web form to set the station WiFi SSID/password at runtime (AP-password gated) |
 | `http://tractor.local/usb` | USB-mode control page; `POST /usb?mode=<logging\|slcan\|kelly>` sets it (see [USB port mode](#usb-port-mode)) |
 | `http://tractor.local/logs` | Recent device log as text (works in any USB mode) |
@@ -651,13 +634,11 @@ Bench notes:
 
 - **Test one device at a time.** Every unit broadcasts the same AP SSID and
   mDNS name.
-- **No WiFi credentials may ship.** The ship-clean stage fails if any station
-  SSID/password is active (NVS or compiled) or if the image was built with
-  `WIFI_SSID` set — a device carrying the builder's home network keeps hunting
-  for it at the customer's house. Clear NVS with `flash.py --erase` (or an
-  empty SSID on `/wifi`) and build release images without `WIFI_SSID`/
-  `WIFI_PASS`. `--allow-sta` downgrades the stored-credentials check to a
-  warning for dev runs over a bench network; a baked-in SSID always fails.
+- **No station WiFi credentials may ship.** The ship-clean stage fails if a
+  station SSID or password is stored in NVS — a device carrying the builder's
+  home network keeps hunting for it at the customer's house. Clear it with an
+  empty SSID on `/wifi`, `wifi clear` over USB, or `flash.py --erase`.
+  `--allow-sta` downgrades this to a warning for dev runs over a bench network.
 - **The injection stage needs an ACK node on the bench bus.** The device
   under test is listen-only and never ACKs, so a lone injector goes
   error-passive and retransmits its *first* frame forever while the rest

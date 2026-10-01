@@ -70,21 +70,13 @@
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
-// WiFi identity overrides (WIFI_SSID / WIFI_PASS / AP_SSID / AP_PASS /
-// MDNS_NAME env vars), generated into the build dir by
-// inject_build_overrides.py. Absent when no override is set.
+// WiFi identity overrides (AP_SSID / AP_PASS / MDNS_NAME env vars), generated
+// into the build dir by inject_build_overrides.py. Absent when no override is
+// set. Station (home/bench network) credentials are never compiled in: they
+// live only in NVS, set at runtime via /wifi, so a release image can't carry a
+// builder's network out the door.
 #if __has_include("wifi_overrides.h")
 #include "wifi_overrides.h"
-#endif
-
-// Optional home network the board also joins (for bench use). Leave unset to
-// run AP-only — the board still broadcasts its own hotspot (see AP_SSID below),
-// which is the stable default for field use. Set both to join a network.
-#ifndef WIFI_SSID
-#define WIFI_SSID ""
-#endif
-#ifndef WIFI_PASS
-#define WIFI_PASS ""
 #endif
 
 // ── CAN transmit / bus mode ───────────────────────────────────────────────────
@@ -457,11 +449,10 @@ volatile uint32_t g_sta_disconnects = 0;
 volatile uint8_t  g_sta_last_disconnect_reason = 0;   // 0 = never disconnected
 
 // Runtime STA credentials — the single source of truth for the station join.
-// Seeded from NVS if provisioned, else from the compiled WIFI_SSID/WIFI_PASS
-// defaults. Written by the /wifi POST handler.
+// Seeded from NVS if provisioned, else empty (AP-only). Written by the /wifi
+// POST handler.
 char g_sta_ssid[33] = "";
 char g_sta_pass[64] = "";
-static bool g_sta_from_nvs = false;   // true when NVS 'wifi/ssid' overrode the compiled defaults
 static Preferences g_prefs;
 
 static inline bool staConfigured() { return g_sta_ssid[0] != '\0'; }
@@ -528,18 +519,14 @@ static bool tryWifiCommand(const char* line);
 static bool trySdCommand(const char* line);
 void usbLoggingPoll();
 
-// NVS 'wifi' namespace overrides the compiled defaults; an absent 'ssid' key
-// means "never provisioned", so fall back to the baked-in defaults (keeps the
-// default build's behavior). Call once, before WiFi bring-up.
+// NVS 'wifi' namespace is the only source of station credentials; an absent
+// 'ssid' key means "never provisioned" → AP-only. Call once, before WiFi
+// bring-up.
 static void loadStaCreds() {
     g_prefs.begin("wifi", /*readOnly=*/true);
     if (g_prefs.isKey("ssid")) {
-        g_sta_from_nvs = true;
         g_prefs.getString("ssid", g_sta_ssid, sizeof(g_sta_ssid));
         g_prefs.getString("pass", g_sta_pass, sizeof(g_sta_pass));
-    } else {
-        strlcpy(g_sta_ssid, WIFI_SSID, sizeof(g_sta_ssid));
-        strlcpy(g_sta_pass, WIFI_PASS, sizeof(g_sta_pass));
     }
     g_prefs.end();
 }
@@ -549,7 +536,6 @@ static void saveStaCreds(const char* ssid, const char* pass) {
     g_prefs.putString("ssid", ssid);
     g_prefs.putString("pass", pass);
     g_prefs.end();
-    g_sta_from_nvs = true;
 }
 
 // Length-independent compare so a wrong AP password can't be timing-probed.
@@ -2344,8 +2330,8 @@ static String staDisconnectReasonName(uint8_t reason) {
 // Build + WiFi diagnostics, deliberately separate from the /json telemetry.
 // board/version/features and the AP identity are what was baked into the
 // binary; the station (sta) fields report the *active* credentials, which come
-// from NVS when set at runtime via /wifi and otherwise fall back to the
-// compiled WIFI_SSID/WIFI_PASS defaults. The soft-AP is always up, so /config
+// from NVS when set at runtime via /wifi (empty = AP-only). The soft-AP is
+// always up, so /config
 // stays reachable at 192.168.4.1 even when the STA join failed — one request
 // distinguishes "wrong password" from "wrong SSID" from "no station configured".
 void handleConfig() {
@@ -2385,10 +2371,8 @@ void handleConfig() {
 
     auto sta = wifi["sta"].to<JsonObject>();
     const bool join_sta = staConfigured();
-    sta["ssid"]     = g_sta_ssid;                   // active STA SSID (NVS or default)
+    sta["ssid"]     = g_sta_ssid;                   // active STA SSID (from NVS)
     sta["pass_set"] = (g_sta_pass[0] != '\0');      // presence only, never the password
-    sta["source"]   = g_sta_from_nvs ? "nvs" : "compiled";
-    sta["compiled"] = (WIFI_SSID[0] != '\0');       // a WIFI_SSID is baked into this image
     sta["enabled"]  = join_sta;
     const bool sta_connected = join_sta && WiFi.status() == WL_CONNECTED;
     sta["status"] = !join_sta ? "disabled"
@@ -3905,8 +3889,8 @@ void setup() {
     // for continuously — that drags the soft-AP beacon off-channel. staBeginJoin()
     // disables auto-reconnect and staRetryTick() (in loop) fires one connect burst
     // per STA_RETRY_INTERVAL_MS, so the AP only blips briefly during a scan
-    // instead of vanishing. Build with an empty WIFI_SSID for a pure AP-only setup
-    // (no blips at all); set it to also join a bench network.
+    // instead of vanishing. With no SSID in NVS the setup is pure AP-only (no
+    // blips at all); set one via /wifi to also join a bench network.
     // Record STA join outcomes for /config and the serial log. Registered
     // before begin() so even the very first failure is captured. The callback
     // runs on the WiFi event task; it only writes the volatile g_sta_* words.

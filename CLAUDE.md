@@ -126,7 +126,6 @@ macOS can't reach USB).
 ```bash
 # Docker build (context = repo root, because it embeds the canonical dashboard.html)
 docker build -f esp32-s3/Dockerfile \
-    --build-arg WIFI_SSID="..." --build-arg WIFI_PASS="..." \
     --build-arg GIT_SHA=$(git rev-parse --short HEAD) -t solectrac-fw .
 docker run --rm -v "$PWD/out:/out" solectrac-fw   # extracts bins to out/
 

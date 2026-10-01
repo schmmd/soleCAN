@@ -46,14 +46,11 @@ COPY esp32-s3/ ./
 COPY dashboard.html ./src/dashboard.html
 
 # All of these are optional and embedded at compile time; leave them empty to
-# keep the firmware's built-in defaults. WIFI_SSID / WIFI_PASS are the home
-# network the board also joins for bench use — empty means AP-only (the stable
-# field default; the board still broadcasts its own hotspot). AP_SSID / AP_PASS
-# / MDNS_NAME override that hotspot and the mDNS hostname. Override any of these
-# via --build-arg, e.g. `set -a; source esp32-s3/.env; set +a`
-# then --build-arg AP_PASS="$AP_PASS".
-ARG WIFI_SSID=
-ARG WIFI_PASS=
+# keep the firmware's built-in defaults. AP_SSID / AP_PASS / MDNS_NAME override
+# the board's own hotspot and the mDNS hostname. Override any of these via
+# --build-arg, e.g. `set -a; source esp32-s3/.env; set +a`
+# then --build-arg AP_PASS="$AP_PASS". A station (home/bench) network is never
+# compiled in — set it at runtime via /wifi.
 ARG AP_SSID=
 ARG AP_PASS=
 ARG MDNS_NAME=
@@ -63,8 +60,6 @@ ARG GIT_SHA=unknown
 # Release tag, only on tagged builds (CI passes the tag; empty otherwise). Shown
 # alongside the SHA when set. Pass --build-arg GIT_VERSION=$(git describe --tags --exact-match 2>/dev/null).
 ARG GIT_VERSION=
-ENV WIFI_SSID=${WIFI_SSID}
-ENV WIFI_PASS=${WIFI_PASS}
 ENV AP_SSID=${AP_SSID}
 ENV AP_PASS=${AP_PASS}
 ENV MDNS_NAME=${MDNS_NAME}
