@@ -3723,7 +3723,8 @@ static void handleCanStream() {
         String arg = server.arg("minutes");
         char* end = nullptr;
         minutes = strtoul(arg.c_str(), &end, 10);
-        if (arg.isEmpty() || *end || minutes == 0) {
+        // strtoul() accepts a sign and wraps "-1" to UINT32_MAX — digits only.
+        if (!isdigit((unsigned char)arg[0]) || *end || minutes == 0) {
             server.send(400, "text/plain", "minutes must be a positive integer\n");
             return;
         }
