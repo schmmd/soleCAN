@@ -427,7 +427,7 @@ via mDNS.
 |---|---|
 | `http://tractor.local/` | Auto-refreshing dashboard |
 | `http://tractor.local/json` | Decoded state as JSON |
-| `http://tractor.local/config` | Build + WiFi diagnostics as JSON (board, firmware version, features, STA/AP status) |
+| `http://tractor.local/config` | Build + WiFi diagnostics as JSON (board, firmware version, features, STA/AP status, MAC addresses, and the `solecan-XXXXXX` DHCP hostname) |
 | `http://tractor.local/wifi` | Web form to set the station WiFi SSID/password at runtime (AP-password gated) |
 | `http://tractor.local/usb` | USB-mode control page; `POST /usb?mode=<logging\|slcan\|kelly>` sets it (see [USB port mode](#usb-port-mode)) |
 | `http://tractor.local/logs` | Recent device log as text (works in any USB mode) |
