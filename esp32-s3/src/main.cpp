@@ -32,6 +32,7 @@
 #include <stdarg.h>   // logLine() varargs
 #include <vector>
 #include <WiFi.h>
+#include <esp_mac.h>
 #include <Preferences.h>
 #include <ESPmDNS.h>
 #include <DNSServer.h>
@@ -2385,6 +2386,8 @@ void handleConfig() {
     sta["ssid"]     = g_sta_ssid;                   // active STA SSID (NVS or default)
     sta["pass_set"] = (g_sta_pass[0] != '\0');      // presence only, never the password
     sta["enabled"]  = join_sta;
+    sta["mac"]      = WiFi.macAddress();            // what the router's client logs show
+    sta["hostname"] = WiFi.getHostname();
     const bool sta_connected = join_sta && WiFi.status() == WL_CONNECTED;
     sta["status"] = !join_sta ? "disabled"
                   : sta_connected ? "connected" : "connecting";
@@ -2399,6 +2402,7 @@ void handleConfig() {
 
     auto ap = wifi["ap"].to<JsonObject>();
     ap["ssid"]    = AP_SSID;
+    ap["mac"]     = WiFi.softAPmacAddress();
     ap["running"] = g_ap_running;
     if (g_ap_running) {
         ap["ip"]      = WiFi.softAPIP().toString();
@@ -3924,6 +3928,20 @@ void setup() {
 
     loadStaCreds();
     const bool join_sta = staConfigured();
+    // DHCP hostname, i.e. the name in the router's client list. The core
+    // default is esp32s3-XXXXXX from the base MAC; keep that exact suffix so a
+    // board keeps its identity and two boards stay distinguishable. Must be
+    // set before WiFi.mode().
+    static char hostname[16];
+    uint8_t mac[6];
+    esp_base_mac_addr_get(mac);
+    snprintf(hostname, sizeof hostname, "solecan-%02X%02X%02X", mac[3], mac[4], mac[5]);
+    WiFi.setHostname(hostname);
+    // The core default (WIFI_FAST_SCAN) joins the first AP on the lowest
+    // channel that carries the SSID, however weak — on a multi-AP network that
+    // can be a distant AP (auth_expire). Scan all channels and take the
+    // strongest. Costs ~2-3 s per join attempt; the board doesn't roam after.
+    WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
     WiFi.mode(join_sta ? WIFI_AP_STA : WIFI_AP);
     g_ap_running = WiFi.softAP(AP_SSID, AP_PASS);
     if (join_sta) staBeginJoin();
