@@ -32,6 +32,8 @@
 #include <stdarg.h>   // logLine() varargs
 #include <vector>
 #include <WiFi.h>
+#include <esp_mac.h>
+#include <esp_mac.h>
 #include <Preferences.h>
 #include <ESPmDNS.h>
 #include <DNSServer.h>
@@ -2386,6 +2388,7 @@ void handleConfig() {
     sta["pass_set"] = (g_sta_pass[0] != '\0');      // presence only, never the password
     sta["enabled"]  = join_sta;
     sta["mac"]      = WiFi.macAddress();            // what the router's client logs show
+    sta["hostname"] = WiFi.getHostname();
     const bool sta_connected = join_sta && WiFi.status() == WL_CONNECTED;
     sta["status"] = !join_sta ? "disabled"
                   : sta_connected ? "connected" : "connecting";
@@ -3926,6 +3929,14 @@ void setup() {
 
     loadStaCreds();
     const bool join_sta = staConfigured();
+    // DHCP hostname, i.e. the name in the router's client list. The chip
+    // default is esp32s3-XXXXXX; keep the same unique MAC suffix so two boards
+    // on one network stay distinguishable. Must be set before WiFi.mode().
+    static char hostname[16];
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    snprintf(hostname, sizeof hostname, "solecan-%02X%02X%02X", mac[3], mac[4], mac[5]);
+    WiFi.setHostname(hostname);
     WiFi.mode(join_sta ? WIFI_AP_STA : WIFI_AP);
     g_ap_running = WiFi.softAP(AP_SSID, AP_PASS);
     if (join_sta) staBeginJoin();
