@@ -432,6 +432,7 @@ via mDNS.
 | `http://tractor.local/usb` | USB-mode control page; `POST /usb?mode=<logging\|slcan\|kelly>` sets it (see [USB port mode](#usb-port-mode)) |
 | `http://tractor.local/logs` | Recent device log as text (works in any USB mode) |
 | `http://tractor.local/kelly/config` | Kelly pump flash config as JSON: `raw` hex, `version_word`, and the decoded KBLS_0109 `parameters` (`-DENABLE_KELLY` builds only; on-demand, blocks briefly) |
+| `http://tractor.local/can.asc` | Live raw CAN as a Vector ASCII (`.asc`) stream — see [Recording a capture with curl](#recording-a-capture-with-curl) |
 | `tractor.local:28600` | socketcand TCP stream of raw CAN frames |
 | `/dev/cu.usbmodem*` (USB CDC) | Role depends on the USB mode: SLCAN CAN stream, device log, or Kelly bridge (default: log) |
 | `http://tractor.local/sd/status` | SD logging status + diagnostics (RejsaCAN only) |
@@ -465,6 +466,32 @@ uv run python -m can.logger -i socketcand -c can1 --bus-kwargs host=tractor.loca
 
 One client per channel is allowed; a new connection on a busy channel is
 refused so the existing clients aren't disturbed.
+
+### Recording a capture with curl
+
+The simplest way to pull raw CAN off the tractor — no Python, no drivers:
+
+```bash
+curl http://tractor.local/can.asc -o capture.asc
+```
+
+Every received frame is streamed until you stop curl with Ctrl-C; everything
+written up to that point is kept. To record for a fixed time instead, add
+`?minutes=N` — the board ends the stream after N minutes and curl exits on its
+own:
+
+```bash
+curl 'http://tractor.local/can.asc?minutes=10' -o capture.asc
+```
+ The file is the same Vector ASCII format the
+SD logger writes, so `solecan-analyze.py`, `solecan-stream.py --replay`, and
+SavvyCAN read it directly. On the T-2CAN both buses go into the one file
+(ASC channel 1 = TWAI, 2 = MCP2515).
+
+Timestamps count from the start of the request. One stream at a time — a new
+request ends the previous one. A client that can't keep up loses frames
+rather than stalling the board, so use curl rather than a browser download
+(which also discards the partial file if cancelled).
 
 ## SD-card session logging (RejsaCAN only)
 

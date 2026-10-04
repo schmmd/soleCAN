@@ -612,6 +612,32 @@ DNSServer  dns_server;
 extern const uint8_t dashboard_html_start[] asm("_binary_src_dashboard_html_start");
 extern const uint8_t dashboard_html_end[]   asm("_binary_src_dashboard_html_end");
 
+// ── Vector ASCII (.asc) formatting ───────────────────────────────────────────
+// Shared by the SD logger and the GET /can.asc stream.
+
+// Header. The ESP32 has no RTC/NTP, so the wall-clock date is nominal; what
+// matters to the readers is "base hex" + "timestamps absolute" and monotonic
+// per-line timestamps (which are relative to the start of the log).
+static void writeAscHeader(Print& out) {
+    out.print("date Thu Jan 1 00:00:00.000 1970\n");
+    out.print("base hex  timestamps absolute\n");
+    out.print("internal events logged\n");
+    out.print("   0.000000 Start of measurement\n");
+}
+
+// Format one frame as a newline-terminated data line; `chan` is the 1-based
+// ASC channel. Returns the length.
+static int formatAscLine(char* line, size_t cap, const twai_message_t& msg,
+                         double ts, unsigned chan) {
+    int n = snprintf(line, cap, " %.6f %u  %0*lX%s   Rx   d %u",
+                     ts, chan, msg.extd ? 8 : 3, (unsigned long)msg.identifier,
+                     msg.extd ? "x" : "", (unsigned)msg.data_length_code);
+    for (int i = 0; i < msg.data_length_code && n < (int)cap - 4; i++)
+        n += snprintf(line + n, cap - n, " %02X", msg.data[i]);
+    if (n < (int)cap - 1) line[n++] = '\n';
+    return n;
+}
+
 // ── SD-card session logging (RejsaCAN) ──────────────────────────────────────────
 // Records two streams to the onboard microSD whenever a card is present at boot.
 // The card is mounted at boot, but the session directory is only created on the
@@ -758,12 +784,7 @@ static int64_t g_sd_session_start_us = 0;   // esp_timer µs at session open (lo
 static inline void sdEnqueueRaw(const twai_message_t& msg) {
     char line[96];
     double ts = (esp_timer_get_time() - g_sd_session_start_us) / 1e6;
-    int n = snprintf(line, sizeof line, " %.6f 1  %0*lX%s   Rx   d %u",
-                     ts, msg.extd ? 8 : 3, (unsigned long)msg.identifier,
-                     msg.extd ? "x" : "", (unsigned)msg.data_length_code);
-    for (int i = 0; i < msg.data_length_code && n < (int)sizeof line - 4; i++)
-        n += snprintf(line + n, sizeof line - n, " %02X", msg.data[i]);
-    if (n < (int)sizeof line - 1) line[n++] = '\n';
+    int n = formatAscLine(line, sizeof line, msg, ts, 1);
     if (xStreamBufferSpacesAvailable(g_sd_raw.sb) >= (size_t)n)
         xStreamBufferSend(g_sd_raw.sb, line, n, 0);
     else
@@ -784,16 +805,6 @@ static inline void sdEnqueueJson(const String& js) {
 }
 
 // ── Writer side (runs on the dedicated task, core 0) ──
-
-// Vector ASCII header. The ESP32 has no RTC/NTP, so the wall-clock date is
-// nominal; what matters to the readers is "base hex" + "timestamps absolute"
-// and monotonic per-line timestamps (which are session-relative seconds).
-static void sdWriteAscHeader(File& f) {
-    f.print("date Thu Jan 1 00:00:00.000 1970\n");
-    f.print("base hex  timestamps absolute\n");
-    f.print("internal events logged\n");
-    f.print("   0.000000 Start of measurement\n");
-}
 
 // Basename of a directory entry — e.name() may or may not carry a leading path
 // depending on core version.
@@ -834,7 +845,7 @@ static bool sdOpenPart(SdStream& s) {
     snprintf(path, sizeof path, "%s/%s", g_sd.dir, name);
     s.file = SD.open(path, FILE_WRITE);
     if (!s.file) return false;
-    if (s.asc_header) sdWriteAscHeader(s.file);
+    if (s.asc_header) writeAscHeader(s.file);
     s.part_bytes = 0;
     return true;
 }
@@ -3690,6 +3701,63 @@ void socketcandPoll() {
     }
 }
 
+// ── GET /can.asc — live raw CAN as a Vector ASCII stream ───────────────────────
+// `curl http://tractor.local/can.asc -o capture.asc` records every received
+// frame until curl is stopped; Ctrl-C keeps everything written so far. The
+// WebServer is single-threaded and can't hold a request open, so the handler
+// writes the response head and parks a copy of the socket here (the server only
+// drops its own reference afterwards, it doesn't close it). canServiceTick()
+// then feeds it with the same non-blocking write as socketcand: a client that
+// can't keep up loses frames rather than stalling the CAN drain. One stream at
+// a time — a new request replaces the old one. Optional `?minutes=N` ends the
+// stream (cleanly, so the download completes) after N minutes; default is
+// until the client disconnects.
+static WiFiClient g_can_stream;
+static int64_t    g_can_stream_start_us = 0;
+static int64_t    g_can_stream_end_us   = 0;   // 0 = no time limit
+
+static void handleCanStream() {
+    noteHttpActivity();
+    uint32_t minutes = 0;
+    if (server.hasArg("minutes")) {
+        String arg = server.arg("minutes");
+        char* end = nullptr;
+        minutes = strtoul(arg.c_str(), &end, 10);
+        // strtoul() accepts a sign and wraps "-1" to UINT32_MAX — digits only.
+        if (!isdigit((unsigned char)arg[0]) || *end || minutes == 0) {
+            server.send(400, "text/plain", "minutes must be a positive integer\n");
+            return;
+        }
+    }
+    g_can_stream.stop();
+    WiFiClient client = server.client();
+    client.print("HTTP/1.1 200 OK\r\n"
+                 "Content-Type: text/plain\r\n"
+                 "Content-Disposition: attachment; filename=can.asc\r\n"
+                 "Connection: close\r\n\r\n");
+    writeAscHeader(client);
+    g_can_stream_start_us = esp_timer_get_time();
+    g_can_stream_end_us   = minutes ? g_can_stream_start_us + minutes * 60000000LL : 0;
+    g_can_stream = client;
+}
+
+// Called from loop(), not per frame, so the limit still fires on a silent bus.
+static void canStreamTick() {
+    if (g_can_stream_end_us && esp_timer_get_time() >= g_can_stream_end_us) {
+        g_can_stream.stop();
+        g_can_stream_end_us = 0;
+    }
+}
+
+// `chan` is the 1-based ASC channel (1 = TWAI, 2 = MCP2515).
+static void canStreamFrame(const twai_message_t& msg, unsigned chan) {
+    if (!g_can_stream.connected() || !socketcandWritable(g_can_stream)) return;
+    char line[96];
+    double ts = (esp_timer_get_time() - g_can_stream_start_us) / 1e6;
+    int n = formatAscLine(line, sizeof line, msg, ts, chan);
+    g_can_stream.write((const uint8_t*)line, n);
+}
+
 // ── BLE (Nordic UART Service) ─────────────────────────────────────────────────
 // Pushes a compact (minimal) JSON snapshot to a single BLE central — every
 // BLE_PUSH_INTERVAL_MS while CAN frames are arriving, dropping to a slow
@@ -3967,6 +4035,7 @@ void setup() {
     server.on("/usb", HTTP_GET, handleUsbPage);   // USB-mode control page
     server.on("/usb", HTTP_POST, handleUsbPost);  // set USB mode -> 303 to /usb
     server.on("/logs", HTTP_GET, handleLog);      // recent device log (any mode)
+    server.on("/can.asc", HTTP_GET, handleCanStream);   // live raw CAN, Vector ASCII
 #if defined(ENABLE_KELLY)
     server.on("/kelly/config", handleKellyConfig);
 #endif
@@ -4067,6 +4136,7 @@ static void canServiceTick() {
             decodeCAN(msg.identifier, msg.data, msg.data_length_code);
         slcanSendFrame(msg);
         socketcandSendFrame(msg, /*channel=*/0);
+        canStreamFrame(msg, 1);
 #if defined(HAS_SD)
         if (g_sd_active) {
             if (!g_sd_session_wanted) {          // first frame: open the session
@@ -4099,6 +4169,7 @@ static void canServiceTick() {
             fwd.data_length_code = frame.len <= 8 ? frame.len : 8;
             memcpy(fwd.data, frame.data, fwd.data_length_code);
             socketcandSendFrame(fwd, /*channel=*/1);
+            canStreamFrame(fwd, 2);
         }
     }
 #endif
@@ -4137,6 +4208,7 @@ void loop() {
 
 #if !defined(NO_WIFI)
     socketcandPoll();
+    canStreamTick();
     staRetryTick();
     dns_server.processNextRequest();
     server.handleClient();
