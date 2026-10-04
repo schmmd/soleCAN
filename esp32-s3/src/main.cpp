@@ -3929,12 +3929,13 @@ void setup() {
 
     loadStaCreds();
     const bool join_sta = staConfigured();
-    // DHCP hostname, i.e. the name in the router's client list. The chip
-    // default is esp32s3-XXXXXX; keep the same unique MAC suffix so two boards
-    // on one network stay distinguishable. Must be set before WiFi.mode().
+    // DHCP hostname, i.e. the name in the router's client list. The core
+    // default is esp32s3-XXXXXX from the base MAC; keep that exact suffix so a
+    // board keeps its identity and two boards stay distinguishable. Must be
+    // set before WiFi.mode().
     static char hostname[16];
     uint8_t mac[6];
-    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    esp_base_mac_addr_get(mac);
     snprintf(hostname, sizeof hostname, "solecan-%02X%02X%02X", mac[3], mac[4], mac[5]);
     WiFi.setHostname(hostname);
     WiFi.mode(join_sta ? WIFI_AP_STA : WIFI_AP);
