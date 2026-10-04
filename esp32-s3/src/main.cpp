@@ -2385,6 +2385,7 @@ void handleConfig() {
     sta["ssid"]     = g_sta_ssid;                   // active STA SSID (NVS or default)
     sta["pass_set"] = (g_sta_pass[0] != '\0');      // presence only, never the password
     sta["enabled"]  = join_sta;
+    sta["mac"]      = WiFi.macAddress();            // what the router's client logs show
     const bool sta_connected = join_sta && WiFi.status() == WL_CONNECTED;
     sta["status"] = !join_sta ? "disabled"
                   : sta_connected ? "connected" : "connecting";
@@ -2399,6 +2400,7 @@ void handleConfig() {
 
     auto ap = wifi["ap"].to<JsonObject>();
     ap["ssid"]    = AP_SSID;
+    ap["mac"]     = WiFi.softAPmacAddress();
     ap["running"] = g_ap_running;
     if (g_ap_running) {
         ap["ip"]      = WiFi.softAPIP().toString();
