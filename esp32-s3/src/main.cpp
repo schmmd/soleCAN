@@ -3938,6 +3938,11 @@ void setup() {
     esp_base_mac_addr_get(mac);
     snprintf(hostname, sizeof hostname, "solecan-%02X%02X%02X", mac[3], mac[4], mac[5]);
     WiFi.setHostname(hostname);
+    // The core default (WIFI_FAST_SCAN) joins the first AP on the lowest
+    // channel that carries the SSID, however weak — on a multi-AP network that
+    // can be a distant AP (auth_expire). Scan all channels and take the
+    // strongest. Costs ~2-3 s per join attempt; the board doesn't roam after.
+    WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
     WiFi.mode(join_sta ? WIFI_AP_STA : WIFI_AP);
     g_ap_running = WiFi.softAP(AP_SSID, AP_PASS);
     if (join_sta) staBeginJoin();
