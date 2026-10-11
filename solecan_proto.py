@@ -36,7 +36,7 @@ PGN_F107 = 0xF107   # BMS current limits (charge/discharge)
 PGN_F108 = 0xF108   # BMS active fault bitmap (byte 7 = dashboard codes)
 
 PGN_FF50 = 0xFF50   # charger telemetry (V, A, fault flags)
-PGN_FF21 = 0xFF21   # motor telemetry (RPM, torque, state) / dash heartbeat
+PGN_FF21 = 0xFF21   # motor telemetry (RPM, current, state) / dash heartbeat
 PGN_FECA = 0xFECA   # SAE J1939-73 DM1 (Active Diagnostic Trouble Codes)
 PGN_PROP_0600 = 0x0600   # PDU1, src 0xF4 -> dest 0xE5: BMS charger setpoint
 
@@ -103,23 +103,20 @@ RPM_BIAS = 0x0C80                         # FF21CA bytes 2-3 LE zero-RPM offset
 LIMIT_CURRENT_LSB_A = 0.01                # F107F3 bytes 0-1 / 2-3 BE, 0.01 A/bit
 LIMIT_POWER_EXTRA_LSB_W = 10              # F107F3 bytes 6-7 BE, W above 100A charge baseline
 
-# Torque (effort) scaling for FF21CA bytes 0-1 (little-endian u16; the
-# value is the controller's commanded motor-effort magnitude (torque /
-# current command), NOT pedal position — see DOCUMENTATION.md §FF21CA.
-# Maxima observed in the corpus:
-#   - asc/full-throttle-*.asc (pedal floored, no load): raw 0x69 = 105
-#   - real-world-on-driving-mowing-off.asc (forward, real load): 0xCC = 204
-#   - real-world-on-driving-mowing-off.asc (reverse, real load): 0x96 = 150
-#   - driving-2800rpm-highgear-loader.asc (forward, hard acceleration,
-#     real load): 262 — peak load runs past the 8-bit boundary, so the
-#     u16 decode matters; 255 is kept as the 100% reference point
-# The forward/reverse asymmetry (262 vs 0x96) points to a
-# controller-side reverse-effort limiter applied before the byte goes
-# on the wire. Idle offset ~3 (sensor noise with foot off); controller
-# dead-low ~14 (below this, motor RPM stays at 0; matches the Kelly
-# TPS_dead_low concept from the hydraulic pump doc).
-TORQUE_DEAD_LOW = 3                          # idle resting offset (subtracted from raw)
-TORQUE_PCT_PER_BIT = 100.0 / (0xFF - TORQUE_DEAD_LOW)  # raw 0xFF = 100%
+# Motor current for FF21CA bytes 0-1 (little-endian u16): the Curtis
+# Current_RMS monitor variable in whole amps (1 A/bit), i.e. the actual motor
+# phase current, NOT pedal position. CONFIRMED by CANopen cross-validation:
+# OEM object 0x33EA equals this field to +-2 and Curtis 0x3209 Current_RMS
+# (0.1 A) is exactly 10x it (canopen/NOTES.md "SD SESSION 137"). Unsigned:
+# it rises under drive and regen alike; direction of work comes from the sign
+# of F100F3 pack current. Maxima observed in the corpus:
+#   - asc/full-throttle-*.asc (pedal floored, no load): 105 A
+#   - real-world-on-driving-mowing-off.asc (forward, real load): 204 A
+#   - real-world-on-driving-mowing-off.asc (reverse, real load): 150 A
+#   - driving-2800rpm-highgear-loader.asc (hard forward acceleration): 262 A
+#   - SD session 137 (woodchipping at 2860 rpm): 143 A
+# Idle resting ~3 A (foot off); below ~14 A the motor does not turn.
+MOTOR_CURRENT_A_PER_BIT = 1
 
 # Charger fault flags (FF50E5 byte 4, Elcon/TC protocol). 0x00 means the
 # OBC is actively delivering charge; any set bit names why it isn't.
@@ -421,7 +418,7 @@ def decode(msg, emit, clear=_noop_clear):
         emit("motor.rpm_magnitude", rpm_mag, "rpm")
         emit("motor.direction", direction, "")
         emit("motor.range", range_, "")
-        emit("motor.torque_raw", le16(data[0], data[1]), "")
+        emit("motor.current_a", le16(data[0], data[1]) * MOTOR_CURRENT_A_PER_BIT, "a")
         if data[4]:
             emit("motor.controller_temp_c", data[4] - TEMP_OFFSET_C, "c")
         if data[5]:

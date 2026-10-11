@@ -78,7 +78,10 @@ ENV GIT_VERSION=${GIT_VERSION}
 # PLATFORMIO_BUILD_FLAGS to build_flags; an empty value is a no-op, so the
 # default image stays a passive tap.
 ARG CAN_ALLOW_TX=
-ENV PLATFORMIO_BUILD_FLAGS=${CAN_ALLOW_TX:+-DCAN_ALLOW_TX}
+# Optional: --build-arg CANOPEN_POLL=1 (requires CAN_ALLOW_TX=1) sweeps the motor
+# controller's CANopen dictionary while it is alive. See README.
+ARG CANOPEN_POLL=
+ENV PLATFORMIO_BUILD_FLAGS="${CAN_ALLOW_TX:+-DCAN_ALLOW_TX} ${CANOPEN_POLL:+-DCANOPEN_POLL}"
 
 # Build for the RejsaCAN-ESP32-S3. This downloads the pioarduino espressif32
 # platform and Xtensa toolchain on first run and caches them in the image layer.
