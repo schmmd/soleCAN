@@ -96,8 +96,9 @@ GRID_ROWS = (
 # reimplementation's error-name array — whose unit tests fix this bit order
 # (bit 0 "Identify Err", bit 1 "Over Volt", bit 15 "Current Meter Err") — and the
 # KLS-M/N manual's Table 1 buzzer codes, whose row-major order 1,1..4,4 lines up
-# with these bit positions. No non-zero error_status has been observed on this
-# tractor, so the labels are cross-validated against those sources, not seen live.
+# with these bit positions. First live faults (2026-10-26, a hydraulic-lock pump
+# stall): 0x0800 "Hall Sensor Error" at the instant of stall onset and 0x0010
+# "Locking" while stalled — both physically plausible, consistent with this order.
 ERROR_NAMES = (
     "Identify Err",        # bit 0  — manual 1,1 auto-identify (phase/hall wiring)
     "Over Volt",           # bit 1  — 1,2
