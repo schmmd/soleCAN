@@ -1,0 +1,473 @@
+HYDRAULICS INTERMITTENT CUTOUT — TROUBLESHOOTING NOTES
+========================================================
+
+SYMPTOM
+-------
+All hydraulics (steering + 3-pt lift + remotes) drop out simultaneously
+and intermittently.
+
+Recovery: turning the steering wheel past a certain angular position
+(either direction) restores hydraulic function. The trigger is
+ROTATIONAL POSITION, not force — it is not a "pull hard" recovery,
+it kicks in once the wheel passes a threshold angle.
+
+Load correlation:
+  - PTO running (wet clutch engaged): cutouts are frequent. During a
+    bad episode the system cycled on/off roughly every ~10 seconds.
+  - Driving in 2WD or 4WD without PTO: no symptoms across extended use.
+  - Light steering load on its own does not appear to trigger it.
+
+The 10-ish-second cycling is not a fixed cadence — it is irregular and
+correlates with load, not a timer.
+
+Two distinct recovery timescales observed:
+  - Short (seconds to tens of seconds): turning the steering wheel past
+    a threshold angle restores hydraulic function briefly during an
+    active bad session. Repeats every ~10 s under PTO load.
+  - Long (hours to days, possibly weeks): the entire system runs
+    symptom-free for extended periods between bad sessions, then
+    symptoms return without an obvious trigger.
+
+The long fault-free intervals are the key constraint on root cause and
+materially reshape the sub-cause ranking under the leading theory below.
+A continuous mechanical defect (e.g. broken centering springs) cannot
+spontaneously restore itself for days, so the dominant sub-cause is
+something intermittent — particle, contamination, or pump-side air.
+
+
+LOGGED EPISODE 2026-10-26 (Kelly telemetry) — PUMP IS DEAD-HEADED
+-----------------------------------------------------------------
+First dropout captured with Kelly telemetry (1 Hz, logged by the ESP32
+in data_*.jsonl): logs/sync/2026.10.26/s00010-soc77, uptime ~2476-4008 s.
+No earlier Kelly-bearing log (2026-07-02 onward, ~70 sessions) contains
+a stall; the June episodes above predate Kelly logging.
+
+Signature of every dropout:
+  - Pump motor RPM 0 while phase current sits flat at 126-128 A (the
+    controller's current limit), hall state frozen, TPS on. Battery
+    draw only ~13-15 A — the power goes into the stalled windings.
+  - Onset from full speed is abrupt (2600-2800 rpm at 20-30 A one
+    sample, stalled the next). Two onsets also latched Kelly "Hall
+    Sensor Error", one a "Locking" (locked-rotor) fault.
+  - Restart attempts with the switch cycled: current ramps ~15 A/s
+    from 0 to the limit and the rotor never turns.
+  - Once (t=3224 s) the motor broke free and returned to ~2500 rpm with
+    the switch still on.
+  - Operator restored hydraulics by turning the wheel HARD RIGHT.
+  - Motor temp climbed 53 -> 74 C during one 39 s stall (session max
+    83 C).
+
+Interpretation (CONFIRMED by wheel-turn recovery during a logged stall):
+the motor is not cutting out on its own — it is being hydraulically
+locked. The pump is pushing into a blocked path and stalls at current
+limit. This upgrades the leading theory below from "restricted"
+open-center passage to "fully blocked": the HSU spool hangs closed, and
+since the only system relief is in the lift block downstream of the
+HSU, nothing limits pump pressure except the motor stalling. The hall
+error, Locking fault, and TPS dip (254 -> 249, only while stalled) are
+consequences of the stall, not causes — wiring/hall checks are demoted.
+
+Follow-ups:
+  - Does the HSU (D10524330) have an integral relief valve? If so, it is
+    not opening — inspect it with the spool.
+  - Is recovery only to the RIGHT now? (June notes: either direction.)
+    A one-sided recovery suggests the spool hangs offset to one side.
+  - Motor protection: each stall puts ~127 A through stationary
+    windings. Switch the pump off (or turn the wheel) promptly rather
+    than letting it sit locked.
+
+
+SYSTEM TOPOLOGY (per FT 25G service manual)
+-------------------------------------------
+Single gear pump (suction strainer in tank) feeds an open-center
+hydrostatic steering unit (HSU) in series ahead of the rear lift block.
+
+  Tank -> Strainer -> Pump -> HSU P port -> HSU T port
+                                              |
+                                              v
+                              Lift block "P" -> Relief valve
+                                              -> Control valve
+                                              -> Unload valve
+                                              -> PTO wet clutch feed/return
+                                              -> Tank
+
+Key consequences of this topology:
+  - The HSU is upstream of everything else. If it chokes, all downstream
+    hydraulics (lift, remotes, PTO clutch) die WITH the steering.
+  - In neutral the HSU's open-center passage passes pump flow straight
+    through to the lift block.
+  - In neutral the lift unload valve dumps that flow back to tank
+    (open-center; no standby pressure maintained).
+  - The PTO wet clutch is the highest sustained flow consumer on the
+    system — it needs both holding pressure and cooling flow whenever
+    PTO is engaged.
+  - The lift block's pressure relief (top of lift cover, M30 cartridge,
+    169 bar crack / 180-187 bar full open) protects everything
+    downstream of the HSU.
+
+Sources:
+  - Service manual pp 195-204 (Steering chapter): HSU schematic,
+    neutral flow, manual-pump fallback, air-purge procedure.
+  - Service manual pp 295-319 (Hydraulic chapter): lift block layout,
+    relief valve location and spec, troubleshooting table p. 22.
+  - DOCUMENTATION.md:207-228: full hydraulic system is mechanical;
+    no CAN, no sensors, no solenoids. The e-hydraulic controller has
+    no CAN pins. PTO wet clutch requires pump pressure to engage
+    and oil flow for cooling.
+
+
+LEADING THEORY: HSU SPOOL HUNG OFF-NEUTRAL
+------------------------------------------
+The HSU spool is sitting in an off-neutral position when the wheel is
+near center, instead of fully returning to the open-center pass-through
+position. In that hung position the open-center passage that feeds the
+downstream lift block is partially or fully restricted.
+
+This single failure mode explains all four observations:
+
+  a) Wheel-position-dependent recovery — turning the wheel mechanically
+     drives the spool via the input shaft into a working porting
+     position regardless of where the (presumably weak) centering
+     springs would otherwise park it.
+
+  b) Light-load operation is fine — even a restricted open-center
+     passage can pass enough flow to maintain pressure when nothing
+     downstream is drawing much. Driving without PTO is mostly idle
+     hydraulics.
+
+  c) PTO load makes it worse — wet clutch + cooling is the largest
+     continuous flow draw on the system. A restricted passage cannot
+     keep up; downstream pressure collapses.
+
+  d) ~10 s cycling under PTO load — the HSU spool is pressure-balanced.
+     With weak centering springs and varying downstream pressure, the
+     spool drifts cyclically between restrictive and flowing positions,
+     producing a self-sustaining oscillation (pressure rises -> spool
+     pushed to restrictive -> pressure falls -> spool released -> pressure
+     rises). ~10 s is plausible for the time constant of pressure rise
+     and decay in this circuit.
+
+Likely sub-causes within this theory, ranked by consistency with the
+hours-to-days fault-free intervals observed between bad sessions:
+
+  1. Particle in the spool/sleeve clearance. A 5-10 µm chip can dislodge
+     under a pressure spike or thermal cycle, get shuttled around by
+     flow, and re-wedge elsewhere later. Classic intermittent
+     contamination signature; cleanly explains both the short-term and
+     long-term recovery timescales.
+
+     SUPPORTED. The symptom pre-existed the most recent fluid change,
+     and a fair amount of FERROUS DEBRIS was found stuck to the
+     drain-plug and strainer magnets at that change. The operator's
+     working interpretation is that this debris is residual from
+     manufacture / break-in, not from an active wear source: machining
+     swarf, casting flash, and assembly leftovers that accumulate on
+     magnets over the first few hundred hours of a new tractor's life
+     and then taper off. This is plausible and the most benign reading.
+
+     Whether the source is break-in residue or active wear is the key
+     open question, with very different implications:
+       - Break-in residue: the first fluid change removed most of it.
+         Remaining suspended particles are what's still hanging the
+         spool. Expected trajectory: symptoms taper as further fluid
+         changes catch the remainder, with no need to open any
+         component.
+       - Active wear: a component is shedding metal continuously.
+         Fluid changes reduce concentration but don't fix the source.
+         Expected trajectory: symptoms persist or worsen until the
+         worn component is identified and replaced.
+
+     The cleanest disambiguator is the SECOND-CHANGE COMPARISON:
+     change fluid, run a defined duty cycle (5-10 hours of normal use
+     including PTO), drop the strainer and drain-plug magnets, and
+     compare debris quantity to last time. Much less = break-in
+     hypothesis confirmed. Same or worse = active wear, proceed to the
+     wear-source suspects below.
+
+  2. Spool/sleeve wear producing temperature/viscosity-sensitive
+     stiction. A polished bore with cold thick oil can hang the spool;
+     warm thin oil clears it, then the next cool-down brings it back.
+     Compatible with long good periods if they correlate with warmed-up
+     running and bad sessions with cold starts.
+
+  3. Centering springs broken, distorted, or fatigued. WEAKENED by the
+     long fault-free intervals: metal fatigue doesn't reverse, so a
+     spring too weak today shouldn't be strong enough to center the
+     spool for days at a stretch tomorrow. Not ruled out (a partially
+     fractured blade could occasionally align favorably under specific
+     load) but no longer the leading sub-cause.
+
+
+WEAR SOURCE SUSPECTS (only if break-in hypothesis is rejected)
+--------------------------------------------------------------
+Only relevant if the second-change comparison shows debris quantity
+holding steady or rising — i.e. the break-in / manufacturing-residue
+reading above turns out to be wrong. If the second change comes back
+visibly cleaner, skip this entire section.
+
+Candidates for an active wear source, ranked by match to the PTO-load
+correlation and the rate that "fair amount" implies if it is in fact
+continuous shedding:
+
+  1. PTO wet clutch wearing or slipping. Wet clutches always shed some
+     metal during normal engagement, but "fair amount" suggests
+     accelerated wear. A slipping clutch would:
+       - generate more ferrous debris than a healthy one;
+       - demand more flow / pressure to engage fully;
+       - tie the metal-shedding rate to PTO use specifically.
+     The PTO-load correlation in the symptom and the debris source
+     could be the same underlying problem: the clutch is degrading
+     under its own use, and the wear products are what's hanging the
+     HSU spool. Inspect: drain the wet clutch pack and check disc
+     thickness vs spec; look for glazing or burn marks on steel
+     separator plates.
+
+  2. Gear pump internal wear. The single gear pump has steel gears
+     running against an aluminium or cast-iron body. Wear products are
+     ferrous and fine. A worn pump also explains:
+       - declining output / higher internal leakage on hot oil;
+       - flow shortfalls under high downstream demand (PTO);
+       - intermittent dropouts that get worse over time.
+     Not directly inspectable without pulling the pump; an indirect
+     test is a flow/pressure measurement at the pump outlet during a
+     dropout (step 9 in the diagnostic procedure).
+
+  3. HSU gerotor wear. The gerotor's steel rotor on a steel/cast-iron
+     stator is a wear surface too. Less likely as the primary source
+     here because steering power-assist still feels normal in healthy
+     intervals — significant gerotor wear would degrade steering effort
+     even between dropouts. Worth inspecting if the unit comes out.
+
+  4. Wet clutch hydraulic motor or other downstream rotating part.
+     Less common, but listed for completeness.
+
+Diagnostic for narrowing this down: change fluid, run a short defined
+duty cycle (e.g. 5 hours including PTO use), then drop the drain and
+strainer and compare debris quantity to last time. Same or worse =
+active source still feeding at the same rate. Much less = a one-off
+contamination that the previous flush largely removed. The shape and
+size of the debris also matters (photograph it on a magnet under good
+light):
+  - Fine grey powder: pump or gerotor wear.
+  - Larger flakes / curls: gear pump teeth or clutch disc fragments.
+  - Bronze or non-ferrous: bushings / thrust washers (different source
+    category entirely).
+
+
+OTHER POSSIBLE CAUSES (ranked, less likely)
+-------------------------------------------
+2. Air ingress on the suction side.
+   - A loose suction fitting or porous hose lets air in but never drips
+     oil. Causes intermittent pump aeration.
+   - Fits the wheel-cycling-as-air-purge mechanism, but does not as
+     cleanly explain the PTO correlation or the ~10 s cycling cadence.
+
+3. Hydraulic pump losing prime intermittently.
+   - Explicitly listed in the lift troubleshooting table (p. 22, item 2,
+     "Failure to Lift Under All Conditions"). Cranking the HSU
+     re-circulates fluid and can re-prime the pump.
+   - Same weakness as above: doesn't naturally produce PTO-load-
+     correlated cycling.
+
+4. Low fluid level.
+   - Cheapest to rule out. Manual warns it causes steering assist loss
+     before anything else.
+
+5. Sticking system relief at the lift block.
+   - Could kill everything downstream, but no mechanism for wheel-
+     position recovery — the lift block isn't coupled to the steering
+     column.
+
+
+DIAGNOSTIC PROCEDURE (do in this order)
+---------------------------------------
+1. Check hydraulic fluid level on the dipstick, cold, on level ground,
+   lift arms fully down, all remotes retracted. Top up only to the
+   upper line (not above — overfill causes its own aeration issues).
+
+2. SELF-CENTERING / DEAD-ZONE TEST. Engine on, pump on, vehicle
+   stationary. Lightly hold the wheel and release. Does it have a
+   distinct neutral feel? Is there a dead zone of ±10-30° near center
+   where small inputs produce nothing visible at the wheels? A vague
+   neutral or a noticeable dead zone strongly suggests HSU centering
+   spring failure.
+
+3. STEERING-VS-LIFT CORRELATION DURING DROPOUT. Next time hydraulics
+   cut out:
+     - Does the STEERING also feel different (heavy, dead spot, vague)?
+     - Or does the steering feel normal but only the lift dies?
+   "Steering normal, lift dead" weakens the HSU theory (steering
+   working-port circuit is fine). "Steering feels off too" strengthens
+   it (the open-center pathway that feeds the lift is also the same
+   passage used in steering neutral).
+
+4. RECOVERY DURATION TEST. After recovery via wheel input, let the
+   wheel sit at center, do not touch it. Time until next dropout.
+     - Seconds to tens of seconds: spool hung again at neutral -
+       centering springs / spool stiction.
+     - Many minutes: air pocket re-accumulating - suction side leak.
+     - Random / load-dependent: aligns with hung-spool + PTO theory.
+     - Hours to days of complete fault-freedom between bad sessions:
+       points away from continuous mechanical defects (worn springs,
+       static stiction) and toward intermittent causes - particle
+       wandering in the spool/sleeve clearance, conditional
+       suction-side air ingress, or pump-side intermittent (Kelly
+       controller, internal pump leakage). This is the single most
+       informative timescale to record; it directly demotes broken
+       centering springs as a candidate.
+
+5. KELLY CONTROLLER DIAGNOSTICS. Connect to the Kelly KLS pump motor
+   controller via its RS-232 diagnostic port (separate from CAN; see
+   Kelly KLS user manual for pinout). Run the free "KLS User Program"
+   in a Windows laptop (Wine works). During a dropout, look at:
+     - Motor RPM and phase current
+     - Controller and motor temperature
+     - Active and historical fault codes
+   Purpose here is to rule electrical OUT, not in. If motor is running
+   normally with normal current during a dropout, the cutout is
+   downstream of the pump — confirming the hydraulic theory and
+   localizing it to the HSU / lift block / relief.
+   DONE 2026-10-26 (see LOGGED EPISODE above): during a dropout the motor
+   is NOT running — it is stalled at current limit (~127 A, 0 rpm),
+   i.e. the pump is dead-headed by a blocked path. Electrical ruled out
+   as the root cause; wheel-turn recovery confirmed hydraulic lock.
+
+6. Inspect suction-side plumbing between reservoir and pump inlet for
+   loose clamps, soft/cracked hose, weeping fittings.
+
+7. Pull and inspect the suction strainer for metal debris. Photograph.
+   Even after a fluid change, debris that was previously circulating
+   may have collected here.
+
+8. If steps 1-7 don't resolve: pull the HSU for inspection and
+   cleaning (see next section).
+
+9. Optional / harder: tee a pressure gauge into the line between the
+   HSU T port and the lift block "P" inlet. During a dropout:
+     - 0 bar: HSU is blocking flow OR pump is dead/cavitating.
+              Cross-check with a second gauge at the pump output (P port
+              of HSU) to disambiguate.
+     - Pressure present but no work happening: issue is downstream of
+       the HSU (relief stuck, control valve issue, etc.)
+
+
+HSU REMOVAL AND INSPECTION
+--------------------------
+Removal is documented in steering chapter p. 4:
+  1. Disconnect battery ground.
+  2. Clean the hose/pipe connections (debris control).
+  3. Mark and disconnect the four hoses (P, T, L, R), cap pipe ends.
+  4. Slacken pipe retainer bolts on the engine side.
+  5. Remove lower steering column shroud, disconnect harness.
+  6. Pull four bolts on steering motor support bracket.
+  7. Slacken clamp bolts on column-to-HSU coupling.
+  8. Withdraw HSU from LH side of tractor.
+Plan ~2 hours. Wash the unit thoroughly before opening.
+
+Internal disassembly is NOT factory-documented in this manual but is
+standard for HSUs of the Danfoss OSPC / Eaton Char-Lynn class
+(which this almost certainly is or clones).
+
+Typical internal layout:
+  end-cap bolts (~7x) -> end cover
+                      -> gerotor set (stator + rotor)
+                      -> drive link (cardan shaft)
+                      -> manifold plate (with check ball)
+                      -> spool + sleeve (lapped matched pair)
+                      -> centering springs (3 or 6 flat blades)
+                      -> housing
+
+What to inspect:
+  - Centering springs: distortion, fatigue, broken blades. PRIMARY
+    suspect given the position-dependent recovery symptom.
+  - Spool/sleeve: light axial scoring polishes; deep scoring kills the
+    unit. Particles in this clearance produce intermittent sticking.
+  - Gerotor teeth: chips, embedded metal, scoring at tooth tips.
+  - Check ball + seat: pitting or debris would let flow leak from
+    pressure side back to tank.
+  - All O-rings: replace while open. Standard seal kits are cheap.
+
+Critical gotchas during reassembly:
+  - Spool and sleeve are a LAPPED MATCHED PAIR. Never separate from
+    each other or swap with another unit.
+  - Centering springs are direction-sensitive. Curve faces a specific
+    direction relative to the spool slot. Wrong = no self-centering.
+  - Drive link timing sets steering centering. Photograph orientation
+    of input shaft, drive link, gerotor before disassembly.
+  - End-cap bolts: torque in crisscross pattern. Look up torque for the
+    actual unit; service manual does not specify.
+
+Buy-vs-rebuild economics for the e25:
+  - New HSU: probably $250-500.
+  - Generic Char-Lynn / Danfoss seal & repair kit: $40-80.
+  - Professional rebuild shop: $150-300 with warranty.
+  If spool/gerotor turn out to be scored, replacement is required
+  anyway; a failed rebuild attempt only costs time.
+
+
+FLUSH / FLUID NOTES
+-------------------
+Reusing drained oil after household straining: NOT recommended.
+Particles that matter for HSU damage are 5-10 µm; coffee filters and
+shop strainers do not catch anything close to that size, so straining
+just recirculates the contamination. Use fresh fluid for any flush.
+
+Procedure if pursuing a flush:
+  1. Drain into clean container. Let settle 30 min. Inspect for water
+     layer at bottom, metal sediment.
+  2. Pull and clean suction strainer.
+  3. Refill with fresh UTF.
+  4. Cycle steering lock-to-lock and lift up/down for 10-15 min.
+  5. Drain again. Compare to step 1. Visibly cleaner = removed loose
+     debris; identical = active debris source remains.
+  6. Refill fresh and run.
+
+Filling cautions:
+  - Fill cold, on level ground, lift arms FULLY DOWN, all remotes
+    retracted/disconnected. This puts maximum oil in the tank and
+    minimum in the cylinders.
+  - Fill to the upper line, NOT above. Overfill causes:
+      * Burping out the breather as cylinders return / system warms.
+      * Loss of de-aeration headspace -> foaming -> cavitation at pump
+        -> symptoms that mimic the problem being chased.
+      * Mild pressurization if breather is partly blocked -> seal weep.
+
+
+THINGS CONSIDERED AND REJECTED
+------------------------------
+- CAN bus captures during a dropout. The e-hydraulic controller has no
+  CAN pins; there is no telemetry on the bus related to this system.
+  (See DOCUMENTATION.md:207-228.)
+
+- Kelly controller current/thermal cycling as the primary cause. The
+  ~10 s cadence under PTO load briefly suggested this, but it does not
+  explain wheel-position-dependent recovery — a self-recovering
+  controller fault would clear on its own internal timer regardless of
+  steering input. Kelly diagnostics are retained in the procedure to
+  rule electrical OUT, not as a prime suspect. (2026-10-26 logs: the
+  Kelly faults seen — Hall Sensor Error, Locking — are consequences of
+  the pump being hydraulically locked, not the cause.)
+
+- Force-based stuck-spool theory ("crank hard, mechanical pressure
+  spike pops it loose"). User reports recovery is position-dependent,
+  not force-dependent, so the relevant variable is angular position of
+  the spool, not the magnitude of any pressure transient.
+
+- Sticking relief valve as a prime suspect. It could kill all
+  downstream hydraulics, but it has no mechanism for wheel-position-
+  triggered recovery and no reason to correlate with PTO load.
+
+
+PARTS / SPECS REFERENCE
+-----------------------
+- Pressure relief valve: M30 head, on top of rear lift cover. Cracks at
+  169 bar, full open 180-187 bar. (Service manual hydraulic ch., Fig. 8
+  and Fig. 19 item 4.)
+- HSU (power steering motor assembly): part D10524330. Mounted on
+  steering column bracket D10564510 above front axle on LH side.
+- Steering cylinder: part D10537740, transverse mount on front axle.
+- Pump model: not yet identified — check parts catalog if relevant.
+- E-hydraulic motor controller: Kelly KLS7212M / KLS7218 per parts
+  catalog (drives the BLDC pump motor, not the hydraulic valves).
+  RS-232 diagnostic port (not CAN); use Kelly's free "KLS User Program"
+  to read live state and fault codes.
