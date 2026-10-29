@@ -420,6 +420,10 @@ ChargerState g_charger;
 ChgrCmdState g_chgr_cmd;
 #if defined(ENABLE_KELLY)
 KellyState  g_kelly;   // updated by kellyPoll() in loop(), read when building JSON
+// OR of every error_status decoded since the last SD snapshot. The Kelly is
+// polled ~14x/s but logged at SD_JSON_HZ, so faults that set and clear between
+// log lines (e.g. "Locking" during a pump stall) would otherwise be lost.
+uint16_t    g_kelly_err_seen = 0;
 // Link-health counters, always exposed in /json under "kelly_link" so we can see the
 // serial path even when no valid frame decodes: how many polls fired, how many
 // bytes came back, and the raw hex of the last chunk received.
@@ -1703,6 +1707,7 @@ static void kellyDecodeBlock(const uint8_t* b) {
     g_kelly.brake_switch2     = b[14];
     g_kelly.low_speed         = b[15];
     g_kelly.error_status      = (uint16_t(b[16]) << 8) | b[17];   // big-endian
+    g_kelly_err_seen         |= g_kelly.error_status;
     g_kelly.motor_speed_rpm   = (uint16_t(b[18]) << 8) | b[19];
     g_kelly.phase_current_a   = (uint16_t(b[20]) << 8) | b[21];
     g_kelly.valid             = true;
@@ -2162,6 +2167,7 @@ String buildJson(bool pretty = true, bool minimal = false) {
         k["controller_temp_c"] = g_kelly.controller_temp_c;
         k["low_speed"]         = g_kelly.low_speed;
         k["error_status"]      = g_kelly.error_status;
+        k["error_seen"]        = g_kelly_err_seen;   // sticky since last SD line
         // The remaining monitor fields are decoded but stripped from the BLE
         // (minimal) payload to keep it small; the full WiFi /json carries all
         // 19, which the dashboard's Kelly detail view renders.
@@ -4185,6 +4191,9 @@ static void canServiceTick() {
         if (now - last_json_ms >= 1000 / SD_JSON_HZ) {
             last_json_ms = now;
             sdEnqueueJson(buildJson(/*pretty=*/false, /*minimal=*/false));
+#if defined(ENABLE_KELLY)
+            g_kelly_err_seen = 0;
+#endif
         }
     }
 #endif
