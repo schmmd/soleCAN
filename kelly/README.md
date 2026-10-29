@@ -282,8 +282,75 @@ macOS gotchas, learned the hard way:
 
 The field offsets and scalings come from the `kelly-connect-oss` `PROTOCOL.md`
 and match live readings on this tractor, but scalings can differ by firmware.
-The first time, compare the tool's output against the Kelly app on the same
-controller. If a field is off, correct its offset/scale in `Monitor.decode`.
+The offsets also match the Kelly app's own field table (below). The first time,
+compare the tool's output against the Kelly app on the same controller. If a
+field is off, correct its offset/scale in `Monitor.decode`.
+
+### Monitor block field map
+
+**Offsets — CONFIRMED.** The Kelly app's AC Monitor screen defines each
+field's byte offset into the 48-byte block, its size, and its display range.
+Every offset matches `Monitor.decode`, the `kelly-connect-oss` docs, and live
+readings on this tractor. Two-byte fields
+are big-endian. Ranges are the app's display limits; the app shows the raw
+values with no further scaling.
+
+| Offset | Size | App label | Range |
+|---|---|---|---|
+| 0 | 1 | TPS Pedel | 0–255 (throttle A/D, 0–5 V) |
+| 1 | 1 | Brake Pedel | 0–255 (brake A/D, 0–5 V) |
+| 2 | 1 | Brake Switch | 0/1 |
+| 3 | 1 | Foot Switch | 0/1 |
+| 4 | 1 | Forward Switch | 0/1 |
+| 5 | 1 | Reversed | 0/1 |
+| 6 | 1 | Hall A | 0/1 |
+| 7 | 1 | Hall B | 0/1 |
+| 8 | 1 | Hall C | 0/1 |
+| 9 | 1 | B+ Volt | 0–200 V |
+| 10 | 1 | Motor Temp | 0–150 °C |
+| 11 | 1 | Controller Temp | 0–150 °C |
+| 12 | 1 | Setting Dir | 0 = forward, 1 = reverse |
+| 13 | 1 | Actual Dir | 0 = forward, 1 = reverse |
+| 14 | 1 | Brake Switch2 | 0/1 |
+| 15 | 1 | Low Speed | 0/1 |
+| 16 | 2 | Error Status | 0–65535 bitmask |
+| 18 | 2 | Motor Speed | 0–10000 rpm |
+| 20 | 2 | Phase Current | 0–800 A (RMS) |
+
+Which poll carries which fields:
+
+| Poll | Block bytes | Contents |
+|---|---|---|
+| `0x3A` | 0–15 | Pedals, switches, all three Halls, volts, temps, directions, low speed |
+| `0x3B` | 16–31 | Error status, motor speed, phase current; bytes 22–31 unused |
+| `0x3C` | 32–47 | Unused |
+
+**`0x3C` is polled but ignored by the app — CONFIRMED.** The app polls
+`0x3A`, `0x3B` and `0x3C` as one 48-byte block, but displays only the fields
+above, none of which extends past byte 21. So bytes 22–47 carry no field the
+app knows about. Their meaning is **UNKNOWN**. On this tractor they read all zeros across the 2026-07-02 mowing
+log (803 samples, pump up to 2505 rpm / 72 A, no faults). The ESP32 firmware
+skips `0x3C` for this reason; the Python monitor still polls it and keeps the
+bytes in `raw`.
+
+**Other read commands in the app — UNKNOWN / untested.** The Kelly app also
+knows these commands, which the monitor tool doesn't send. The app's monitor
+screen doesn't use them either. They may return raw sensor
+data, but sending them would mean widening the monitor's read-only allowlist,
+and `0x10` is a watchdog test, so treat them with care.
+
+| Code | App name |
+|---|---|
+| `0x10` | ETS_WATCHDOG_TEST |
+| `0x11` | ETS_CODE_VERSION (used by the monitor tool) |
+| `0x1B` | ETS_A2D_BATCH_READ |
+| `0x1E` | ETS_GPIO_PORT_INPUT (1 data byte) |
+| `0x1F` | ETS_GPIO_PIN_INPUT (2 data bytes) |
+| `0x33` | ETS_MONITOR |
+| `0x34` | ETS_MONITOR1 |
+| `0x35` | ETS_GET_PHASE_I_AD |
+| `0x3A`/`0x3B`/`0x3C` | ETS_USER_MONITOR1/2/3 |
+| `0xF1`–`0xF4` | ETS_FLASH_OPEN / READ / WRITE / CLOSE |
 
 ## The config-dump tool
 
