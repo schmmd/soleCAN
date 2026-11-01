@@ -27,7 +27,7 @@ barrier instead of sharing a reference.
 | C2, C3 | [0.1 µF capacitor](https://www.digikey.com/en/products/detail/vishay-beyschlag-draloric-bc-components/K104K15X7RF5TL2/286538), 2.5 mm pitch | C2 is the regulator output cap; C3 decouples the 3.3 V board side of U1. |
 | R1 | [1 kΩ resistor](https://www.digikey.com/en/products/detail/stackpole-electronics-inc/CF14JT1K00/1741314) | LED current limit. |
 | D1 | [5 mm green LED](https://www.digikey.com/en/products/detail/kingbright/WP7113SGC/1747672) | Lights only when the Kelly is powering pin 1, so it is a "Kelly is awake" indicator. |
-| — | SM 2.5 4-pin plug ([Amazon kit](https://www.amazon.com/dp/B0CLV48D6V)) | Mates with the Kelly's SM-4P port. |
+| — | SM 2.5 4-pin female plug ([Amazon kit](https://www.amazon.com/dp/B0CLV48D6V)) | Mates with the Kelly's SM-4P port. |
 | — | 4 hookup wires to the RejsaCAN | 3V3, GPIO48, GPIO47, GND. |
 
 Tools: fine-tip soldering iron, thin solder, flux, tweezers, multimeter with
