@@ -443,9 +443,11 @@ captures, 2026-05-09):
 Mean decoded current matches dashboard to within ~1 A across the full 0–60 A
 range, exercising the 0x7D→0x7E and 0x7F→0x80 high-byte boundaries. The 1 A
 reading is the only true-idle capture: data[2..3] is constant at 0x7D12 = 1.8 A standby
-draw (BMS + dashboard + DC-DC). Putting the tractor in DRIVE energizes
-inverter/contactor circuitry that adds ~16 A above standby — earlier captures
-sat at ~17 A "idle" for this reason.
+draw (BMS + dashboard + DC-DC). The extra ~13–20 A seen in many stationary
+"idle" captures is the e-hydraulic pump, not drive engagement: paired
+`soc-{70,80,90}-idle` / `-idle-hydraulics` captures read 1.6–2.1 A vs
+14.6–21.6 A at standstill, while `drive-r-n-f.asc` and `range-1-2-3.asc`
+stay at ~1.5 A in every gear and range.
 
 **Pitfall warning.** A naive "data[3] alone, 1 A/bit" decode matches the
 dashboard at idle by coincidence: data[2] sits at 0x7D, the bias cancels, and
