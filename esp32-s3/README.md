@@ -668,6 +668,16 @@ uv run python esp32-s3/device-test.py \
     --ack-interface canalystii --ack-channel 0 \
     --expect-version $(git rev-parse --short HEAD) \
     --ble --interactive
+
+# Same run with a lilycan (github.com/schmmd/lilycan) injecting from CAN B in
+# no-ACK mode: no second ACK adapter on the bench bus. --sd-delete-test
+# permanently deletes the oldest non-active session on the card.
+uv run python esp32-s3/device-test.py \
+    --serial /dev/cu.usbmodem101 \
+    --inject-interface slcan --inject-channel /dev/cu.usbmodemlilycan1 --inject-no-ack \
+    --expect-version $(git rev-parse --short HEAD) \
+    --expect-sd --sd-soak 60 --sd-delete-test \
+    --ble --interactive
 ```
 
 Stages whose prerequisite flag isn't given are reported as SKIP, so the
@@ -684,7 +694,11 @@ Bench notes:
   queue behind it — none of the later fixtures reach the device. Wire any
   second adapter to the bench bus and pass it as
   `--ack-interface`/`--ack-channel`; the suite opens it in normal mode
-  purely to provide hardware ACKs. The suite probes for the no-ACK
+  purely to provide hardware ACKs. Alternatively, inject from a lilycan's
+  CAN B port (`/dev/cu.usbmodemlilycan1`) with `--inject-no-ack`: the suite
+  sends lilycan's `K1` command so that port completes frames without an ACK,
+  and sends `K0` at exit. CAN B is the ESP32's own controller; CAN A (the
+  MCP2515) has no such mode and rejects `K1`. The suite probes for the no-ACK
   condition right after the first frame and skips the decode sweep with a
   single clear failure instead of a wall of misleading ones.
 - **Terminate the bench bus** (~120 Ω between CANH and CANL) and connect

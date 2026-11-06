@@ -33,7 +33,8 @@ Bench requirements for the injection stage (--inject-channel):
     frame forever while the rest queue behind it — the decode sweep cannot
     run. Wire a second ACK-capable adapter to the bench bus and pass it as
     --ack-interface/--ack-channel: the suite opens it in normal mode purely
-    to provide ACKs. The suite probes for the no-ACK condition right after
+    to provide ACKs. Or inject from a lilycan's CAN B port with
+    --inject-no-ack, which needs no ACK node at all. The suite probes for the no-ACK condition right after
     the first frame and skips the decode sweep with one clear failure if
     the bench can't ACK.
   - NEVER run the injection stage with the device plugged into the tractor:
@@ -58,12 +59,23 @@ Examples (from the repo root, where the uv project lives):
       --expect-sd --sd-soak 60 \
       --ble --interactive
 
+  # Same run injecting from lilycan CAN B in no-ACK mode (no ACK adapter).
+  # --sd-delete-test permanently deletes the oldest non-active session.
+  uv run python esp32-s3/device-test.py \
+      --serial /dev/cu.usbmodem101 \
+      --inject-interface slcan --inject-channel /dev/cu.usbmodemlilycan1 \
+      --inject-no-ack \
+      --expect-version $(git rev-parse --short HEAD) \
+      --expect-sd --sd-soak 60 --sd-delete-test \
+      --ble --interactive
+
 Exit code 0 when every executed check passes, 1 otherwise.
 """
 
 from __future__ import annotations
 
 import argparse
+import atexit
 import io
 import json
 import socket
@@ -872,6 +884,13 @@ class MotorInjector(threading.Thread):
             self.stop_evt.wait(0.05)
 
 
+def _quiet(fn, *a) -> None:
+    try:
+        fn(*a)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def open_ack_bus(args):
     """Open the optional ACK adapter in normal mode, with a background drain.
 
@@ -905,9 +924,38 @@ def open_ack_bus(args):
     return ack_bus
 
 
+def lilycan_no_ack(channel: str, on: bool) -> None:
+    """Set lilycan's no-ACK transmit (SLCAN extension K1/K0) on a closed port.
+
+    In no-ACK mode lilycan's can0 (the ESP32 TWAI controller, CAN B) runs in
+    self-test mode: a frame nobody ACKs still completes and is sent once, so a
+    single injector port can feed the listen-only device under test without a
+    second ACK node. The setting is channel-level and sticks until reboot or
+    K0, so it survives python-can's own S/O on connect. Raises on BEL (the
+    port is not lilycan can0, or another client holds the channel open).
+    """
+    import serial  # pyserial — project dependency
+    with serial.serial_for_url(channel, timeout=1.0) as port:
+        port.write(b"C\r")          # drop any session this port left open
+        time.sleep(0.2)
+        port.reset_input_buffer()
+        port.write(b"K1\r" if on else b"K0\r")
+        reply = port.read(1)
+    if reply != b"\r":
+        raise RuntimeError(f"lilycan rejected K{int(on)} on {channel} "
+                           f"(reply {reply!r}): not lilycan can0 / CAN B, "
+                           f"or the channel is open in another client")
+
+
 def open_injector_bus(args):
     """Open the bench injector adapter. Raises on failure (caller reports)."""
     import can
+    if args.inject_no_ack and not getattr(args, "_no_ack_set", False):
+        lilycan_no_ack(args.inject_channel, True)
+        args._no_ack_set = True
+        # Leave the adapter as we found it; best effort, the run is over.
+        atexit.register(lambda: _quiet(lilycan_no_ack, args.inject_channel,
+                                       False))
     channel = args.inject_channel
     if channel.isdigit():
         channel = int(channel)
@@ -1016,6 +1064,7 @@ def stage_inject(args) -> None:
                      "the pack frame keeps repeating with nothing being "
                      "sent — nothing ACKs the injector, so it retransmits "
                      "forever and later fixtures never leave the adapter; "
+                     "inject from lilycan CAN B with --inject-no-ack, or "
                      "wire a second adapter in normal mode to the bench bus "
                      "and pass it as --ack-channel"):
             report("SKIP", "decode sweep, fault latch/clear, and motor "
@@ -1412,6 +1461,9 @@ def main() -> int:
                     help="bench injector channel (enables the CAN decode "
                          "stage), e.g. /dev/cu.usbserial-A50 or 0")
     ap.add_argument("--inject-bitrate", type=int, default=250000)
+    ap.add_argument("--inject-no-ack", action="store_true",
+                    help="injector is lilycan can0 (CAN B): put it in no-ACK "
+                         "transmit mode so no second ACK node is needed")
     ap.add_argument("--ack-interface", default="slcan",
                     help="python-can interface of the ACK adapter")
     ap.add_argument("--ack-channel", metavar="CHANNEL",
@@ -1450,6 +1502,9 @@ def main() -> int:
     ap.add_argument("--slow", action="store_true",
                     help="include the ~12 s socketcand handshake-timeout check")
     args = ap.parse_args()
+    if args.inject_no_ack and args.inject_interface != "slcan":
+        ap.error("--inject-no-ack needs a lilycan injector "
+                 "(--inject-interface slcan)")
 
     print(f"Solectrac device acceptance test — target {args.host}")
     print("Reminder: test one device at a time; every unit broadcasts the "
