@@ -156,10 +156,19 @@ const f=(v,d=1)=>v==null?'–':v.toFixed(d);
 const fi=v=>v==null?'–':(v>=0?'+':'')+v.toFixed(1);
 const ftemp=c=>c==null?'–':Math.round(c*9/5+32)+'°F ('+c+'°C)';
 function kv(k,v){return'<div class="kv"><span class="k">'+k+'</span><span>'+v+'</span></div>';}
+// Keys are the DM1 SPN the cluster displays: service-manual SPNs (each
+// groups several Curtis codes, diagnostic-tool number in parens), plus the
+// operator manual's 12..99 diagnostic-tool numbers.
 var MC_FAULTS={
+  5920:'Controller Over Current (12) / Motor Open (37)',
+  519365:'Current Sensor Fault (13) / EEPROM Failure (46)',
+  8204:'Controller Severe Undertemp (15) / Controller Severe Overtemp (16) / Controller Over Temp Cutback (22)',
+  8086:'Severe B+ Undervoltage (17) / Severe B+ Overvoltage (18) / B+ Undervoltage Cutback (23)',
+  7951:'Motor Temp Hot Cutback (28) / Motor Temp Sensor Fault (29)',
+  7950:'Sin/Cos Sensor Fault (36) / Stall Detected (73) / Encoder Pulse Count Fault (88)',
   12:'Controller Over Current',13:'Current Sensor Fault',
   15:'Controller Severe Undertemp',16:'Controller Severe Overtemp',
-  17:'Severe B+ Undervoltage',18:'Severe B+ Overvoltage',
+  17:'Severe B+ Undervoltage',18:'Severe B+ Overvoltage / Severe KSI Overvoltage',
   22:'Controller Over Temp Cutback',23:'B+ Undervoltage Cutback',
   24:'B+ Overvoltage Cutback',25:'+5V Supply Failure',
   28:'Motor Temp Hot Cutback',29:'Motor Temp Sensor Fault',
@@ -169,11 +178,11 @@ var MC_FAULTS={
   38:'Main Contactor Welded',39:'Main Contactor Did Not Close',
   41:'Throttle Wiper High',42:'Throttle Wiper Low',
   43:'Pot2 Wiper High',44:'Pot2 Wiper Low',
-  45:'Pot Low Over Current',47:'HPD/Sequencing Fault',
-  49:'Parameter Change Fault / PDO Timeout',
-  71:'Stall Detected / Vehicle lock without applying hand brake',
+  45:'Pot Low Over Current',46:'EEPROM Failure',47:'HPD/Sequencing Fault',
+  49:'Parameter Change Fault',51:'Vehicle lock without applying hand brake',
+  72:'PDO Timeout',73:'Stall Detected',
   83:'Driver Supply',87:'Motor Characterization Fault',
-  89:'Encoder Pulse Count Fault / Motor Type Fault',
+  88:'Encoder Pulse Count Fault',89:'Motor Type Fault',
   92:'EM Brake failed to set',99:'Parameter Mismatch'
 };
 var BMS_FAULTS={
