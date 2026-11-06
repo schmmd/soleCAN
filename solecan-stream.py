@@ -129,16 +129,29 @@ BMS_FAULT_DESCRIPTIONS: dict = {
     146: "Maintenance mode status",
 }
 
-# Motor controller fault codes from the same operator-manual table. Some
-# numbers list two distinct conditions; both are kept because the manual
-# gives no way to disambiguate them from the code alone.
+# Motor controller fault codes. The cluster shows the DM1 SPN, which the real
+# controller sends as the service-manual SPN (e.g. 5920); each SPN groups
+# several Curtis codes, listed with their diagnostic-tool number. The
+# operator manual's 12..99 table is those diagnostic-tool numbers; they are
+# kept too, since injected DM1s with those SPNs display as-is. Some numbers
+# list two distinct conditions; the code alone can't disambiguate them.
 MC_FAULT_DESCRIPTIONS: dict = {
+    5920: ["Controller Over Current (12)", "Motor Open (37)"],
+    519365: ["Current Sensor Fault (13)", "EEPROM Failure (46)"],
+    8204: ["Controller Severe Undertemp (15)",
+           "Controller Severe Overtemp (16)",
+           "Controller Over Temp Cutback (22)"],
+    8086: ["Severe B+ Undervoltage (17)", "Severe B+ Overvoltage (18)",
+           "B+ Undervoltage Cutback (23)"],
+    7951: ["Motor Temp Hot Cutback (28)", "Motor Temp Sensor Fault (29)"],
+    7950: ["Sin/Cos Sensor Fault (36)", "Stall Detected (73)",
+           "Encoder Pulse Count Fault (88)"],
     12: ["Controller Over Current"],
     13: ["Current Sensor Fault"],
     15: ["Controller Severe Undertemp"],
     16: ["Controller Severe Overtemp"],
     17: ["Severe B+ Undervoltage"],
-    18: ["Severe B+ Overvoltage"],
+    18: ["Severe B+ Overvoltage", "Severe KSI Overvoltage"],
     22: ["Controller Over Temp Cutback"],
     23: ["B+ Undervoltage Cutback"],
     24: ["B+ Overvoltage Cutback"],
@@ -156,12 +169,16 @@ MC_FAULT_DESCRIPTIONS: dict = {
     43: ["Pot2 Wiper High"],
     44: ["Pot2 Wiper Low"],
     45: ["Pot Low Over Current"],
+    46: ["EEPROM Failure"],
     47: ["HPD/Sequencing Fault"],
-    49: ["Parameter Change Fault", "PDO Timeout"],
-    71: ["Stall Detected", "Vehicle lock without applying hand brake"],
+    49: ["Parameter Change Fault"],
+    51: ["Vehicle lock without applying hand brake"],
+    72: ["PDO Timeout"],
+    73: ["Stall Detected"],
     83: ["Driver Supply"],
     87: ["Motor Characterization Fault"],
-    89: ["Encoder Pulse Count Fault", "Motor Type Fault"],
+    88: ["Encoder Pulse Count Fault"],
+    89: ["Motor Type Fault"],
     92: ["EM Brake failed to set"],
     99: ["Parameter Mismatch"],
 }
@@ -1189,7 +1206,7 @@ def render_faults(state: State, now: float) -> Panel:
     decoded against the vendor BMS error-code table; other bytes
     shown raw when nonzero), while the MC speaks standard J1939 DM1
     where the SPN value equals the dashboard-displayed MC code
-    (e.g. SPN 47 -> "MC47" = HPD/Sequencing Fault).
+    (e.g. SPN 5920 -> Controller Over Current / Motor Open).
     """
     bytes_seen = any(c.value is not None for c in state.fault_bytes)
     faults = active_bms_faults(state) if bytes_seen else []

@@ -979,10 +979,11 @@ data:
 
 #### FECA (DM1) — MC fault channel — CONFIRMED via injection
 
-Standard J1939 DM1 broadcast from SA 0xCA. Empty payload in all
-recorded captures (`00 00 00 00 00 00 FF FF`) because no MC faults
-occurred organically — DM1 is the right channel; it just was never
-populated until injection.
+Standard J1939 DM1 broadcast from SA 0xCA. Empty payload
+(`00 00 00 00 00 00 FF FF`) in all captures from this tractor because no MC
+faults occurred organically; the channel was first populated by injection,
+then confirmed organically on a second e25G (see "SPN values the real
+controller sends" below).
 
 | Bytes | Meaning                                                |
 |-------|--------------------------------------------------------|
@@ -998,6 +999,27 @@ path:
 
 - MC (SA 0xCA): J1939 DM1, SPN = displayed number.
 - BMS (SA 0xF3): proprietary F108 bitmap (continuous broadcast).
+
+**SPN values the real controller sends.** The cluster displays the raw SPN,
+which is **not** the operator manual's 12..99 code. The service manual's MC
+error-code table (§6) has two columns, "Error Code (SPN)" and "Error Code on
+diagnostic tool"; the operator manual's 12..99 list is the second one (the
+Curtis code a 1313/1314 programmer shows). Each SPN groups several Curtis
+codes, so the cluster number narrows to a fault family, not a single fault:
+
+| SPN (cluster shows) | Curtis codes (diagnostic tool) | Status |
+|---|---|---|
+| 5920   | 12 Controller Over Current, 37 Motor Open | **CONFIRMED** — DM1 `00 00 20 17 01 7F FF FF` (SPN 5920, FMI 1, OC 127 = n/a) on a second e25G; cluster displayed 5920 |
+| 519365 | 13 Current Sensor Fault, 46 EEPROM Failure | TENTATIVE (service manual only) |
+| 8204   | 15 Controller Severe Undertemp, 16 Controller Severe Overtemp, 22 Controller Overtemp Cutback | TENTATIVE |
+| 8086   | 17 Severe B+ Undervoltage, 18 Severe B+ Overvoltage, 23 B+ Undervoltage Cutback | TENTATIVE |
+| 7951   | 28 Motor Temp Hot Cutback, 29 Motor Temp Sensor Fault | TENTATIVE |
+| 7950   | 36 Sin/Cos Sensor Fault, 73 Stall Detected, 88 Encoder Pulse Count Fault | TENTATIVE |
+| NA     | 18 (KSI), 24, 25, 31, 36 (Encoder), 38, 39, 41–44, 47, 49, 72, 89, 99 | UNKNOWN — manual lists no SPN; whether the cluster shows anything is unobserved |
+
+Codes 32, 45, 51, 83, 87, 92 appear in the operator manual but not in the
+service-manual table. Injection of SPN = 12..99 still displays those numbers
+as-is, so tools describe both the SPNs above and the 12..99 codes.
 
 **Latch quirk.** The cluster latches DM1 DTCs on receipt and does **not**
 unlatch when DM1 returns to empty. Standard J1939 prescribes DTCs going
@@ -1421,10 +1443,12 @@ one that reads +12 V in both states is +Battery.
 Reproduced from the operator manual for cross-reference. Detecting
 conditions in parentheses are from the service manual DTC
 troubleshooting section; codes without a parenthetical have no
-explicit threshold data in this corpus. The disambiguation in the
-F108F3 and DM1 sections above maps these numbers to bit positions and
-SPN values respectively. The two ranges do not overlap, so a dashboard
-"code 47" is unambiguously MC and "code 124" is unambiguously BMS.
+explicit threshold data in this corpus. The F108F3 section above maps
+the BMS numbers to bit positions; the BMS cluster code is the number below.
+The MC numbers below are the Curtis **diagnostic-tool** codes, not what the
+cluster shows — the cluster shows the DM1 SPN (e.g. 5920); see the SPN table
+in the DM1 section for the mapping. MC SPNs are 4–6 digits, so a cluster code
+in 100..146 is unambiguously BMS.
 
 ### BMS codes (100..146)
 
@@ -1466,7 +1490,7 @@ SPN values respectively. The two ranges do not overlap, so a dashboard
 
 32 codes; F108 has 64 bits, so the layout has plenty of headroom.
 
-### MC codes (12..99)
+### MC codes (12..99, Curtis diagnostic-tool codes)
 
     12  Controller Over Current          (current > limit or phase short; motor phase R < 9 mΩ)
     13  Current Sensor Fault             (sensor reading invalid or absent)
@@ -1509,7 +1533,7 @@ SPN values respectively. The two ranges do not overlap, so a dashboard
     99  Parameter Mismatch
 
 39 entries, 35 distinct S.No. values. Codes 18, 31, 32, 36 each have two
-definitions sharing a number — a numeric code on the dashboard does not
+definitions sharing a number — a diagnostic-tool code does not
 uniquely identify the underlying fault for those four; disambiguation needs
 additional context (which subsystem is implicated by other simultaneous
 symptoms, vendor service-tool readout, etc.). Code 51 is listed out of numeric
